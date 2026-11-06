@@ -34,7 +34,8 @@
 
 1. **hwcomposer**：`drm_hwcomposer`（LineageOS 的 `android_external_drm_hwcomposer`），
    走 DRM/KMS atomic。需要 `BOARD_USES_DRM_HWCOMPSER`（本仓库 BoardConfig 已留好），
-   并提供 `android.hardware.graphics.composer@2.4-service.drm`。
+   并提供 `android.hardware.graphics.composer@2.1-service.drm`（Android 11 的 composer 版本上限是 2.1；
+   不要照抄 13/15 时代的 `@2.4`，18.1 树里没有那个 HIDL 版本）。
 2. **gralloc**：没有 ION，用 **dma-buf heaps + gbm**。上游可用：
    - Mesa 的 `minigbm`（`gralloc_gbm` 通用后端）
    - Android-x86 的 `gbm_gralloc`
@@ -50,7 +51,7 @@
 ## 2. 音频：tinyalsa AIDL HAL
 
 - 内核：`CONFIG_SND_SUN4I_CODEC` + `CONFIG_SND_SUN50I_CODEC_ANALOG`
-- 用户态：AOSP 的 `android.hardware.audio` **AIDL** HAL 骨架 + `libtinyalsa`，
+- 用户态：Android 11 的 `android.hardware.audio.service`（HIDL 5.0）+ `libtinyalsa`，
   按 `/vendor/etc/mixer_paths.xml` 那样的 mixer 表配线圈：
   - 功放：PI5 拉高才出声（DTS 里是 `allwinner,pa-gpios`）
   - 耳机：PI3 检测，74HC4052D 切换

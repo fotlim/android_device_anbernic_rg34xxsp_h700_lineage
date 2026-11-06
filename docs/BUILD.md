@@ -14,7 +14,10 @@ sudo apt install -y git git-lfs ccache rsync gdisk dosfstools mtools \
 curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo && chmod +x ~/bin/repo
 ```
 
-磁盘：源码 ~100 GB，产物 ~60 GB，ccache 建议 50 GB。8 GB 内存建议加 swap。
+磁盘（18.1 实测量级，别按 22.2 的 250 GB 吓自己）：`repo sync --depth 1` 源码 ~70 GB、
+`out/` 产物 ~55 GB；ccache 可选（0–20 GB）。**准备 ≥200 GB 空盘**，256 GB 也行、卡着走。
+注意：WSL 的 ext4.vhdx 必须落在真实空闲空间够的盘上（本机是 `F:\wsl\Ubuntu-22.04`，F: 有 347 GB），
+**不要**把 Android 源码放在 `/mnt/f` 这种 9p 挂载点上——单文件 IO 会慢 5–10 倍。
 
 ## 1. 拉源码
 
@@ -38,6 +41,18 @@ rsync -a --exclude .git  <本仓库>/device/anbernic/rg34xxsp/  \
 > 源文件放在 `device/anbernic/rg34xxsp/kernel/Image`（不入库，见 `.gitignore`）。
 
 ## 2. 编内核（Android 版）
+
+一条命令：`./tools/build-kernel.sh`（`JOBS=12`、`WORK=~/rg34xxsp-kernel` 可调）。
+它在真实内核树上把 31 个 ROCKNIX 补丁打上、注入三处脚手架、拿 ROCKNIX 的 H700 全量
+`linux.aarch64.conf` 当 base 合并本仓库 `kernel/fragment.config`，最后产出 `out/Image` + 两个 DTB。
+
+**实测已验证**（本机 WSL，12 线程）：
+`Image` = 30,959,624 字节（`Linux kernel ARM64 boot executable Image, little-endian, 4K pages`），
+`sun50i-h700-anbernic-rg34xx-sp.dtb` = 35,662 字节（DTB v17）。
+两个必须知道的坑（脱离 ROCKNIX 构建树就会炸）：
+`CONFIG_INITRAMFS_SOURCE` 指向 buildroot 目录 → `usr/initramfs_data.cpio Error 1`；
+`CONFIG_EXTRA_FIRMWARE` 引用 `external-firmware/rtl_bt/*.bin` → `No rule to make target`。
+两者都在脚本里被清空。
 
 严格按 `kernel/README.md`，要点：
 
