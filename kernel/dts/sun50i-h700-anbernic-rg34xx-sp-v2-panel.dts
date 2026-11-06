@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Anbernic RG34XX-SP with the second (v2) panel revision.
+ *
+ * Some units ship with a different 720x480 panel controller; ROCKNIX
+ * handles this with a separate compatible string so both revisions can
+ * coexist in one kernel image.
+ */
+
+#include "sun50i-h700-anbernic-rg34xx-sp.dts"
+
+/ {
+	model = "Anbernic RG34XX-SP (v2 panel)";
+	compatible = "anbernic,rg34xx-sp", "allwinner,sun50i-h700";
+};
+
+&panel {
+	compatible = "anbernic,rg34xx-sp-v2-panel", "panel-mipi-dpi-spi";
+};

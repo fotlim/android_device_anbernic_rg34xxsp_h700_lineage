@@ -8,7 +8,8 @@
 
 | 模块 | 状态 | 说明 |
 |---|---|---|
-| 内核 DTS | ✅ 完成 | `kernel/dts/sun50i-h700-anbernic-rg34xxsp.dts` |
+| 内核 DTS | ✅ 编译通过 | `kernel/dts/sun50i-h700-anbernic-rg34xx-sp.dts`（7.1.2+ROCKNIX 补丁树，dtc rc=0） |
+| 硬件事实 | ✅ 真机实测 | 见 `docs/HARDWARE.md`（引脚/时序/PMIC/分区/无线全部读过原厂固件） |
 | Android 设备树骨架 | ✅ 完成 | 分区、fstab、overlay、按键、init、sepolicy |
 | 内核 Android config | ✅ 提供 fragment | binder/dma-heap/zram 等 |
 | 显示（HWC + gralloc） | ❌ 待做 | 见 §1，最大工作量 |
@@ -20,7 +21,7 @@
 | 震动 | ⚠️ 待接 | PWM2 已在 DTS，写个 vibrator HAL |
 | 休眠/唤醒 | ⚠️ 待调 | H700 suspend 在 Linux 上也不完美，见 §5 |
 | SELinux enforcing | ❌ 待做 | 先 permissive 跑通 |
-| 真机验证 | ❌ **完全没验** | 本仓库作者没有实物机；请以真机日志为准 |
+| 真机验证 | ⏳ 未验证 | 硬件已实测，Android 镜像尚未在真机上跑起来 |
 
 ## 1. 图形：整条 DRM 栈
 
@@ -58,7 +59,9 @@
   需要固件 `rtw88/rtw8821c_fw.bin` → `/vendor/firmware/` 或 `/lib/firmware/`
 - 用户态：AOSP `hardware/interfaces/wifi/aidl/default`（包 wpa_supplicant）+ nl80211
 - `wpa_supplicant.conf` 里 `driver=nl80211`
-- ⚠️ 先确认模块型号（见 `docs/HARDWARE.md` §6），不同批次可能不是 RTL8821CS
+- ✅ 已确认型号：**RTL8821CS**（stock 的 `8821cs` 驱动，SDIO，MAC `68:8f:c9:ca:29:40`）；
+  老 `rtw88` 的 8821CS 支持较新（7.1.x 里是 `rtw88_8821cs`），若 probe 失败可退回 ROCKNIX 用的
+  厂商 RTW 驱动
 
 验收：`iw dev` 有 `wlan0`，`cmd wifi status` 能扫到 AP。
 
@@ -77,7 +80,7 @@
 - 现实做法：用 `s2idle`（`mem_sleep_default=s2idle`）或干脆只做屏幕关断 + CPU idle。
 - 盖子上盖 = `SW_LID`，Android 侧映射为关屏 + 挂起（需要 `PowerManager` 的 lid 支持或
   一个小的 `InputManager` 钩子）。
-- 唤醒源：电源键（AXP717 PEK）、盖子打开（PE7，DTS 里 `wakeup-source`）。
+- 唤醒源：电源键（**AXP2202** PEK）、盖子打开（PE7，DTS 里 `wakeup-source`）。
 
 ## 6. SELinux
 
@@ -93,6 +96,9 @@ adb shell cat /sys/fs/selinux/policy   # 确认策略加载
 ## 7. 里程碑
 
 - **M0**：U-Boot → 内核 → `init` 起来，能 `adb shell`（屏幕可以黑）
+  - 先试**原厂 U-Boot 直接吃 boot.img**（它的 bootargs 带 `androidboot.mode=normal` /
+    `boot_type=1`，是全志 Android 系引导器），省掉换 U-Boot 的风险
+  - 退路：换 sunxi U-Boot + `extlinux.conf`，见 `docs/BUILD.md` §4
 - **M1**：SurfaceFlinger 出画面（哪怕只有开机动画）
 - **M2**：输入可用（能用摇杆操作 recovery / 桌面）
 - **M3**：声音

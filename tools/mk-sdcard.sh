@@ -5,7 +5,7 @@
 #
 #   sudo ./mk-sdcard.sh /dev/sdX --uboot H700_DDR4_u-boot-sunxi-with-spl.bin \
 #        --image-dir ../out/target/product/rg34xxsp \
-#        --dtb ../kernel/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg34xxsp.dtb
+#        --dtb ../kernel/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg34xx-sp.dtb
 #
 # What it does:
 #   1. writes a GPT with boot / misc / metadata / super / userdata
@@ -102,7 +102,7 @@ menu title Anbernic RG34XXSP
 
 label android
     linux /Image
-    devicetree /sun50i-h700-anbernic-rg34xxsp.dtb
+    devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb
     initrd /initrd.img
     append console=ttyS0,115200 earlycon no_console_suspend coherent_pool=1M \
            androidboot.hardware=rg34xxsp androidboot.selinux=permissive \
@@ -130,5 +130,5 @@ else
 fi
 
 sync
-echo "==> done. Put the card in TF1 and power on."
+echo "==> done. Put the card in the TF slot (the second SD slot) and power on."
 echo "    serial console: 115200 8N1 on the UART pads (UART0 / PH)"

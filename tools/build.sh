@@ -65,7 +65,7 @@ Next:
   sudo ./tools/mk-sdcard.sh /dev/sdX --force \
        --uboot H700_DDR4_u-boot-sunxi-with-spl.bin \
        --image-dir out/target/product/rg34xxsp \
-       --dtb ../kernel/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg34xxsp.dtb
+       --dtb ../kernel/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg34xx-sp.dtb
 
 U-Boot binaries: ROCKNIX / Anbernic stock images ship
   H700_DDR3_u-boot-sunxi-with-spl.bin   (vdd-dram = 1.20 V)

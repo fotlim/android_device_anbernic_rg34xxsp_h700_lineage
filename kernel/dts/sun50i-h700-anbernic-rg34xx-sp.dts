@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Anbernic RG34XX-SP (Allwinner H700) - Android/Linux device tree
+ *
+ * The RG34XX-SP is an RG35XX-SP variant: same SoC/PMIC/codec/Wi-Fi bring-up,
+ * different panel (720x480 FOG FJ035FHD05) and an added right analog stick.
+ * Everything else is inherited from the upstream RG35XX-SP board file.
+ *
+ * This file must be built against a kernel tree that carries the ROCKNIX
+ * H700 patch set (see docs/BUILD.md), which provides the display engine
+ * (de/tcon_lcd0/hdmi nodes), the generic "panel-mipi-dpi-spi" panel driver
+ * and the "rocknix-singleadc-joypad" input driver referenced below.
+ */
+
+#include "sun50i-h700-anbernic-rg35xx-sp.dts"
+
+/ {
+	model = "Anbernic RG34XX-SP";
+	compatible = "anbernic,rg34xx-sp", "allwinner,sun50i-h700";
+
+	/* Android passes its real command line through the boot image. */
+	chosen {
+		#address-cells = <1>;
+		#size-cells = <1>;
+	};
+};
+
+/* 3.5" 720x480 RGB panel, driven through the 3-wire SPI init path. */
+&panel {
+	compatible = "anbernic,rg34xx-sp-panel", "panel-mipi-dpi-spi";
+};
+
+/* RG34XX-SP adds a second analog stick: RX/RY are inverted on this unit. */
+&joypad {
+	invert-absrx;
+	invert-absry;
+	amux-count = <4>;
+};

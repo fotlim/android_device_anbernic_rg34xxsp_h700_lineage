@@ -29,13 +29,14 @@ on boot
     # GPU (Mali-G31 devfreq): simple_ondemand, 420-600 MHz.
     write /sys/devices/platform/soc/1800000.gpu/devfreq/1800000.gpu/governor simple_ondemand
 
-    # Backlight: pwm-backlight, max raw value 2499 (see docs/HARDWARE.md).
-    # ~40% so that recovery/early boot is readable; the lights HAL takes over
-    # once SystemServer is up.
-    write /sys/class/backlight/backlight/brightness 1000
+    # Backlight: pwm-backlight on PWM0/PD28. Without a brightness-levels table
+    # the driver exposes a 0..255 scale (the stock BSP's lcd_pwm_max_limit is
+    # likewise 0xff). ~40% so recovery/early boot is readable; the lights HAL
+    # takes over once SystemServer is up.
+    write /sys/class/backlight/backlight/brightness 100
 
-    # Second SD card (TF2 / ROM card) stays powered; harmless if absent.
-    write /sys/class/mmc_host/mmc2/device/power/control auto
+    # Second SD slot (mmc2, PE22 card-detect / PE4 power) is kept powered by
+    # the kernel side (ROCKNIX patch 0159); no init action needed.
 
 on property:sys.boot_completed=1
     # Nothing to settle yet -- placeholder for wifi/bt bring-up hooks.
