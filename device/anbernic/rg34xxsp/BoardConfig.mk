@@ -82,12 +82,18 @@ BOARD_TAGS_OFFSET := 0x00000100
 BOARD_KERNEL_SECOND_OFFSET := 0x00f00000
 BOARD_KERNEL_PAGESIZE := 2048
 
-# NOTE (Android 11): build/make no longer builds the kernel for you -- neither
-# TARGET_KERNEL_SOURCE nor TARGET_PREBUILT_KERNEL is consumed by
-# build/make/core on lineage-18.1 (verified against the branch, see
-# docs/BUILD.md). The kernel from tools/build.sh must be placed at
-#   out/target/product/rg34xxsp/kernel
-# before `mka bootimage` / `mka bacon`. tools/build.sh does exactly that.
+# 内核从哪来：树外编好的 prebuilt。
+#
+# 更正一条早期的错误结论：lineage-18.1 的**设备板**用 vendor/lineage/build/tasks/
+# kernel.mk 编内核，它读的是 TARGET_PREBUILT_KERNEL —— 前提是 TARGET_KERNEL_SOURCE
+# 为空（KERNEL_SRC := $(TARGET_KERNEL_SOURCE)，为空时 wildcard 不命中，走 prebuilt 分支）。
+# 之前说"18.1 不读 TARGET_PREBUILT_KERNEL"只在 build/make 的 board 集合里成立，
+# 而 mka 走的正是 vendor/lineage 那一份。它会先把 prebuilt 拷到 $(PRODUCT_OUT)/kernel。
+#
+# BOARD_KERNEL_IMAGE_NAME 也必填（kernel.mk 拿它拼 arm64/boot/<name>），
+# 而且这一支编的是**未压缩** Image（4K pages），不是 Image.gz。
+BOARD_KERNEL_IMAGE_NAME := Image
+TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/kernel/Image
 
 # console on the debug UART (UART0 / PH) for bring-up. androidboot.selinux=
 # permissive: flip to enforcing only once permissive denials have been

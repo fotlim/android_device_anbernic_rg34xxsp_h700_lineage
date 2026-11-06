@@ -44,6 +44,37 @@
 本机面板是 **v1** 批次（实测 `lcd_driver_name = rg34xxsp_v1`），所以主 DTS 用的就是这一份；
 `anbernic,rg34xx-sp-v2-panel.panel` 一并入库备用。细节见 `kernel/README.md` §7。
 
+### 已经落地的接线（对着 18.1 树逐条验过）
+
+好消息是 **drm_hwcomposer 和 minigbm 本来就在 LineageOS 18.1 的源码树里**
+（`external/drm_hwcomposer`、`external/minigbm`），不需要移植，只需要接对线。
+cuttlefish 用的就是同一组模块，可以直接当范本。
+
+| 角色 | 树里真实存在的模块 | 说明 |
+|---|---|---|
+| HWC | `hwcomposer.drm_minigbm` + `android.hardware.graphics.composer@2.2-service` | drm_hwcomposer 走 DRM/KMS atomic，minigbm 负责 import |
+| 分配器 | `android.hardware.graphics.allocator@4.0-service.minigbm` | cros_gralloc 的 HIDL 外壳，自带 gralloc4 |
+| Mapper | `android.hardware.graphics.mapper@4.0-impl.minigbm` | passthrough，manifest 里要写 `arch="32+64"` |
+
+两个容易踩的坑：
+
+1. **`hw_get_module` 认的是 `ro.hardware.hwcomposer`**，不是 `ro.vendor.hwcomposer`。
+   它拿这个属性的值去找 `/vendor/lib64/hw/hwcomposer.<值>.so`，所以值必须等于
+   模块名的后半段（这里是 `drm_minigbm`）。写错不会报错，只会"找不到 HWC"。
+2. **`manifest.xml` 缺了 HAL 也不会注册**。没有 `DEVICE_MANIFEST_FILE`，服务编出来
+   也白搭，SurfaceFlinger 一直等 composer —— 表现就是开机动画不动。图形三件的
+   fqname 必须与上表的版本号严格一致（2.2 / 4.0 / 4.0）。
+
+模块名不能照抄 13/15 时代的设备树（composer 上限在 11 是 2.4，且
+`composer@2.1-service.drm`、`allocator@4.0-service.gbm` 这类名字在这棵树里
+**不存在**）。仓库里带了个体检脚本：
+
+```bash
+tools/verify-modules.py <aosp-root> [模块名...]
+```
+
+它对着全树的 `Android.bp` / `Android.mk` 核对模块名，写错一个就会列表报 MISSING。
+
 内核侧已经 `CONFIG_DRM_SUN4I` + panfrost，用户态要三件：
 
 1. **hwcomposer**：`drm_hwcomposer`（LineageOS 的 `android_external_drm_hwcomposer`），
@@ -55,9 +86,17 @@
    - Android-x86 的 `gbm_gralloc`
    填 `android.hardware.graphics.allocator@4.0-service.gbm`，
    并把 `ro.hardware.gralloc=gbm`（本仓库已写）。
-3. **GLES**：Mesa **panfrost**。Android 需要一个 `libGLES_mesa` + EGL 平台实现
-   （`gralloc_handle_t` 的 `EGL_NATIVE_BUFFER_ANDROID` 路径）。社区最成熟的参考是
-   Android-x86 的 `mesa-android` 构建。`ro.hardware.egl=mesa`（已写）。
+3. **GLES**：Mesa **panfrost** —— **这一块是目前最大的缺口**。
+   Android 需要 `libEGL_mesa` + `libGLESv2_mesa` 和 EGL 平台实现
+   （走 `gralloc_handle_t` 的 `EGL_NATIVE_BUFFER_ANDROID` 路径）。
+   18.1 树里的 `external/mesa3d` 是**源码 + 只给 host 用的**（`Android.gen.bp`
+   里只有 `mesa_version_defaults`），编不出设备端的 `libEGL_mesa`。
+   所以必须外挂一份带 `android/` 构建目录的 Mesa：社区指的是
+   `leangangchen/panfork-mesa`（`VERSION` = 23.0.0-devel，带 `android/` 子目录），
+   或者 Android-x86 的 `mesa-android`。`ro.hardware.egl=mesa` 已经写进 `vendor.prop`。
+
+   **没有它之前，SurfaceFlinger 起不来**（SF 开局就要 EGL 建 RenderEngine），
+   所以 M1 之前必须先把这一项补上。
 
 验收：`adb shell dumpsys SurfaceFlinger` 能看到 720×480 的 `DisplayDeviceInfo`，
 `dumpsys gfxinfo` 有帧；`/sys/kernel/debug/dri/0/state` 有 plane 活动。

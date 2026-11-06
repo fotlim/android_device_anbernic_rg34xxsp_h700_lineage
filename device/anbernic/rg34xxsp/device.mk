@@ -22,15 +22,13 @@ DEVICE_PATH := device/anbernic/rg34xxsp
 # ---------------------------------------------------------------------------
 # 内核：树外编译的 prebuilt
 # ---------------------------------------------------------------------------
-# Android 11 的 build/make 不编内核，也不读 TARGET_PREBUILT_KERNEL（只有 emulator
-# 的 board 读它）。这一支上唯一有效的方式是把 Image 拷到 $(PRODUCT_OUT)/kernel ——
-# PRODUCT_COPY_FILES 的目标不带分区前缀时就落在 product out 根目录，正好是
-# $(INSTALLED_KERNEL_TARGET) 的位置，boot.img 就从这里取内核。
-LOCAL_KERNEL := $(DEVICE_PATH)/kernel/Image
-
-PRODUCT_COPY_FILES += \
-    $(LOCAL_KERNEL):kernel
-
+# lineage-18.1 的 kernel.mk（vendor/lineage/build/tasks/kernel.mk）在
+# TARGET_KERNEL_SOURCE 为空时会走 prebuilt 分支，把 TARGET_PREBUILT_KERNEL
+# 拷到 $(PRODUCT_OUT)/kernel，boot.img 就从那里取内核（BoardConfig 里已经设了）。
+#
+# 所以这里**不要**再放 `PRODUCT_COPY_FILES += $(LOCAL_KERNEL):kernel`：
+# 两个规则写同一个目标文件，kati 会报 overriding recipe。
+#
 # 内核是单体的（所有驱动内建），不加载 vendor_dlkm。
 
 # ---------------------------------------------------------------------------
