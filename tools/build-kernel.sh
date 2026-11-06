@@ -276,24 +276,30 @@ for _ in 1 2 3 4; do curl -fsS -m 90 -o "$WORK/base.config" "$CONF_URL" && break
 cp "$WORK/base.config" .config
 # INITRAMFS_SOURCE 属于 ROCKNIX 的 buildroot 树，脱离它必炸；Android 自己有 ramdisk。
 ./scripts/config --file .config --set-str INITRAMFS_SOURCE ''
-# 面板固件内建：panel-mipi 驱动 probe 时读 panels/<compatible>.panel，
-# 内建进 Image 就不受 /vendor 挂载时序影响（这是点得亮屏的关键一笔）。
+# 固件内建：不只是面板，还有 WiFi/BT/regdb —— 这几样都有「加载太早」的问题：
+#   panels/*.panel   panel-mipi 在驱动 probe 时就读，早于任何文件系统挂载
+#   regulatory.db    cfg80211 在 subsys_initcall 就 load，同样早于 /vendor
+#   rtw88/*.bin      rtw88 在 netdev bring-up 时才要，但内建省得纠结路径
+#   rtl_bt/*.bin     btrtl 在 HCI open 时要
+# 全部塞进 Image 就彻底摆脱「/vendor 挂得上挂不上」这个变量。
 rm -rf "$SRC/firmware-extra"
-mkdir -p "$SRC/firmware-extra/panels"
-cp -f "$REPO"/kernel/firmware/panels/*.panel "$SRC/firmware-extra/panels/"
-FW_LIST=""
-for f in "$REPO"/kernel/firmware/panels/*.panel; do
-  [ -e "$f" ] || continue
-  FW_LIST="${FW_LIST:+$FW_LIST }panels/$(basename "$f")"
-done
+mkdir -p "$SRC/firmware-extra"
+( cd "$REPO/kernel/firmware" && find . -type f ! -name 'README*' -print0 |
+  while IFS= read -r -d '' f; do
+    rel="${f#./}"
+    mkdir -p "$SRC/firmware-extra/$(dirname "$rel")"
+    cp -f "$f" "$SRC/firmware-extra/$rel"
+  done )
+FW_LIST=$( cd "$SRC/firmware-extra" && find . -type f | sed 's|^\./||' | sort | tr '\n' ' ' )
+FW_LIST="${FW_LIST% }"
 if [ -n "$FW_LIST" ]; then
   ./scripts/config --file .config --set-str EXTRA_FIRMWARE "$FW_LIST"
   ./scripts/config --file .config --set-str EXTRA_FIRMWARE_DIR 'firmware-extra'
   ./scripts/config --file .config --enable FW_LOADER
-  echo "  内建固件：$FW_LIST"
+  echo "  内建固件 $(echo $FW_LIST | wc -w) 个：$FW_LIST"
 else
   ./scripts/config --file .config --set-str EXTRA_FIRMWARE ''
-  echo "  警告：kernel/firmware/panels/ 是空的，屏幕固件没内建"
+  echo "  警告：kernel/firmware/ 是空的，屏幕/WiFi 固件都没内建"
 fi
 cp "$REPO/kernel/fragment.config" "$WORK/fragment.config"
 ARCH=arm64 ./scripts/kconfig/merge_config.sh -m -O . .config "$WORK/fragment.config" >/dev/null
@@ -304,6 +310,10 @@ grep -q '^CONFIG_EXTRA_FIRMWARE_DIR="firmware-extra"' .config \
   || { echo "错误：EXTRA_FIRMWARE_DIR 没设成 firmware-extra"; exit 1; }
 grep -q '^CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD=y' .config \
   || { echo "错误：CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD 没生效（Kconfig 条目没补上？）"; exit 1; }
+for want in 'panels/anbernic,rg34xx-sp-panel.panel' 'rtw88/rtw8821c_fw.bin' 'rtl_bt/rtl8821cs_fw.bin' 'regulatory.db'; do
+  grep -q "^CONFIG_EXTRA_FIRMWARE=.*$want" .config \
+    || { echo "错误：EXTRA_FIRMWARE 里缺 $want"; exit 1; }
+done
 echo "  当前配置：$(grep -c '=y' .config) 个 =y / $(grep -c '=m' .config) 个 =m"
 echo "  屏幕驱动：$(grep '^CONFIG_DRM_PANEL_MIPI=' .config) / $(grep '^CONFIG_EXTRA_FIRMWARE=' .config)"
 echo "  手柄驱动：$(grep '^CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD=' .config)"
