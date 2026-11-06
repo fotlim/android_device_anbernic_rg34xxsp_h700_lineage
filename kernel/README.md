@@ -160,9 +160,13 @@ vspw 5 / vbp 20 / vt 536）。
 `PRODUCT_COPY_FILES` 的 firmware 目录），并在 BoardConfig 里保持 `TARGET_COPY_TO_SYSTEM` 之外
 的 firmware 路径不被 sepolicy 挡掉。
 
-> ROCKNIX 的发行镜像里是带着这些 `.panel` 文件的，但它们在 `ROCKNIX/distribution`
-> 仓库里搜不到（不在 git 里）。所以最省事的来源是：从一份 ROCKNIX H700 镜像的
-> `/usr/lib/firmware/panels/` 里把它拷出来，比对着 datasheet 自己编要靠谱得多。
+> 出处已经定位清楚了：ROCKNIX 的 H700 设备配置
+> `projects/ROCKNIX/devices/H700/config/kernel-firmware.dat` 里明确列着
+> `panels/anbernic,rg34xx-sp-panel.panel`（以及 `panels/anbernic,rg34xx-sp-v2-panel.panel`），
+> 说明这些文件是跟着 ROCKNIX 的 linux-firmware 包发出来的，**不在 git 树里能直接 grep 到的地方**。
+> 所以在拿到二进制之前，最稳的路子是：从一份 ROCKNIX H700 镜像的
+> `/usr/lib/firmware/panels/` 里把它拷出来；其次才是拿 `docs/HARDWARE.md` §2 的时序
+> 自己用 panel-firmware-generator 生成（这样就还得自己搞定初始化命令序列）。
 
 ## 8. 已知要自己确认的东西
 
