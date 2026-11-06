@@ -136,7 +136,35 @@ make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image dtbs
 `fragment.config` 里的符号名会随内核版本变化（AXP717、MUSB、RTW88 的 Kconfig 最善变），
 `merge_config.sh` 会打印哪些符号没被识别——以 `menuconfig` 里实际存在的为准。
 
-## 7. 已知要自己确认的东西
+## 7. ⚠️ 面板固件（点不亮的头号原因）
+
+`panel-mipi.c` **不是硬编码时序的驱动**：它在 probe 时读 DTS 的**第一个** compatible，
+拼成文件名去 `request_firmware()`：
+
+```
+panels/<compatible>.panel      →  本机是 panels/anbernic,rg34xx-sp-panel.panel
+```
+
+读不到就直接 `dev_err_probe(... "Failed to load firmware")` 并返回错误，面板根本不会 probe
+（表现为：背光亮、屏幕黑、`dmesg | grep panel-mipi` 有 Failed to load firmware）。
+
+这个 `.panel` 文件同时装着 **初始化命令序列 + 显示时序 + 面板物理尺寸**，格式是
+`struct panel_firmware_header`（15 字节 magic + version=1）/ `panel_firmware_config`
+（width_mm、height_mm、bus_flags、num_timings）/ `panel_firmware_panel_timing[]`（be16：
+hactive、hfp、hsync、hbp、vactive、vfp、vsync、vbp）+ 命令块。
+可以用 [panel-firmware-generator](https://kikuchan.github.io/panel-firmware-generator/) 生成，
+参数就用 `docs/HARDWARE.md` §2 里实测的值（720×480、26 MHz、hspw 2 / hbp 46 / ht 820、
+vspw 5 / vbp 20 / vt 536）。
+
+放到 Android 侧的话，文件要在 `/vendor/firmware/panels/`（本设备树的 `device.mk` 里
+`PRODUCT_COPY_FILES` 的 firmware 目录），并在 BoardConfig 里保持 `TARGET_COPY_TO_SYSTEM` 之外
+的 firmware 路径不被 sepolicy 挡掉。
+
+> ROCKNIX 的发行镜像里是带着这些 `.panel` 文件的，但它们在 `ROCKNIX/distribution`
+> 仓库里搜不到（不在 git 里）。所以最省事的来源是：从一份 ROCKNIX H700 镜像的
+> `/usr/lib/firmware/panels/` 里把它拷出来，比对着 datasheet 自己编要靠谱得多。
+
+## 8. 已知要自己确认的东西
 
 - **PMIC 型号**：本机实测是 `x-powers,axp2202`（R_I2C `0x34`），而 mainline 驱动只认
   `x-powers,axp717`。两者寄存器/rail 布局一致，ROCKNIX 用 axp717 节点跑这张板且能工作，

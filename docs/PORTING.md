@@ -25,7 +25,12 @@
 
 ## 1. 图形：整条 DRM 栈
 
-这是能不能"点亮"的关键。内核侧已经 `CONFIG_DRM_SUN4I` + panfrost，用户态要三件：
+这是能不能"点亮"的关键。**M1 的前置条件只有一个**：拿到
+`firmware/panels/anbernic,rg34xx-sp-panel.panel`（面板初始化的命令序列 + 时序，驱动
+`panel-mipi.c` 缺它就 probe 失败 → 背光亮、屏黑）。细节见 `kernel/README.md` §7；
+最省事的来源是从一份 ROCKNIX H700 镜像的 `/usr/lib/firmware/panels/` 里拷。
+
+内核侧已经 `CONFIG_DRM_SUN4I` + panfrost，用户态要三件：
 
 1. **hwcomposer**：`drm_hwcomposer`（LineageOS 的 `android_external_drm_hwcomposer`），
    走 DRM/KMS atomic。需要 `BOARD_USES_DRM_HWCOMPSER`（本仓库 BoardConfig 已留好），
