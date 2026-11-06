@@ -9,8 +9,11 @@
 #
 
 # --- face buttons -----------------------------------------------------------
-key 304   BUTTON_A        # BTN_SOUTH  (A,  PA0)
-key 305   BUTTON_B        # BTN_EAST   (B,  PA1)
+# Mapping follows the *printed labels* on the shell (Nintendo-style layout,
+# which is what the kernel DTS encodes): A = EAST (PA0), B = SOUTH (PA1),
+# X = NORTH (PA3), Y = WEST (PA2).
+key 305   BUTTON_A        # BTN_EAST   (A,  PA0)
+key 304   BUTTON_B        # BTN_SOUTH  (B,  PA1)
 key 307   BUTTON_X        # BTN_NORTH  (X,  PA3)
 key 308   BUTTON_Y        # BTN_WEST   (Y,  PA2)
 

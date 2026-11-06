@@ -1,0 +1,8 @@
+# Source files in this repository must stay LF: the shell scripts and Android
+# makefiles are consumed by WSL/Linux, and CRLF breaks both.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.dtb binary
+*.img binary
