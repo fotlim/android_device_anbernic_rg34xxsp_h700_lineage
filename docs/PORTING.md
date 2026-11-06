@@ -12,7 +12,9 @@
 | 硬件事实 | ✅ 真机实测 | 见 `docs/HARDWARE.md`（引脚/时序/PMIC/分区/无线全部读过原厂固件） |
 | Android 设备树骨架 | ✅ 完成 | 分区、fstab、overlay、按键、init、sepolicy |
 | 内核 Android config | ✅ 提供 fragment | binder/dma-heap/zram 等 |
+| 面板固件 | ✅ 已入库 | `kernel/firmware/panels/*.panel`（从 ROCKNIX 镜像提取，内建进内核，见 §1） |
 | 显示（HWC + gralloc） | ❌ 待做 | 见 §1，最大工作量 |
+| 手柄输入驱动 | ✅ 已入库 | `kernel/joypad/`（`rocknix-singleadc-joypad` 收编为内建，需 0004 补丁提供 `joypad_input_g`） |
 | GLES / Vulkan | ⚠️ 可复用 Mesa | panfrost，见 §1 |
 | 音频 | ❌ 待做 | tinyalsa AIDL HAL，见 §2 |
 | Wi-Fi | ❌ 待做 | wpa_supplicant + AIDL wifi HAL，见 §3 |
@@ -25,10 +27,22 @@
 
 ## 1. 图形：整条 DRM 栈
 
-这是能不能"点亮"的关键。**M1 的前置条件只有一个**：拿到
-`firmware/panels/anbernic,rg34xx-sp-panel.panel`（面板初始化的命令序列 + 时序，驱动
-`panel-mipi.c` 缺它就 probe 失败 → 背光亮、屏黑）。细节见 `kernel/README.md` §7；
-最省事的来源是从一份 ROCKNIX H700 镜像的 `/usr/lib/firmware/panels/` 里拷。
+这是能不能"点亮"的关键。
+
+### 前置条件（已解决）
+
+驱动 `panel-mipi.c` 不在源码里写死时序，而是在 probe 时按 DTS **第一个** `compatible`
+拼出文件名 `panels/<compatible>.panel`，缺文件就 `dev_err_probe(... "Failed to load firmware")`
+直接 probe 失败 —— 表现是**背光亮、屏黑**。
+
+本机需要 `panels/anbernic,rg34xx-sp-panel.panel`，已从 ROCKNIX H700 发行镜像
+（`SYSTEM` 分区里的 `usr/lib/kernel-overlays/base/lib/firmware/panels/`）提取，入库在
+`kernel/firmware/panels/`，并由 `tools/build-kernel.sh` 通过 `CONFIG_EXTRA_FIRMWARE`
+**内建进内核**（不能放 `/vendor`：probe 发生在挂载 vendor 之前）。
+文件名必须严格等于 compatible 字符串 —— 逗号和短横线都不能改。
+
+本机面板是 **v1** 批次（实测 `lcd_driver_name = rg34xxsp_v1`），所以主 DTS 用的就是这一份；
+`anbernic,rg34xx-sp-v2-panel.panel` 一并入库备用。细节见 `kernel/README.md` §7。
 
 内核侧已经 `CONFIG_DRM_SUN4I` + panfrost，用户态要三件：
 

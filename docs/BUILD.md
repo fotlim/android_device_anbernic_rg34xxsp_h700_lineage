@@ -34,6 +34,46 @@ rsync -a --exclude .git  <本仓库>/device/anbernic/rg34xxsp/  \
       ~/android/lineage/device/anbernic/rg34xxsp/
 ```
 
+### 施工笔记：代理是把 `repo sync` 卡死的元凶
+
+本机（Windows + WSL2）直连 `android.googlesource.com` 是**被黑洞**的：
+TCP 能发出 SYN，但对端永不回，表现成 `SYN-SENT` 卡到超时。代理（`127.0.0.1:12000`）
+从 WSL 是通的（`curl` 1.7 s 拿到 200）。
+
+坑在于 git 配置里有一条**空值**的接管：
+
+```sh
+git config --global --get-regexp 'http\..*proxy'
+# http.https://android.googlesource.com/.proxy      <-- 空值 = 明确"不要代理"
+```
+
+空字符串不是"没设置"，它对 git 来说是"这条 URL 禁止用代理"，于是所有 fetch 都改直连、
+全部卡在 `SYN-SENT`，`repo sync` 看起来在跑（进程都在、CPU 0%、日志一行不出）、实际零进度。
+
+修法：
+
+```sh
+git config --global --unset-all 'http.https://android.googlesource.com/.proxy'
+git config --global --add http.https://android.googlesource.com/.proxy http://127.0.0.1:12000
+# 验证：应该 1 秒内返回一行
+git ls-remote --tags https://android.googlesource.com/device/generic/x86 android-11.0.0_r46
+```
+
+**判断 sync 到底有没有在动**，别看日志（`repo` 会长时间一声不响），看这两样：
+
+```sh
+ss -tn | awk 'NR>1{print $1}' | sort | uniq -c   # 有 ESTAB 才是真在传，全是 SYN-SENT 就是卡死
+du -sm ~/android/lineage/.repo                   # 隔 10 秒采一次，数字要涨
+```
+
+粘在网络上的进程最后要**杀干净**再重启，否则两套 `repo sync` 会互相踩 `.repo`：
+
+```sh
+pkill -9 -f 'repo-dir=.*android/lineage'
+```
+
+而且一定要用 `setsid nohup repo sync ... &` 起，不然 `wsl.exe` 一退出，整个 sync 跟着 SIGHUP 走。
+
 > **内存决定版本**：这台机器 1 GiB LPDDR3，所以整条链按 **Android 11** 走（`PRODUCT_SHIPPING_API_LEVEL := 30`）。
 > 18.1 的 build/make 不会替你编内核，也不会读 `TARGET_PREBUILT_KERNEL`（已在分支上核对过），
 > 唯一可靠的做法是把编好的 `Image` 放到 `out/target/product/rg34xxsp/kernel` ——
@@ -97,15 +137,36 @@ mka bacon -j$(nproc)
 - 系统在 **eMMC（`mmcblk0`）**，不是"启动 TF 卡"。原厂 GPT 是 8 个全志风格分区，
   `p4 = boot`（64 MiB）放内核和 bootargs，**bootargs 里带 `androidboot.mode=normal`、
   `boot_type=1`、`androidboot.hardware=sun50iw9p1`**。
-- 原厂 U-Boot 是 `2018.05`，属于**全志 Android 系 U-Boot**。这意味着它可能
-  直接能吃经典 Android boot.img —— 这条捷径值得先试，成了就不用换 U-Boot。
+- 原厂 U-Boot 是 `2018.05`，属于**全志 Android 系 U-Boot**。
+
+### 实测：原厂 p4 就是标准 Android boot.img（路线 A 已验证成立）
+
+之前把「原厂 U-Boot 能不能吃 boot.img」列为"待验证"。现在验证完了 ——
+`dd if=/dev/mmcblk0p4 bs=1024 count=64 | base64` 取回头部，解析出来是：
+
+```
+magic         ANDROID!
+kernel_size   17686536 (17.0 MiB)   kernel_addr   0x40080000
+ramdisk_size   2606339 ( 2.5 MiB)   ramdisk_addr  0x42000000
+second_size          0              second_addr   0x40f00000
+tags_addr     0x40000100            page_size           2048
+name          "sun50i_arm64"
+cmdline       (空 —— 真正的 cmdline 在 U-Boot 的 bootargs 里，不在这里)
+```
+
+内核起始偏移 `2048` 处确实是 **arm64 Image**（偏移 +56 是 `41 52 4d 64` = `"ARM\x64"`）。
+
+**结论：原厂 U-Boot 走的就是 `ANDROID!` + booti 这条路，路线 A 不需要任何猜测。**
+`device/anbernic/rg34xxsp/BoardConfig.mk` 的 boot 头几何已经按上表逐字节对齐
+（`BOARD_KERNEL_BASE := 0x40000000` + 四个 offset，`PAGESIZE := 2048`，
+`--board sun50i_arm64`），所以 `mka bootimage` 出来的镜像在格式上和原厂同构。
 
 两条路，按代价排序：
 
 | 路线 | 做法 | 代价 |
 |---|---|---|
-| **A. 先试原厂 U-Boot** | 只替换 `p4` 里的内核/boot，或把 `boot.img` 塞进 boot 分区 | 要先把 Android 镜像搞出来；能不能吃 boot.img 待验证 |
-| **B. 换 sunxi U-Boot** | 把 `H700_DDR{3,4}_u-boot-sunxi-with-spl.bin` 写到 **8 KiB 偏移**，DTS 走 `extlinux.conf` | 需先确认 DDR3/DDR4，选错直接黑屏；快，但不可逆（可回刷原厂） |
+| **A. 先试原厂 U-Boot** ✅**已验证可行** | 把 `boot.img` `dd` 进 `p4` | 只需 android 镜像；U-Boot 层面零改动，**拔卡/回刷即可恢复** |
+| **B. 换 sunxi U-Boot** | 把 `H700_DDR3_u-boot-sunxi-with-spl.bin` 写到 **8 KiB 偏移**，DTS 走 `extlinux.conf` | 需先确认 DDR3/DDR4，选错直接黑屏；可回刷 |
 
 DDR3/DDR4 的确认方法（**已确认，本机是 LPDDR3**）：
 
@@ -120,19 +181,84 @@ BL31    : ATF 平台 sun50i_h616（ATF_PLATFORM="sun50i_h616"）
 产物    : u-boot-sunxi-with-spl.bin → dd bs=1K seek=8（即 8 KiB 偏移）
 ```
 
-两条路线里，**B 是社区验证过的**（ROCKNIX 在这块板上就是这套 U-Boot + bl31），A 只是省事
-但没人验证过 `boot_type=1` 的分支能不能吃标准 Android boot.img，别把它当默认路径。
+两条路线里，**A 现在已经验证了格式前提**（原厂 p4 就是 `ANDROID!` boot.img），
+所以默认就走 A：不碰 U-Boot，只把 boot.img 写进 p4，出问题 `dd` 回原厂镜像即可。
+B 仍然保留，用于"想从 TF 卡启动、eMMC 一个字节都不动"的场合。
 
-## 5. 做卡 / 刷机
+## 5. 刷机：把 boot.img 写进 p4（路线 A，默认）
 
-TF 卡只在"路线 B"或者"想先从卡上跑起来"时才需要：
+既然原厂 p4 就是标准 `ANDROID!` boot.img（见上一节实测），升级 Android 在本机就等于：
+
+```sh
+dd if=boot.img of=/dev/mmcblk0p4
+```
+
+不用动 U-Boot，不用重分区，eMMC 上其它分区一个字节都不碰。整件事两步：先备份，再刷。
+
+### 5.1 先备份（只需要做一次）
+
+```powershell
+# 在掌机上跑。脚本是纯 ASCII，所以可以安全地经 ssh 送进去
+cmd /c "ssh root@192.168.137.30 bash -s < tools\backup-stock.sh"
+
+# 取回宿主机
+scp -r root@192.168.137.30:/mnt/mmc/backup-stock-* F:\dsh-backup\
+```
+
+`min` 模式（默认）只备份"回得去"必需的约 12 MB：GPT 快照、前 2 MiB 引导区、p1/p2/p3/p4/p7。
+那 2 MiB 里 8 KiB 处就是 `0xea0004be` + `eGON.BT0` 的 sunxi SPL/U-Boot —— 换 U-Boot（路线 B）时
+就是覆盖这 8 KiB，所以它必须在备份里。
+`full` 模式额外压 p5/p6（整个原厂系统），约 1.2 GB。
+
+> 宿主机（Windows）没有 zstd。用 7-Zip 解：
+> `& "C:\Program Files\7-Zip\7z.exe" e p4.img.zst -o<目录>`
+> 解出来的大小必须和分区严格一致（p4 = 67,108,864 字节），前 8 字节是 `ANDROID!`。
+
+### 5.2 再刷
+
+```powershell
+.\tools\flash-boot.ps1 -Image out\target\product\rg34xxsp\boot.img
+```
+
+脚本在落盘之前把每一条都验一遍，任何一条不过就直接退出、不写：
+
+| 检查 | 期望值 |
+|---|---|
+| 魔数 | `ANDROID!` |
+| `page_size` | 2048 |
+| 内核基址（由 `kernel_addr` 反推） | `0x40000000` |
+| board name | `sun50i_arm64` |
+| 镜像大小 | ≤ 分区大小 67,108,864 |
+| 设备上 p4 的实际字节数 | 与脚本假设一致（`blockdev --getsize64`） |
+| 回滚镜像 | `-BackupDir` 里必须存在 `p4.img` 或 `p4.img.zst` |
+
+全过之后：`scp` 上传 → 两端比 sha256 → `dd conv=fsync,notrunc` → `sync` →
+`cmp` 逐字节回读比对 → `reboot`。加 `-DryRun` 只检查不写。
+
+### 5.3 刷坏了怎么回去
+
+```powershell
+.\tools\flash-boot.ps1 -Restore
+```
+
+把 `-BackupDir` 里的 `p4.img.zst` 解出来再 `dd` 回 p4，重启就回到原厂。
+
+> 起不来也不至于变砖：这是 Android 的 boot 分区，原厂分区（p5/p6）全程没被碰过；
+> 还有 BROM 的 FEL 兜底，以及拔卡走卡启动（路线 B）。
+
+## 6. 做卡：从 TF 卡启动（路线 B）
+
+只在"想先从卡上跑、eMMC 一个字节都不动"时才需要：
 
 ```sh
 sudo ./tools/mk-sdcard.sh /dev/sdX --force \
-     --uboot H700_DDR4_u-boot-sunxi-with-spl.bin \
+     --uboot H700_DDR3_u-boot-sunxi-with-spl.bin \
      --image-dir ~/android/lineage/out/target/product/rg34xxsp \
      --dtb /tmp/sun50i-h700-anbernic-rg34xx-sp.dtb
 ```
+
+本机是 **DDR3**（`axp2202-dcdc3 = 1200000 µV`），所以 U-Boot 要用 DDR3 那份；
+用 ROCKNIX 的判据就是读这个 regulator 的微伏值：`1200000` → DDR3，`1100000` → DDR4。
 
 脚本做的事：GPT（boot 64M / misc 4M / metadata 16M / super 4G / userdata 剩余）→
 U-Boot 写到 8 KiB → boot 分区放 `extlinux.conf` + `Image` + `dtb` + `initrd.img` →
@@ -142,45 +268,63 @@ U-Boot 写到 8 KiB → boot 分区放 `extlinux.conf` + `Image` + `dtb` + `init
 > 从 TF 卡启动时 TF 会变成 `mmcblk0`（eMMC 变 `mmcblk1` 或 `mmcblk2`，取决于 aliases），
 > **首次卡启动前先 `cat /proc/cmdline` 确认真实设备名**，必要时改 boot 分区里的 `extlinux.conf`。
 
-## 6. 首次启动
+## 7. 首次启动
 
 1. 接 UART0（115200 8N1）看日志，别一上来就指望屏幕。
    - 本机 Windows 侧目前只有蓝牙串口占位，真串口需要 USB-TTL 转接；
      `tools/watch-serial.ps1` 可以带着 COM 口跑。
-2. U-Boot 阶段应该能看到 `extlinux.conf` 被读到、`Image` 被载入。
-3. 内核阶段看：
+2. 内核阶段看：
    - `panel-mipi` / `rocknix-singleadc-joypad` 是否 probe
    - `tcon_lcd0` 是否 `okay`
    - `mmc0` 是否认出 GPT 分区
-4. Android 起来后：
+3. Android 起来后：
    ```sh
    adb devices
    adb shell getprop | grep -E "boot|hardware|display"
    adb shell cat /proc/cmdline
    ```
+4. 还是原厂系统在跑？说明 p4 没写进去，或者 `boot.img` 的大小超过了 `cmdline` 之后的对齐——
+   `flash-boot.ps1` 会在最后那步 `cmp` 就报出来。
 
-## 7. 常见故障对照
+## 8. 常见故障对照
 
 | 现象 | 大概原因 |
 |---|---|
-| 完全不亮、串口无输出 | U-Boot DDR3/DDR4 选错，或 U-Boot 没写到 8 KiB 偏移 |
-| U-Boot 起来但找不到内核 | boot 分区不是 FAT32，或 `extlinux/extlinux.conf` 路径大小写 |
-| 内核 panic `Unable to mount root fs` | `androidboot.boot_devices` 不对（从卡启动时设备名会变），或 ramdisk 没塞进 boot 分区 |
-| 屏幕黑但 adb 在 | 面板没 probe：确认 `panel-mipi.c` 有 `anbernic,rg34xx-sp-panel` 条目；或试 v2 面板 DTB |
-| 背光有、画面没有 | `tcon_lcd0`/`de` 没 `okay`，或 DRM 驱动没编进内核（`0002` 补丁的驱动部分没打上） |
-| 无限重启 | 内核缺 binder，或 `super` 分区大小不足 4 GiB |
+| 完全不亮、串口无输出 | 走了路线 B 而 U-Boot DDR3/DDR4 选错，或没写到 8 KiB 偏移 |
+| 刷完还是原厂系统 | p4 没被改写：`flash-boot.ps1` 的 `cmp` 那步会报；或 boot 分区大小被改过 |
+| 内核 panic `Unable to mount root fs` | `androidboot.boot_devices` 不对（从卡启动时设备名会变），或 ramdisk 没塞进 boot.img |
+| 屏幕黑但 adb 在 | 面板没 probe：确认 `panels/anbernic,rg34xx-sp-panel.panel` 在 `CONFIG_EXTRA_FIRMWARE` 里 |
+| 背光有、画面没有 | `tcon_lcd0`/`de` 没 `okay`，或 `panel-mipi.c` 的 Kconfig/Makefile 条目没补回（驱动没编进内核） |
+| 开机动画走完黑屏 | SurfaceFlinger 起来了但 gralloc/composer 没通，看 `logcat -b all \| grep -i -E "gralloc\|hwc\|composer"` |
+| 无限重启 | 内核缺 binder，或 `super` 分区不足 4 GiB |
 | SELinux 拒绝导致卡启动 | `androidboot.selinux=permissive`，先跑起来再收敛策略 |
 | 摇杆只有一个方向 | `amux-channel-mapping` 或 PI1/PI2 顺序反了 |
+| 手柄完全没反应 | `joypad_input_g` 未导出：`0004` 补丁没打上，`adc-keys.c` 里没有那个全局变量 |
 
-## 8. 刷机（不用拆卡）
+## 9. fastboot（备用）
 
-U-Boot 带 fastboot 时：
+U-Boot 自带 fastboot 时：
 
 ```sh
 # 按住 START 上电，或串口里输入 fastboot usb 0
 fastboot devices
-fastboot flash super out/target/product/rg34xxsp/super.img
+fastboot flash boot out/target/product/rg34xxsp/boot.img
 fastboot reboot
 ```
 
 数据分区第一次开机会被 Android 格式化（`formattable`）。
+
+---
+
+## 附：两个脚本的编码约定
+
+`tools/backup-stock.sh` 是**纯 ASCII**：它要经 ssh 流进掌机，而 Windows 侧的
+`Get-Content | ssh` 会把中文读成 GBK 再编码回去，脚本直接 `unexpected EOF`。
+正确姿势是让 `cmd.exe` 自己重定向，字节原样过去：
+
+```powershell
+cmd /c "ssh root@192.168.137.30 bash -s < tools\backup-stock.sh"
+```
+
+`tools/flash-boot.ps1` 同理是纯 ASCII —— **Windows PowerShell 5.1 读没有 BOM 的 `.ps1`
+时按 ANSI 解码**，中文注释会把整个文件带偏。中文说明一律放这个文档里。

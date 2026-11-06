@@ -41,9 +41,10 @@ on boot
 on property:sys.boot_completed=1
     # Nothing to settle yet -- placeholder for wifi/bt bring-up hooks.
 
-service vendor-vibrator /vendor/bin/hw/vibrator-impl
-    class hal
-    user system
-    group system input
-    disabled
-    # Enabled once a vibrator HAL (PWM2 rumble) exists, see docs/PORTING.md.
+# No vibrator HAL service here on purpose.
+# The rumble motor is a PWM (pwm2 / PH2) driven by rocknix-singleadc-joypad,
+# which exposes it as an FF_RUMBLE input effect on the gamepad plus a
+# /sys/devices/platform/rocknix-singleadc-joypad/rumble_enable gate.
+# Android only reaches it through a vibrator HAL; until one is written (see
+# docs/PORTING.md) declaring a service that points at a non-existent binary
+# just produces a failed exec in every boot log.

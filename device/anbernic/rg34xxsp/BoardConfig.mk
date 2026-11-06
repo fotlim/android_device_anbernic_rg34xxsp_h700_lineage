@@ -54,13 +54,33 @@ TARGET_NO_RADIOIMAGE := true
 # ---------------------------------------------------------------------------
 # Boot image
 # ---------------------------------------------------------------------------
-# Deliberately NOT the GKI / vendor_boot scheme: sunxi U-Boot (v2026.01,
-# anbernic_rg35xx_h700_lpddr3_defconfig) parses a classic header-v0 Android
-# boot image and booti's into it.  The DTB is loaded separately from the FAT
-# boot partition (extlinux.conf), see docs/BUILD.md.
+# Deliberately NOT the GKI / vendor_boot scheme: U-Boot parses a classic
+# header-v0 Android boot image and booti's into it.
+#
+# The geometry below is copied byte-for-byte from the stock boot image that
+# ships in /dev/mmcblk0p4 on this unit (verified by dd + parsing the header,
+# see docs/BUILD.md "实测：原厂 p4 就是标准 Android boot.img"):
+#
+#   magic         ANDROID!
+#   kernel_size   17686536   kernel_addr   0x40080000
+#   ramdisk_size   2606339   ramdisk_addr  0x42000000
+#   second_size          0   second_addr   0x40f00000
+#   tags_addr     0x40000100 page_size     2048
+#   name          sun50i_arm64
+#
+# Those addresses decompose into base 0x40000000 plus per-component offsets,
+# which is exactly how mkbootimg composes them:
+#   kernel  = base + 0x00080000 = 0x40080000
+#   ramdisk = base + 0x02000000 = 0x42000000
+#   tags    = base + 0x00000100 = 0x40000100
+#   second  = base + 0x00f00000 = 0x40f00000
 BOARD_BOOT_HEADER_VERSION := 0
-BOARD_KERNEL_BASE := 0x40080000
-BOARD_KERNEL_PAGESIZE := 4096
+BOARD_KERNEL_BASE := 0x40000000
+BOARD_KERNEL_OFFSET := 0x00080000
+BOARD_RAMDISK_OFFSET := 0x02000000
+BOARD_TAGS_OFFSET := 0x00000100
+BOARD_KERNEL_SECOND_OFFSET := 0x00f00000
+BOARD_KERNEL_PAGESIZE := 2048
 
 # NOTE (Android 11): build/make no longer builds the kernel for you -- neither
 # TARGET_KERNEL_SOURCE nor TARGET_PREBUILT_KERNEL is consumed by
@@ -81,7 +101,10 @@ BOARD_KERNEL_CMDLINE := \
     androidboot.selinux=permissive \
     androidboot.boot_devices=mmcblk0
 
-BOARD_MKBOOTIMG_ARGS += --board sun50i_h700
+# --board fills the 16-byte "name" field. Stock writes "sun50i_arm64"; a vendor
+# U-Boot of this vintage may well print or even check it, so we match it rather
+# than inventing a name of our own.
+BOARD_MKBOOTIMG_ARGS += --board sun50i_arm64
 BOARD_BOOTIMAGE_PARTITION_SIZE := 67108864   # 64 MiB
 
 # No separate recovery partition: recovery lives inside boot.img.
