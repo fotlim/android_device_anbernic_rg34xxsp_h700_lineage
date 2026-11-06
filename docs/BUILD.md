@@ -1,6 +1,6 @@
 # 构建与刷机流程
 
-目标：**LineageOS 22.2（Android 15）**，设备名 `rg34xxsp`，全部在 WSL / Linux 里做。
+目标：**LineageOS 18.1（Android 11）**，设备名 `rg34xxsp`，全部在 WSL / Linux 里做。
 下面的命令都在 WSL Ubuntu（22.04+）里跑，Windows 侧只用来插卡。
 
 ## 0. 准备
@@ -20,7 +20,7 @@ curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo && chmo
 
 ```sh
 mkdir -p ~/android/lineage && cd ~/android/lineage
-repo init -u https://github.com/LineageOS/android.git -b lineage-22.2 --git-lfs
+repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --git-lfs
 repo sync -c -j8 --force-sync --no-clone-bundle --no-tags
 ```
 
@@ -30,6 +30,12 @@ repo sync -c -j8 --force-sync --no-clone-bundle --no-tags
 rsync -a --exclude .git  <本仓库>/device/anbernic/rg34xxsp/  \
       ~/android/lineage/device/anbernic/rg34xxsp/
 ```
+
+> **内存决定版本**：这台机器 1 GiB LPDDR3，所以整条链按 **Android 11** 走（`PRODUCT_SHIPPING_API_LEVEL := 30`）。
+> 18.1 的 build/make 不会替你编内核，也不会读 `TARGET_PREBUILT_KERNEL`（已在分支上核对过），
+> 唯一可靠的做法是把编好的 `Image` 放到 `out/target/product/rg34xxsp/kernel` ——
+> `device.mk` 里的 `PRODUCT_COPY_FILES += $(LOCAL_KERNEL):kernel` 就是干这个的，
+> 源文件放在 `device/anbernic/rg34xxsp/kernel/Image`（不入库，见 `.gitignore`）。
 
 ## 2. 编内核（Android 版）
 

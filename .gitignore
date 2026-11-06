@@ -1,0 +1,8 @@
+# prebuilt kernel image (built by tools/build.sh, see docs/BUILD.md)
+device/anbernic/rg34xxsp/kernel/Image
+device/anbernic/rg34xxsp/kernel/Image.gz
+# dtb build outputs
+kernel/dts/*.dtb
+kernel/dts/*.dts.tmp
+# patched kernel worktree
+kernel/linux/

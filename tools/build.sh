@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# build.sh -- build LineageOS 22.2 (Android 15) for the Anbernic RG34XXSP.
+# build.sh -- build LineageOS 18.1 (Android 11) for the Anbernic RG34XXSP.
 #
 # Runs inside WSL/Linux. Prereqs: repo, git, ccache, and ~200 GB free space.
 #
@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-BRANCH="${BRANCH:-lineage-22.2}"
+BRANCH="${BRANCH:-lineage-18.1}"
 TREE="${TREE:-$HOME/android/lineage}"
 JOBS="${JOBS:-$(nproc)}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"

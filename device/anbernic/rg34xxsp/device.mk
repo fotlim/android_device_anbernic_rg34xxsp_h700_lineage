@@ -1,7 +1,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-# device.mk -- Anbernic RG34XXSP
+# device.mk -- Anbernic RG34XXSP (LineageOS 18.1 / Android 11)
 #
 
 $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
@@ -10,17 +10,21 @@ $(call inherit-product, $(SRC_TARGET_DIR)/product/updatable_apex.mk)
 DEVICE_PATH := device/anbernic/rg34xxsp
 
 # ---------------------------------------------------------------------------
-# Kernel (prebuilt, built out of tree -- see kernel/README.md)
+# Kernel (prebuilt, built out of tree -- see kernel/README.md and tools/build.sh)
 # ---------------------------------------------------------------------------
-TARGET_KERNEL_DIR ?= device/anbernic/rg34xxsp-kernel
-LOCAL_KERNEL := $(TARGET_KERNEL_DIR)/Image
+# Android 11's build/make does not build kernels and does not read
+# TARGET_PREBUILT_KERNEL either (verified on lineage-18.1: only the emulator
+# board reads it). The one mechanism that works on this branch is copying the
+# Image to $(PRODUCT_OUT)/kernel -- a PRODUCT_COPY_FILES destination without a
+# partition prefix lands at the product out root, which is exactly the
+# $(INSTALLED_KERNEL_TARGET) path build/make/core/Makefile uses for boot.img.
+LOCAL_KERNEL := $(DEVICE_PATH)/kernel/Image
 
 PRODUCT_COPY_FILES += \
     $(LOCAL_KERNEL):kernel
 
-# The kernel is monolithic; nothing is loaded from vendor_dlkm.
-# (If you later split drivers out, set BOARD_VENDOR_KERNEL_MODULES and use the
-#  vendor_dlkm partition instead of adding to PRODUCT_COPY_FILES here.)
+# The kernel is monolithic; nothing is loaded from vendor_dlkm. If drivers are
+# split out later, use BOARD_VENDOR_KERNEL_MODULES + vendor_dlkm instead.
 
 # ---------------------------------------------------------------------------
 # Overlays / configuration
@@ -41,7 +45,7 @@ PRODUCT_AAPT_CONFIG := normal
 PRODUCT_AAPT_PREF_CONFIG := hdpi
 PRODUCT_LOCALES := en-US
 
-PRODUCT_SYSTEM_PROPERTIES += \
+PRODUCT_PROPERTY_OVERRIDES += \
     ro.sf.lcd_density=240 \
     ro.zygote=zygote64_32 \
     ro.hardware.egl=mesa \
@@ -49,10 +53,9 @@ PRODUCT_SYSTEM_PROPERTIES += \
     ro.opengles.version=196610 \
     ro.hardware.vulkan=panfrost \
     ro.vendor.hwcomposer=drm \
-    ro.boot.qemu=0 \
     persist.sys.zram_enabled=1
 
-PRODUCT_VENDOR_PROPERTIES += \
+PRODUCT_PROPERTY_OVERRIDES += \
     vendor.zram.size=75% \
     ro.vendor.product.rg34xxsp=true
 
@@ -63,22 +66,18 @@ PRODUCT_PACKAGES += \
     libdrm
 
 # Graphics / media / audio HALs are not part of AOSP for Allwinner, they have to
-# be added by this port. Uncomment each one as it becomes available:
+# be added by this port. Android 11 service names, uncomment as each one exists:
 #
-#   android.hardware.graphics.composer@2.4-service.drm    # drm_hwcomposer
-#   android.hardware.graphics.allocator@4.0-service.gbm   # gbm gralloc
-#   android.hardware.audio.service                        # tinyalsa AIDL HAL
-#   android.hardware.wifi@1.6-service                     # wpa_supplicant HAL
-#   android.hardware.bluetooth@1.1-service.rtk            # UART/H5 bluetooth
+#   android.hardware.graphics.composer@2.1-service.drm   # drm_hwcomposer
+#   android.hardware.graphics.allocator@4.0-service.gbm  # gbm gralloc
+#   android.hardware.audio.service                       # tinyalsa HIDL 5.0
+#   android.hardware.wifi@1.5-service                    # wpa_supplicant HAL
+#   android.hardware.bluetooth@1.1-service.rtk           # UART/H5 bluetooth
 #
 # See docs/PORTING.md for the exact upstream projects they come from.
 
 PRODUCT_USE_DYNAMIC_PARTITIONS := true
 PRODUCT_BUILD_SUPER_PARTITION := true
-PRODUCT_SHIPPING_API_LEVEL := 34
-
-# 32-bit apps are supported, keep the 32-bit zygote.
-TARGET_SUPPORTS_32_BIT_APPS := true
 
 # Recovery UI defaults that suit a 720x480 panel.
 TARGET_RECOVERY_UI_MARGIN_HEIGHT := 56

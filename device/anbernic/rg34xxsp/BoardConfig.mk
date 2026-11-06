@@ -2,17 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # BoardConfig.mk -- Anbernic RG34XXSP (Allwinner H700 / sun50i-h700)
+# Target: LineageOS 18.1 (Android 11).  See docs/HARDWARE.md + docs/BUILD.md.
 #
-# Hardware summary (see docs/HARDWARE.md for sources / confidence):
+# Everything in here that looks "measured" comes from the stock Ubuntu 22.04
+# firmware this unit shipped with (BSP kernel 4.9.170) -- probe scripts and the
+# decompiled DT live in docs/HARDWARE.md:
 #   SoC      : Allwinner H700, 4x Cortex-A53 @ 0.48-1.416 GHz, Mali-G31 MP2
-#   Panel    : 720x480 landscape 3:2, MIPI-DPI-over-SPI ("panel-mipi-dpi-spi"),
-#              24-bit RGB, PWM0 (PD28) backlight, VDD on PI15, reset PI14
-#   RAM      : LPDDR4 (1 GiB on the units seen so far -- verify your board)
-#   Input    : "H700 Gamepad" 0019:484b:14df:0100, 2 analog sticks over a
-#              2-bit GPIO ADC mux, 17 buttons, PE7 lid switch, PWM2 rumble
-#   WiFi/BT  : RTL8821CS on MMC1 + UART1 (inherited from RG35XX Plus wiring)
-#   PMIC     : AXP717 on R_I2C (0x34), RTC PCF8563 on R_I2C (0x51)
-#   Storage  : OS from SD/eMMC on MMC0 (mmcblk0), second SD card on MMC2
+#   RAM      : 1 GiB LPDDR3 (axp2202-dcdc3 = 1.2 V -> DDR3 U-Boot variant)
+#   Panel    : 720x480 landscape 3:2, RGB 24-bit @26 MHz, "panel-mipi" driver
+#              (SPI: PI9 SCK / PI10 MOSI / PI8 CS, PI14 reset, PI15 power,
+#               PWM0 backlight on PD28).  Needs panels/<compatible>.panel fw.
+#   Input    : "H700 Gamepad" 0019:484b:14df:0100, 2 analog sticks (GPADC mux),
+#              17 buttons, PE7 lid switch, PWM2 rumble
+#   WiFi/BT  : RTL8821CS on SDIO (MMC1) + BT over UART1 (PG16/17/19)
+#   PMIC     : AXP2202 on R_I2C (0x34) -- NOT AXP717, needs the ROCKNIX kernel
+#              patch set (see kernel/README.md); RTC PCF8563 on R_I2C (0x51)
+#   Storage  : eMMC (MMC0) + TF slot (MMC2, PE22 card-detect, PE4 power)
 #
 
 DEVICE_PATH := device/anbernic/rg34xxsp
@@ -36,36 +41,37 @@ TARGET_2ND_CPU_VARIANT_RUNTIME := cortex-a53
 TARGET_USES_64_BIT_BINDER := true
 TARGET_SUPPORTS_64_BIT_APPS := true
 TARGET_SUPPORTS_32_BIT_APPS := true
-TARGET_CPU_SMP := true
 
 TARGET_BOARD_PLATFORM := sun50i_h700
 TARGET_BOOTLOADER_BOARD_NAME := sun50i_h700
 
-# No vendor bootloader lives in a partition image: U-Boot (sunxi SPL + TF-A)
-# is written raw at 8 KiB into the boot medium, exactly like Anbernic's stock
-# Linux image and ROCKNIX do it.
+# No vendor bootloader lives in a partition image: U-Boot (sunxi SPL + TF-A
+# bl31) is written raw at 8 KiB into the boot medium, exactly like Anbernic's
+# stock image and ROCKNIX do it.
 TARGET_NO_BOOTLOADER := true
 TARGET_NO_RADIOIMAGE := true
-
-# This product has no cellular modem and no camera.
-BOARD_WITHOUT_RADIO := true
-USE_CAMERA_STUB := false
 
 # ---------------------------------------------------------------------------
 # Boot image
 # ---------------------------------------------------------------------------
-# Deliberately NOT the GKI / vendor_boot scheme. U-Boot for sunxi is most
-# reliable with a classic header-v0 Android boot image (CONFIG_ANDROID_BOOT_IMAGE
-# in U-Boot parses it and hands over to booti). The DTB is loaded separately
-# from the FAT boot partition via extlinux.conf, see docs/BUILD.md.
+# Deliberately NOT the GKI / vendor_boot scheme: sunxi U-Boot (v2026.01,
+# anbernic_rg35xx_h700_lpddr3_defconfig) parses a classic header-v0 Android
+# boot image and booti's into it.  The DTB is loaded separately from the FAT
+# boot partition (extlinux.conf), see docs/BUILD.md.
 BOARD_BOOT_HEADER_VERSION := 0
-BOARD_KERNEL_IMAGE_NAME := Image
 BOARD_KERNEL_BASE := 0x40080000
 BOARD_KERNEL_PAGESIZE := 4096
 
-# console on the debug UART (UART0 / PH) so that a UART-USB adapter can be
-# used during bring-up. androidboot.selinux=permissive: flip to "enforcing"
-# only once the device actually boots and permissive denials are collected.
+# NOTE (Android 11): build/make no longer builds the kernel for you -- neither
+# TARGET_KERNEL_SOURCE nor TARGET_PREBUILT_KERNEL is consumed by
+# build/make/core on lineage-18.1 (verified against the branch, see
+# docs/BUILD.md). The kernel from tools/build.sh must be placed at
+#   out/target/product/rg34xxsp/kernel
+# before `mka bootimage` / `mka bacon`. tools/build.sh does exactly that.
+
+# console on the debug UART (UART0 / PH) for bring-up. androidboot.selinux=
+# permissive: flip to enforcing only once permissive denials have been
+# collected on hardware.
 BOARD_KERNEL_CMDLINE := \
     console=ttyS0,115200 \
     earlycon \
@@ -82,7 +88,7 @@ BOARD_BOOTIMAGE_PARTITION_SIZE := 67108864   # 64 MiB
 BOARD_USES_RECOVERY_AS_BOOT := true
 TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/fstab.rg34xxsp
 
-# A/B is not used; the handheld boots one slot from removable media.
+# A/B is not used; the handheld boots one slot.
 AB_OTA_UPDATER := false
 BOARD_AVB_ENABLE := false
 
@@ -90,17 +96,16 @@ BOARD_AVB_ENABLE := false
 # Partitions
 # ---------------------------------------------------------------------------
 # Layout produced by tools/mk-sdcard.sh (GPT, so Android gets /dev/block/by-name):
-#   p1 boot       64 MiB   FAT32  -> u-boot distro boot: extlinux.conf + Image + dtb
+#   p1 boot       64 MiB   FAT32  -> U-Boot distro boot: extlinux.conf + Image + dtb
 #   p2 misc        4 MiB
 #   p3 metadata   16 MiB
 #   p4 super       4 GiB   dynamic: system system_ext product vendor
 #   p5 userdata   remainder
 BOARD_USES_METADATA_PARTITION := true
-BOARD_METADATAIMAGE_PARTITION_SIZE := 16777216
 
 TARGET_USERIMAGES_USE_EXT4 := true
 BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := ext4
-BOARD_USERDATAIMAGE_PARTITION_SIZE := 2147483648  # only used for "make userdataimage"
+BOARD_USERDATAIMAGE_PARTITION_SIZE := 2147483648  # only for "make userdataimage"
 
 BOARD_SYSTEMIMAGE_FILE_SYSTEM_TYPE := ext4
 BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE := ext4
@@ -111,9 +116,9 @@ TARGET_COPY_OUT_PRODUCT := product
 TARGET_COPY_OUT_SYSTEM_EXT := system_ext
 TARGET_COPY_OUT_VENDOR := vendor
 
-TARGET_USE_DYNAMIC_PARTITIONS := true
+# Dynamic partitions are enabled with PRODUCT_USE_DYNAMIC_PARTITIONS := true in
+# lineage_rg34xxsp.mk (Android 11 has no TARGET_USE_DYNAMIC_PARTITIONS).
 BOARD_BUILD_SUPER_IMAGE_BY_DEFAULT := true
-BOARD_SUPER_IMAGE_IN_UPDATE_PACKAGE := true
 BOARD_SUPER_PARTITION_METADATA_DEVICE := super
 BOARD_SUPER_PARTITION_SIZE := 4294967296             # 4 GiB
 BOARD_SUPER_PARTITION_GROUPS := rg34xxsp
@@ -121,15 +126,15 @@ BOARD_RG34XXSP_DYNAMIC_PARTITIONS_PARTITION_LIST := \
     system system_ext product vendor
 BOARD_RG34XXSP_DYNAMIC_PARTITIONS_SIZE := 4290772992 # 4 GiB - 4 MiB slot metadata
 
-# No vendor_dlkm / system_dlkm: the kernel is monolithic (all drivers built
-# in), which keeps the boot chain simple on this class of device.
+# No vendor_dlkm / system_dlkm on Android 11: the kernel is monolithic (all
+# drivers built in), which keeps the boot chain simple on this class of device.
 
 # ---------------------------------------------------------------------------
 # Graphics / media
 # ---------------------------------------------------------------------------
 # There is no Allwinner HWC for mainline DRM. The working community recipe is
-#   hwcomposer  : drm_hwcomposer (DRM/KMS atomic)
-#   gralloc     : gbm-based gralloc (libgralloc_drm)
+#   hwcomposer  : drm_hwcomposer over DRM/KMS atomic (composer 2.1 on 18.1)
+#   gralloc     : gbm/dma-buf-heap based gralloc (allocator@4.0)
 #   GLES        : Mesa panfrost (Mali-G31 MP2)
 # See docs/PORTING.md -- this is the part of the port that needs the most work.
 BOARD_USES_ALSA_AUDIO := true
@@ -157,4 +162,3 @@ BOARD_VENDOR_SEPOLICY_DIRS += $(DEVICE_PATH)/sepolicy/vendor
 # Misc
 # ---------------------------------------------------------------------------
 BOARD_FLASH_BLOCK_SIZE := 4096
-TARGET_USES_ION := false          # dma-buf heaps (CONFIG_DMABUF_HEAPS) instead

@@ -1,6 +1,6 @@
 # Anbernic RG34XX-SP — Android 设备树
 
-> 给 Allwinner H700 翻盖掌机 **RG34XX-SP** 做的 **LineageOS 22.2 / Android 15** 设备树 + 内核 DTS。
+> 给 Allwinner H700 翻盖掌机 **RG34XX-SP** 做的 **LineageOS 18.1 / Android 11** 设备树 + 内核 DTS。
 > 官方没有 Android BSP，所以这份东西是从 mainline Linux + ROCKNIX 的 H700 支持反推、
 > 再用真机（Anbernic 原厂 Ubuntu 固件）逐项校验出来的。
 
@@ -86,7 +86,11 @@ sudo ./tools/mk-sdcard.sh /dev/sdX --force --uboot H700_DDR3_u-boot-sunxi-with-s
 
 ## 设计上的决定（和原因）
 
-1. **目标选 LineageOS 22.2**：这台机器的"同类用户"都在跑 ROCKNIX（Linux），
+1. **目标选 LineageOS 18.1（Android 11），不是 22.2**：这台机器只有 **1 GiB LPDDR3**。
+   Android 13/15 在 1 GiB 上光是冷启动之后系统就只剩个位数 MiB 空闲，桌面动画都会掉帧；
+   Android 11 + `ro.config.low_ram=true`（本仓库已开）是在这个内存档位上还「能用」的上限。
+   想要更轻就往 17.1（Android 10）退，device 树只差 product 继承和 API level。
+：这台机器的"同类用户"都在跑 ROCKNIX（Linux），
    而 Android 侧唯一有参考价值的社区产物是 Lineage 设备树；用户现有构建脚本也是 Lineage。
 2. **DTS 走 include，不手写整份板级文件**：上游 mainline 已经有
    `rg35xx-2024 → plus → sp` 三层继承，ROCKNIX 又在其上加了面板/手柄节点，
