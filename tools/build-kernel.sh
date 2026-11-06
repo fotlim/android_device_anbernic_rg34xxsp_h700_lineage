@@ -30,6 +30,10 @@ PKG_URL="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"
 RK_BASE="https://raw.githubusercontent.com/ROCKNIX/distribution/next/projects/ROCKNIX/devices/H700"
 CONF_URL="$RK_BASE/linux/linux.aarch64.conf"
 PATCH_BASE="$RK_BASE/patches/linux"
+# 还有一组「所有设备通用」的 mainline 补丁，放在 packages/linux/patches/mainline。
+# 其中 0004 定义了 joypad_input_g —— 树外手柄驱动 extern 引用的就是它，缺了编不过。
+ML_BASE="https://raw.githubusercontent.com/ROCKNIX/distribution/next/projects/ROCKNIX/packages/linux/patches/mainline"
+JOYPAD_REV="005033d1ddd8746c771f2c81f1174f2d892541c9"
 WORK="${WORK:-$HOME/rg34xxsp-kernel}"
 JOBS="${JOBS:-$(nproc)}"
 CROSS="${CROSS:-aarch64-linux-gnu-}"
@@ -73,6 +77,13 @@ patches=(
   0901-dts-rg35xx-2024-fix-led-1-color.patch
 )
 
+# 通用补丁（packages/linux/patches/mainline），必须在 H700 那组之前打。
+ml_patches=(
+  0003-pwm-add-pwm_set_period.patch
+  0004-input-adc-keys-redirect-keycode-316-to-rocknix-joypa.patch
+  0005-Bluetooth-btrtl-Add-the-support-for-RTL8733BU.patch
+)
+
 say() { printf '\n=== %s ===\n' "$*"; }
 
 for bin in git curl make "${CROSS}gcc"; do
@@ -91,7 +102,12 @@ else
   echo "已存在，跳过 clone"
 fi
 
-say "2/6 ROCKNIX H700 补丁"
+say "2/6 ROCKNIX 补丁（3 个通用 + ${#patches[@]} 个 H700）"
+for p in "${ml_patches[@]}"; do
+  out="$PDIR/ml-$p"
+  [ -s "$out" ] && [ "$(head -c 12 "$out" 2>/dev/null)" != "404: Not Fou" ] && continue
+  for _ in 1 2 3 4; do curl -fsS -m 60 -o "$out" "$ML_BASE/$p" && break; sleep 2; done
+done
 for p in "${patches[@]}"; do
   out="$PDIR/$p"
   [ -s "$out" ] && [ "$(head -c 12 "$out" 2>/dev/null)" != "404: Not Fou" ] && continue
@@ -100,7 +116,11 @@ done
 
 say "3/6 打补丁（--reject：上游上下文漂移，被拒的部分由脚手架补齐）"
 cd "$SRC"
-git checkout -q -- arch/arm64/boot/dts/allwinner 2>/dev/null || true
+git checkout -q -- arch/arm64/boot/dts/allwinner drivers/input 2>/dev/null || true
+for p in "${ml_patches[@]}"; do
+  msg=$(git apply --reject --whitespace=nowarn "$PDIR/ml-$p" 2>&1 || true)
+  echo "$msg" | grep -q 'patch failed' && echo "  部分被拒: $p"
+done
 for p in "${patches[@]}"; do
   msg=$(git apply --reject --whitespace=nowarn "$PDIR/$p" 2>&1 || true)
   echo "$msg" | grep -q 'patch failed' && echo "  部分被拒: $(basename "$p")"
@@ -153,6 +173,66 @@ else:
     io.open(m, 'w', encoding='utf-8', newline='\n').write(s)
     print('  Makefile: 已插入 panel-mipi.o')
 PY
+
+# 手柄同样不在内核树里：ROCKNIX 把它当树外模块（hackbar/rocknix-joypad）维护，
+# 所以 DTS 里那个 compatible 对应的 .c 在 ROCKNIX 仓库里搜不到。
+# 本仓库把源码副本放在 kernel/joypad/，这里塞进 drivers/input/joystick/ 当内建编。
+# 为什么内建而不做 .ko：Android 上模块要操心 /vendor/lib/modules 挂载时序和加载顺序，
+# 手柄又必须在开机动画前就可用（recovery 里也要能按），内建省掉这一整类问题。
+say "3c/6 放入 rocknix-singleadc-joypad 驱动（内建）"
+JOY_SRC="$REPO/kernel/joypad"
+if [ ! -f "$JOY_SRC/rocknix-singleadc-joypad.c" ]; then
+  echo "  错误：$JOY_SRC/rocknix-singleadc-joypad.c 不存在"; exit 1
+fi
+cp -f "$JOY_SRC/rocknix-singleadc-joypad.c" "$JOY_SRC/rocknix-joypad.h" \
+      "$SRC/drivers/input/joystick/"
+python3 - "$SRC" <<'PY'
+import io, sys, os
+src = sys.argv[1]
+
+k = os.path.join(src, 'drivers/input/joystick/Kconfig')
+s = io.open(k, encoding='utf-8').read()
+if 'config INPUT_ROCKNIX_SINGLEADC_JOYPAD' in s:
+    print('  Kconfig: 已有 INPUT_ROCKNIX_SINGLEADC_JOYPAD，跳过')
+else:
+    entry = (
+        'config INPUT_ROCKNIX_SINGLEADC_JOYPAD\n'
+        '\ttristate "ROCKNIX single-ADC joypad (Anbernic H700 handhelds)"\n'
+        '\tdepends on INPUT\n'
+        '\tdepends on IIO\n'
+        '\tselect INPUT_FF_MEMLESS\n'
+        '\thelp\n'
+        '\t  Out-of-tree driver from ROCKNIX (hackbar/rocknix-joypad).\n'
+        '\t  Reads the analogue sticks through a single ADC channel with an\n'
+        '\t  analogue multiplexer, the buttons through GPIOs, and drives the\n'
+        '\t  rumble motor through a PWM. Also exports joypad_input_g, which the\n'
+        '\t  adc-keys patch uses to forward BTN_MODE.\n'
+        '\n'
+    )
+    # joystick/Kconfig 的结构是：L5 menuconfig INPUT_JOYSTICK → L17 if INPUT_JOYSTICK
+    # → ... → 末尾唯一一个 endif。必须插在那个 endif 之前，否则手柄不在
+    # INPUT_JOYSTICK 的 if 里，菜单里看不到也没法选中。
+    import re
+    ms = list(re.finditer(r'(?m)^endif[ \t]*$', s))
+    idx = ms[-1].start() if ms else len(s)
+    s = s[:idx] + entry + s[idx:]
+    io.open(k, 'w', encoding='utf-8', newline='\n').write(s)
+    print('  Kconfig: 已插入 INPUT_ROCKNIX_SINGLEADC_JOYPAD')
+
+m = os.path.join(src, 'drivers/input/joystick/Makefile')
+s = io.open(m, encoding='utf-8').read()
+if 'rocknix-singleadc-joypad.o' in s:
+    print('  Makefile: 已有 rocknix-singleadc-joypad.o，跳过')
+else:
+    line = 'obj-$(CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD)\t+= rocknix-singleadc-joypad.o\n'
+    io.open(m, 'w', encoding='utf-8', newline='\n').write(s + line)
+    print('  Makefile: 已追加 rocknix-singleadc-joypad.o')
+PY
+# 0004 补丁没打上的话，joypad_input_g 就没有定义，内建时会 undefined symbol。
+if ! grep -q 'joypad_input_g' "$SRC/drivers/input/keyboard/adc-keys.c"; then
+  echo "  错误：adc-keys.c 里没有 joypad_input_g —— 通用补丁 0004 没打上"; exit 1
+fi
+echo "  adc-keys.c 已有 joypad_input_g（0004 补丁生效）"
 
 # 脚手架节点：与 tools/verify-dts.sh 相同的三处（joypad / mmc2 3V3 / usb vbus）。
 # 这几处 hunk 在 7.1.2 上被拒，但本仓库 DTS 需要这些 label 才能编译。
@@ -222,8 +302,11 @@ grep -q '^CONFIG_DRM_PANEL_MIPI=y' .config \
   || { echo "错误：CONFIG_DRM_PANEL_MIPI 没生效（Kconfig 条目没补上？）"; exit 1; }
 grep -q '^CONFIG_EXTRA_FIRMWARE_DIR="firmware-extra"' .config \
   || { echo "错误：EXTRA_FIRMWARE_DIR 没设成 firmware-extra"; exit 1; }
+grep -q '^CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD=y' .config \
+  || { echo "错误：CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD 没生效（Kconfig 条目没补上？）"; exit 1; }
 echo "  当前配置：$(grep -c '=y' .config) 个 =y / $(grep -c '=m' .config) 个 =m"
 echo "  屏幕驱动：$(grep '^CONFIG_DRM_PANEL_MIPI=' .config) / $(grep '^CONFIG_EXTRA_FIRMWARE=' .config)"
+echo "  手柄驱动：$(grep '^CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD=' .config)"
 
 say "5/6 编 Image（-j$JOBS）"
 cp "$REPO"/kernel/dts/*.dts "$AW"/
