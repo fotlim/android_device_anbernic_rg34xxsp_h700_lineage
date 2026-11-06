@@ -134,3 +134,31 @@ table-length: 8        ← 只放 8 个分区表项 = 1 KiB
 | `wsl --mount --bare` 失败 `ERROR_INVALID_DRIVE` | 可移动介质不支持 `diskpart offline`，这条路对本机无效 |
 | PowerShell 改文件后中文乱码 | `Get-Content/-replace/Set-Content` 按 GBK 解码。**中文文件一律用 python3 + `io.open(...,newline='\n')` 改** |
 | `git commit -F -` / `<<<` 报错 | PowerShell 没有 heredoc。把 message 写进 `$env:TEMP\*.txt` 再 `git commit -F <file>` |
+
+---
+
+## 八、构建最后一次失败的根因（22:56:25，断电前 3 分钟拿到）
+
+```
+FAILED: out/target/product/rg34xxsp/obj/APPS/Updater_intermediates/dexpreopt.sh
+/bin/bash -c "out/soong/host/linux-x86/bin/dexpreopt_gen -global_soong -global \
+   -module .../dexpreopt.config -dexpreopt_script .../dexpreopt.sh -out_dir out"
+--global configuration file is required
+ninja failed with: exit status 1        BACON_RC=1
+```
+
+注意 `-global_soong` 和 `-global` 后面**是空的** —— 参数传进来了但值是空串，
+所以 `dexpreopt_gen` 认为没给全局配置。失败的是 3 个 APK 的 dexpreopt 规则
+（`Updater` / `TrebuchetQuickStep` / `ThemePicker`），其余目标全编过了，进度 18%。
+
+### 明天的两条修法（按顺序试）
+
+1. **先确认 Soong 有没有产出全局配置**：
+   `ls -l out/soong/dexpreopt_global.json out/soong/dexpreopt.config`
+   如果都不存在，说明 `DexpreoptGlobalConfig` 这个 singleton 没被喂数据 —— 通常是
+   设备没继承到定义 boot image / dexpreopt 的 common mk。
+2. **想最快解封**：`BoardConfig.mk` 加 `WITH_DEXPREOPT := false`。
+   本机只有 1 GiB，dexpreopt 迟早要调成 `WITH_DEXPREOPT_BOOT_IMG_AND_SYSTEM_SERVER_ONLY := true`
+   这种轻量档；先把构建跑通再回头优化启动速度是合理的顺序。
+
+不要急着重编 —— 增量只有约 13800 个目标，改完 `WITH_DEXPREOPT` 后重跑 `mka bacon` 很快。
