@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Vendor property contexts for the RG34XXSP.
+#
+persist.vendor.rg34xxsp.        u:object_r:vendor_default_prop:s0
+ro.vendor.rg34xxsp.             u:object_r:vendor_default_prop:s0
+persist.vendor.wifi.            u:object_r:vendor_default_prop:s0
+persist.vendor.bluetooth.       u:object_r:vendor_default_prop:s0

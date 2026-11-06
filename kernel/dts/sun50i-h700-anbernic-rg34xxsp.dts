@@ -1,0 +1,665 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/*
+ * Anbernic RG34XXSP -- Allwinner H700 (sun50i-h700) handheld
+ *
+ * Standalone board DTS. It is a merge of, and stays byte-compatible with:
+ *
+ *   arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-2024.dts
+ *   arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-sp.dts
+ *   arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-plus.dts
+ *       (C) 2024 Ryan Walklin <ryan@testtoast.com>
+ *       (C) 2024 Chris Morgan <macroalpha82@gmail.com>
+ *
+ * plus the Anbernic-specific pieces from ROCKNIX
+ * (projects/ROCKNIX/devices/H700, same authors):
+ *   - 640/720x480 MIPI-DPI-over-SPI panel ("panel-mipi-dpi-spi")
+ *   - pwm-backlight on PWM0 / PD28
+ *   - rocknix-singleadc-joypad: GPIO buttons + 4-channel ADC stick mux, rumble
+ *   - MMC2 second SD slot (TF2)
+ *
+ * Kernel requirements -- this file does NOT build against plain mainline:
+ *   - ROCKNIX patches 0002 (H616 DE/TCON/HDMI nodes + drm/sun4i changes)
+ *     and 0008 (H616 PWM controller, provides &pwm)
+ *   - CONFIG_DRM_PANEL_MIPI          driver: drivers/gpu/drm/panel/panel-mipi.c
+ *                                    (ROCKNIX patch 0110/0111)
+ *   - CONFIG_INPUT_JOYSTICK +        driver: rocknix-singleadc-joypad
+ *                                    (ROCKNIX patches 0140/0150)
+ *   - CONFIG_SPI_GPIO                for the bit-banged panel control bus
+ *   - ROCKNIX patches 0126 (MMC2), 0153 (RGB LEDs), 0155 (RGB as DSI)
+ *   See ../README.md for the full list.
+ */
+
+/dts-v1/;
+
+#include "sun50i-h616.dtsi"
+#include "sun50i-h616-cpu-opp.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/gpio-keys.h>
+#include <dt-bindings/input/linux-event-codes.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "Anbernic RG34XXSP";
+	compatible = "anbernic,rg34xx-sp", "allwinner,sun50i-h700";
+	chassis-type = "handset";
+
+	aliases {
+		mmc0 = &mmc0;	/* TF1: OS card */
+		mmc1 = &mmc2;	/* TF2: content card */
+		mmc2 = &mmc1;	/* SDIO Wi-Fi */
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	battery: battery {
+		compatible = "simple-battery";
+		constant-charge-current-max-microamp = <1024000>;
+		voltage-max-design-microvolt = <4200000>;
+	};
+
+	/*
+	 * Backlight: PWM0 on PD28. Full scale is 2499 raw steps (that number
+	 * comes from the stock userspace contract of this exact board), and the
+	 * pwm-backlight table below spans 0..2499 so userspace can use raw
+	 * values without rescaling.
+	 */
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&pwm 0 40000 0>;		/* 25 kHz */
+		pinctrl-0 = <&lcd_backlight_pin>;
+		pinctrl-names = "default";
+
+		brightness-levels = <0 4 8 16 32 60 100 150 200 260 330 410
+				     500 600 720 860 1020 1200 1400 1650
+				     1900 2200 2499>;
+		default-brightness-level = <15>;	/* 860 / 2499 ~= 34% */
+	};
+
+	/*
+	 * Lid switch (clamshell, like a GBA SP). PE7, active low, wakes the
+	 * system when the lid opens.
+	 */
+	gpio-keys-lid {
+		compatible = "gpio-keys";
+
+		lid-switch {
+			label = "Lid Switch";
+			gpios = <&pio 4 7 GPIO_ACTIVE_LOW>;	/* PE7 */
+			linux,input-type = <EV_SW>;
+			linux,code = <SW_LID>;
+			linux,can-disable;
+			wakeup-event-action = <EV_ACT_DEASSERTED>;
+			wakeup-source;
+		};
+	};
+
+	/*
+	 * Complete gamepad. The kernel driver reports it as
+	 * "H700 Gamepad", bus 0x19, vendor 0x484b, product 0x14df, version 0x0100
+	 * which is what device/anbernic/rg34xxsp/keylayout/.../kl expects.
+	 *
+	 * Analog sticks: one ADC channel (gpadc ch0) behind a 2-bit GPIO mux on
+	 * PI1/PI2; PI0 is the mux enable. Right stick is inverted on this board.
+	 */
+	joypad: rocknix-singleadc-joypad {
+		compatible = "rocknix-singleadc-joypad";
+		hw_info = <0x01>;
+
+		joypad-name = "H700 Gamepad";
+		joypad-product = <0x14DF>;
+		joypad-revision = <0x0100>;
+		joypad-vendor = <0x484B>;
+
+		status = "okay";
+
+		/* Rumble motor on PWM2 / PH2. */
+		pwms = <&pwm 2 1000000 0>;
+		pwm-names = "enable";
+		rumble-boost-weak = <0>;
+		rumble-boost-strong = <0>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&joy_mux_pin>, <&pwm2_pin>;
+
+		io-channel-names = "amux_adc";
+		io-channels = <&gpadc 0>;
+
+		amux-count = <4>;
+		/* ABS_RY ABS_RX ABS_Y ABS_X */
+		amux-channel-mapping = <0 2 1 3>;
+
+		amux-a-gpios = <&pio 8 1 GPIO_ACTIVE_LOW>;	/* PI1 */
+		amux-b-gpios = <&pio 8 2 GPIO_ACTIVE_LOW>;	/* PI2 */
+
+		button-adc-scale = <2>;
+		button-adc-deadzone = <128>;
+		button-adc-fuzz = <32>;
+		button-adc-flat = <32>;
+
+		abs_x-p-tuning = <70>;
+		abs_x-n-tuning = <70>;
+		invert-absx;
+
+		abs_y-p-tuning = <70>;
+		abs_y-n-tuning = <70>;
+		invert-absy;
+
+		abs_rx-p-tuning = <70>;
+		abs_rx-n-tuning = <70>;
+
+		abs_ry-p-tuning = <70>;
+		abs_ry-n-tuning = <70>;
+
+		poll-interval = <10>;
+		/* autorepeat; */
+
+		sw1 {
+			gpios = <&pio 0 6 GPIO_ACTIVE_LOW>;	/* PA6 */
+			label = "GPIO DPAD-UP";
+			linux,code = <BTN_DPAD_UP>;
+		};
+		sw2 {
+			gpios = <&pio 4 0 GPIO_ACTIVE_LOW>;	/* PE0 */
+			label = "GPIO DPAD-DOWN";
+			linux,code = <BTN_DPAD_DOWN>;
+		};
+		sw3 {
+			gpios = <&pio 0 8 GPIO_ACTIVE_LOW>;	/* PA8 */
+			label = "GPIO DPAD-LEFT";
+			linux,code = <BTN_DPAD_LEFT>;
+		};
+		sw4 {
+			gpios = <&pio 0 9 GPIO_ACTIVE_LOW>;	/* PA9 */
+			label = "GPIO DPAD-RIGHT";
+			linux,code = <BTN_DPAD_RIGHT>;
+		};
+		sw5 {
+			gpios = <&pio 0 0 GPIO_ACTIVE_LOW>;	/* PA0 */
+			label = "GPIO BTN-A";
+			linux,code = <BTN_EAST>;
+		};
+		sw6 {
+			gpios = <&pio 0 1 GPIO_ACTIVE_LOW>;	/* PA1 */
+			label = "GPIO BTN-B";
+			linux,code = <BTN_SOUTH>;
+		};
+		sw7 {
+			gpios = <&pio 0 3 GPIO_ACTIVE_LOW>;	/* PA3 */
+			label = "GPIO BTN-X";
+			linux,code = <BTN_NORTH>;
+		};
+		sw8 {
+			gpios = <&pio 0 2 GPIO_ACTIVE_LOW>;	/* PA2 */
+			label = "GPIO BTN-Y";
+			linux,code = <BTN_WEST>;
+		};
+		sw9 {
+			gpios = <&pio 0 5 GPIO_ACTIVE_LOW>;	/* PA5 */
+			label = "BTN_SELECT";
+			linux,code = <BTN_SELECT>;
+		};
+		sw10 {
+			gpios = <&pio 0 4 GPIO_ACTIVE_LOW>;	/* PA4 */
+			label = "BTN_START";
+			linux,code = <BTN_START>;
+		};
+		sw11 {
+			gpios = <&pio 4 3 GPIO_ACTIVE_LOW>;	/* PE3 */
+			label = "GPIO BTN_F";
+			linux,code = <BTN_MODE>;
+		};
+		sw12 {
+			gpios = <&pio 4 8 GPIO_ACTIVE_LOW>;	/* PE8 */
+			label = "BTN_THUMBL";
+			linux,code = <BTN_THUMBL>;
+		};
+		sw13 {
+			gpios = <&pio 4 9 GPIO_ACTIVE_LOW>;	/* PE9 */
+			label = "BTN_THUMBR";
+			linux,code = <BTN_THUMBR>;
+		};
+		sw14 {
+			gpios = <&pio 0 12 GPIO_ACTIVE_LOW>;	/* PA12 */
+			label = "GPIO BTN_TR";
+			linux,code = <BTN_TR>;
+		};
+		sw15 {
+			gpios = <&pio 0 7 GPIO_ACTIVE_LOW>;	/* PA7 */
+			label = "GPIO BTN_TR2";
+			linux,code = <BTN_TR2>;
+		};
+		sw16 {
+			gpios = <&pio 0 10 GPIO_ACTIVE_LOW>;	/* PA10 */
+			label = "GPIO BTN_TL";
+			linux,code = <BTN_TL>;
+		};
+		sw17 {
+			gpios = <&pio 0 11 GPIO_ACTIVE_LOW>;	/* PA11 */
+			label = "GPIO BTN_TL2";
+			linux,code = <BTN_TL2>;
+		};
+	};
+
+	gpio-keys-volume {
+		compatible = "gpio-keys";
+		autorepeat;
+
+		button-vol-up {
+			label = "Key Volume Up";
+			gpios = <&pio 4 1 GPIO_ACTIVE_LOW>;	/* PE1 */
+			linux,input-type = <EV_KEY>;
+			linux,code = <KEY_VOLUMEUP>;
+		};
+
+		button-vol-down {
+			label = "Key Volume Down";
+			gpios = <&pio 4 2 GPIO_ACTIVE_LOW>;	/* PE2 */
+			linux,input-type = <EV_KEY>;
+			linux,code = <KEY_VOLUMEDOWN>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led-0 {
+			function = LED_FUNCTION_POWER;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&pio 8 12 GPIO_ACTIVE_HIGH>;	/* PI12 */
+			default-state = "on";
+		};
+
+		led-1 {
+			function = LED_FUNCTION_STATUS;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&pio 8 11 GPIO_ACTIVE_HIGH>;	/* PI11 */
+		};
+	};
+
+	reg_vcc5v: regulator-vcc5v {		/* USB-C power input */
+		compatible = "regulator-fixed";
+		regulator-name = "vcc-5v";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+	};
+
+	/* 3.3 V rail that feeds the second SD slot (TF2). */
+	reg_vcc3v3_mmc2: regulator-vcc3v3-mmc2 {
+		compatible = "regulator-fixed";
+		enable-active-high;
+		gpio = <&pio 4 4 GPIO_ACTIVE_HIGH>;	/* PE4 */
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-name = "vcc3v3-mmc2";
+	};
+
+	/* Panel analog supply, gated by PI15. */
+	reg_lcd: regulator-gpio-lcd-vdd {
+		compatible = "regulator-fixed";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-name = "vdd-lcd";
+		gpio = <&pio 8 15 GPIO_ACTIVE_HIGH>;	/* PI15 */
+		enable-active-high;
+	};
+
+	/*
+	 * Panel control bus is bit-banged GPIO "SPI" (3-wire): SCK PI9,
+	 * MOSI PI10, CS PI8. The panel itself is a 24-bit RGB MIPI-DPI panel
+	 * driven by the SoC's TCON_LCD0, initialized over this bus.
+	 */
+	spi_lcd: spi {
+		compatible = "spi-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		sck-gpios = <&pio 8 9 GPIO_ACTIVE_HIGH>;	/* PI9 */
+		mosi-gpios = <&pio 8 10 GPIO_ACTIVE_HIGH>;	/* PI10 */
+		cs-gpios = <&pio 8 8 GPIO_ACTIVE_HIGH>;		/* PI8 */
+		num-chipselects = <1>;
+
+		panel: panel@0 {
+			compatible = "anbernic,rg34xx-sp-panel",
+				     "panel-mipi-dpi-spi";
+			reg = <0>;
+
+			spi-max-frequency = <3125000>;
+			spi-3wire;
+
+			reset-gpios = <&pio 8 14 GPIO_ACTIVE_LOW>;	/* PI14 */
+			backlight = <&backlight>;
+			power-supply = <&reg_lcd>;
+
+			pinctrl-0 = <&lcd0_rgb888_pins>;
+			pinctrl-names = "default";
+
+			port {
+				panel_in_rgb: endpoint {
+					remote-endpoint = <&tcon_lcd0_out_lcd>;
+				};
+			};
+		};
+	};
+
+	/* Mini-HDMI out. */
+	connector {
+		compatible = "hdmi-connector";
+		type = "d";
+
+		port {
+			hdmi_con_in: endpoint {
+				remote-endpoint = <&hdmi_out_con>;
+			};
+		};
+	};
+};
+
+&codec {
+	/* Speakers and headphone jack share a 74HC4052D analog mux. */
+	allwinner,audio-routing = "Speaker", "LINEOUT",
+				  "Headphone", "LINEOUT";
+	allwinner,pa-gpios = <&pio 8 5 GPIO_ACTIVE_HIGH>;	/* PI5  */
+	hp-det-gpios = <&pio 8 3 GPIO_ACTIVE_HIGH>;		/* PI3  */
+	status = "okay";
+};
+
+&cpu0 {
+	cpu-supply = <&reg_dcdc1>;
+};
+
+&de {
+	status = "okay";
+};
+
+&ehci0 {
+	status = "okay";
+};
+
+&gpu {
+	mali-supply = <&reg_dcdc2>;
+	status = "okay";
+};
+
+&hdmi {
+	status = "okay";
+};
+
+&hdmi_out {
+	hdmi_out_con: endpoint {
+		remote-endpoint = <&hdmi_con_in>;
+	};
+};
+
+/* TF1 -- the card the OS boots from. */
+&mmc0 {
+	bus-width = <4>;
+	cd-gpios = <&pio 5 6 GPIO_ACTIVE_LOW>;		/* PF6 */
+	disable-wp;
+	no-1-8-v;
+	vmmc-supply = <&reg_cldo3>;
+	status = "okay";
+};
+
+/* TF2 -- content card. */
+&mmc2 {
+	bus-width = <4>;
+	cd-gpios = <&pio 4 22 GPIO_ACTIVE_LOW>;		/* PE22 */
+	disable-wp;
+	no-1-8-v;
+	vmmc-supply = <&reg_vcc3v3_mmc2>;
+	vqmmc-supply = <&reg_cldo3>;
+	status = "okay";
+};
+
+/*
+ * SDIO Wi-Fi: RTL8821CS. The wiring is inherited from the RG35XX Plus, which
+ * the RG34XX family is derived from -- verify on your unit before trusting it
+ * (cheaper RG34XX batches have shipped with other modules).
+ *
+ * The 32 kHz low-power clock is NOT modelled here: it needs the x32k-fanout
+ * pinctrl function and pin, which differ between board revisions. Add
+ * mmc-pwrseq once you have confirmed the pin from the stock DTB.
+ */
+&mmc1 {
+	vmmc-supply = <&reg_cldo4>;
+	vqmmc-supply = <&reg_aldo4>;
+	bus-width = <4>;
+	non-removable;
+	status = "okay";
+
+	sdio_wifi: wifi@1 {
+		reg = <1>;
+		interrupt-parent = <&pio>;
+		interrupts = <6 15 IRQ_TYPE_LEVEL_LOW>;		/* PG15 */
+		interrupt-names = "host-wake";
+	};
+};
+
+/* Bluetooth half of the RTL8821CS, on UART1. */
+&uart1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart1_pins>, <&uart1_rts_cts_pins>;
+	uart-has-rtscts;
+	status = "okay";
+
+	bluetooth {
+		compatible = "realtek,rtl8821cs-bt", "realtek,rtl8723bs-bt";
+		device-wake-gpios = <&pio 6 17 GPIO_ACTIVE_HIGH>;	/* PG17 */
+		enable-gpios = <&pio 6 19 GPIO_ACTIVE_HIGH>;		/* PG19 */
+		host-wake-gpios = <&pio 6 16 GPIO_ACTIVE_HIGH>;		/* PG16 */
+	};
+};
+
+&ohci0 {
+	status = "okay";
+};
+
+&pio {
+	vcc-pa-supply = <&reg_cldo3>;
+	vcc-pc-supply = <&reg_cldo3>;
+	vcc-pd-supply = <&reg_cldo3>;
+	vcc-pe-supply = <&reg_cldo3>;
+	vcc-pf-supply = <&reg_cldo3>;
+	vcc-pg-supply = <&reg_aldo4>;
+	vcc-ph-supply = <&reg_cldo3>;
+	vcc-pi-supply = <&reg_cldo3>;
+
+	lcd_backlight_pin: pwm0-pin {
+		pins = "PD28";
+		function = "pwm0";
+	};
+
+	/omit-if-no-ref/
+	pwm2_pin: pwm2-pin {
+		pins = "PH2";
+		function = "pwm2";
+	};
+
+	joy_mux_pin: joy-mux-pin {
+		pins = "PI0";
+		function = "gpio_out";
+	};
+};
+
+&gpadc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	channel@0 {
+		reg = <0>;
+	};
+};
+
+&pwm {
+	status = "okay";
+};
+
+&r_i2c {
+	status = "okay";
+
+	axp717: pmic@34 {
+		compatible = "x-powers,axp717";
+		reg = <0x34>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		interrupt-parent = <&nmi_intc>;
+		interrupts = <0 IRQ_TYPE_LEVEL_LOW>;
+
+		vin1-supply = <&reg_vcc5v>;
+		vin2-supply = <&reg_vcc5v>;
+		vin3-supply = <&reg_vcc5v>;
+		vin4-supply = <&reg_vcc5v>;
+
+		axp_adc: adc {
+			compatible = "x-powers,axp717-adc";
+			#io-channel-cells = <1>;
+		};
+
+		battery_power: battery-power {
+			compatible = "x-powers,axp717-battery-power-supply";
+			monitored-battery = <&battery>;
+			x-powers,no-thermistor;
+		};
+
+		regulators {
+			reg_dcdc1: dcdc1 {
+				regulator-always-on;
+				regulator-min-microvolt = <900000>;
+				regulator-max-microvolt = <1160000>;
+				regulator-name = "vdd-cpu";
+			};
+
+			reg_dcdc2: dcdc2 {
+				regulator-always-on;
+				regulator-min-microvolt = <940000>;
+				regulator-max-microvolt = <940000>;
+				regulator-name = "vdd-gpu-sys";
+			};
+
+			reg_dcdc3: dcdc3 {
+				regulator-always-on;
+				regulator-min-microvolt = <1100000>;
+				regulator-max-microvolt = <1100000>;
+				regulator-name = "vdd-dram";
+			};
+
+			reg_aldo1: aldo1 {
+				/* 1.8 V - unused */
+			};
+
+			reg_aldo2: aldo2 {
+				/* 1.8 V - unused */
+			};
+
+			reg_aldo3: aldo3 {
+				/* 1.8 V - unused */
+			};
+
+			reg_aldo4: aldo4 {
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-name = "avcc";
+			};
+
+			reg_bldo1: bldo1 {
+				/* 1.8 V - unused */
+			};
+
+			reg_bldo2: bldo2 {
+				regulator-always-on;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-name = "vcc-pll";
+			};
+
+			reg_bldo3: bldo3 {
+				/* 2.8 V - unused */
+			};
+
+			reg_bldo4: bldo4 {
+				/* 1.2 V - unused */
+			};
+
+			reg_cldo1: cldo1 {
+				regulator-always-on;
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-name = "vcc-spkr-amp";
+			};
+
+			reg_cldo2: cldo2 {
+				/* 3.3 V - unused */
+			};
+
+			reg_cldo3: cldo3 {
+				regulator-always-on;
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-name = "vcc-io";
+			};
+
+			reg_cldo4: cldo4 {
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-name = "vcc-wifi";
+			};
+
+			reg_boost: boost {
+				regulator-min-microvolt = <5000000>;
+				regulator-max-microvolt = <5200000>;
+				regulator-name = "boost";
+			};
+
+			/*
+			 * Function unknown, but the stock bootloader reads
+			 * inconsistent GPIO values on reboot if it is disabled.
+			 */
+			reg_cpusldo: cpusldo {
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <900000>;
+				regulator-max-microvolt = <900000>;
+			};
+		};
+
+		usb_power: usb-power {
+			compatible = "x-powers,axp717-usb-power-supply";
+			input-current-limit-microamp = <1500000>;
+		};
+	};
+
+	/* External RTC (keeps time across battery pulls). */
+	rtc_ext: rtc@51 {
+		compatible = "nxp,pcf8563";
+		reg = <0x51>;
+	};
+};
+
+&tcon_lcd0 {
+	status = "okay";
+};
+
+&tcon_lcd0_out_lcd {
+	remote-endpoint = <&panel_in_rgb>;
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_ph_pins>;
+	status = "okay";
+};
+
+/* USB-C: peripheral (adb / fastboot) by default. */
+&usbotg {
+	dr_mode = "peripheral";
+	status = "okay";
+};
+
+&usbphy {
+	status = "okay";
+};

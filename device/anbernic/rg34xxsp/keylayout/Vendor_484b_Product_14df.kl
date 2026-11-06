@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Key layout for the Anbernic RG34XXSP built-in gamepad.
+# Kernel-side name: "H700 Gamepad", bus 0x19, vendor 0x484b, product 0x14df
+# (driver: rocknix-singleadc-joypad, 17 keys, 4 axes, PWM2 rumble).
+#
+# Kernel reports BTN_* codes already, so this file maps them 1:1 onto Android
+# key codes and declares the analog axes.
+#
+
+# --- face buttons -----------------------------------------------------------
+key 304   BUTTON_A        # BTN_SOUTH  (A,  PA0)
+key 305   BUTTON_B        # BTN_EAST   (B,  PA1)
+key 307   BUTTON_X        # BTN_NORTH  (X,  PA3)
+key 308   BUTTON_Y        # BTN_WEST   (Y,  PA2)
+
+# --- shoulders / triggers ---------------------------------------------------
+key 310   BUTTON_L1        # BTN_TL  (L1, PA10)
+key 311   BUTTON_R1        # BTN_TR  (R1, PA12)
+key 312   BUTTON_L2        # BTN_TL2 (L2, PA11)
+key 313   BUTTON_R2        # BTN_TR2 (R2, PA7)
+
+# --- system buttons ---------------------------------------------------------
+key 314   BUTTON_SELECT    # BTN_SELECT (Select, PA5)
+key 315   BUTTON_START     # BTN_START  (Start,  PA4)
+key 316   BUTTON_MODE      # BTN_MODE   (Menu "F", PE3)
+key 317   BUTTON_THUMBL    # BTN_THUMBL (L3, PE8)
+key 318   BUTTON_THUMBR    # BTN_THUMBR (R3, PE9)
+
+# --- d-pad ------------------------------------------------------------------
+key 544   DPAD_UP          # BTN_DPAD_UP    (PA6)
+key 545   DPAD_DOWN        # BTN_DPAD_DOWN  (PE0)
+key 546   DPAD_LEFT        # BTN_DPAD_LEFT  (PA8)
+key 547   DPAD_RIGHT       # BTN_DPAD_RIGHT (PA9)
+
+# --- analog sticks ----------------------------------------------------------
+# The joypad driver exposes ABS_X/ABS_Y (left stick) and ABS_RX/ABS_RY
+# (right stick, inverted on this board). Android expects the right stick on
+# Z / RZ, hence the remap.
+axis 0x00   X
+axis 0x01   Y
+axis 0x03   Z
+axis 0x04   RZ
+
+# If you would rather have Menu behave as BACK (common on Anbernic Android
+# builds), comment out the BUTTON_MODE line above and use:
+# key 316   BACK

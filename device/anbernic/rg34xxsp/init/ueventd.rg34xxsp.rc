@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# ueventd.rg34xxsp.rc -- device node permissions for the H700 handheld
+#
+
+# --- backlight (pwm-backlight on PWM0 / PD28) --------------------------------
+/sys/class/backlight/backlight/brightness      0644   system   system
+/sys/class/backlight/backlight/max_brightness  0644   system   system
+
+# --- gamepad / rumble (rocknix-singleadc-joypad) -----------------------------
+/sys/devices/platform/rocknix-singleadc-joypad/rumble_enable  0644  system  system
+/sys/class/input/event*                                       0660  system  input
+/sys/class/input/input*/name                                  0440  system  input
+
+# --- LEDs (power / status, PI12 / PI11) --------------------------------------
+/sys/class/leds/led:power/brightness    0644  system  system
+/sys/class/leds/led:status/brightness   0644  system  system
+
+# --- Bluetooth (RTL8821CS over UART1) ----------------------------------------
+/dev/rfkill                 0660  bluetooth  bluetooth
+/sys/class/rfkill/rfkill*/state  0660  bluetooth  bluetooth
+/sys/class/rfkill/rfkill*/type   0644  bluetooth  bluetooth
+
+# --- Wi-Fi -------------------------------------------------------------------
+/dev/uhid                   0660  bluetooth  bluetooth
+/dev/hci0                   0660  bluetooth  bluetooth

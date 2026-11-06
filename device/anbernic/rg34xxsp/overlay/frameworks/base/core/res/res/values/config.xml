@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-License-Identifier: Apache-2.0
+
+  Resource overlay for the Anbernic RG34XXSP.
+
+  The panel is a fixed 720x480 landscape panel (3:2) with no touchscreen and no
+  accelerometer: rotation must be disabled, otherwise the framework keeps
+  trying to rotate into a portrait that does not exist.
+-->
+<resources>
+
+    <!-- No accelerometer / gyroscope: force the natural landscape orientation. -->
+    <bool name="config_supportAutoRotation">false</bool>
+
+    <!-- 720x480 is too small to waste space on a gesture pill; use 3 buttons. -->
+    <bool name="config_showNavigationBar">true</bool>
+    <integer name="config_navBarInteractionMode">2</integer>
+
+    <!-- No telephony, no camera. -->
+    <bool name="config_deviceHasRearCamera">false</bool>
+    <bool name="config_deviceHasFrontCamera">false</bool>
+
+    <!-- Keep the UI at a handheld-friendly scale. -->
+    <integer name="config_maximumScreenDensity">0</integer>
+
+</resources>

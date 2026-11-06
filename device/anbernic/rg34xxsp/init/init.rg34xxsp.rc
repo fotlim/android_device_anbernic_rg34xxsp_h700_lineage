@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# init.rg34xxsp.rc -- Allwinner H700 handheld specifics
+#
+
+on early-init
+    # Mainline sunxi keeps the DRM/panel pipeline off until the panel driver
+    # probes; nothing to do here yet. Kept as the hook for bring-up debug.
+    write /proc/sys/kernel/printk 7
+
+on init
+    # Only the debug UART exists as a console (UART0 on PH).
+    symlink /dev/ttyS0 /dev/console
+
+on fs
+    # /metadata and /data are formattable ext4, nothing device specific.
+
+on post-fs-data
+    mkdir /data/vendor 0771 root root
+    mkdir /data/vendor/wifi 0771 wifi wifi
+    mkdir /data/vendor/bluetooth 0771 bluetooth bluetooth
+
+on boot
+    # CPU: schedutil is the sane default on A53; the EAS/OPP table comes from
+    # the kernel (sun50i-h616-cpu-opp.dtsi). Do not pin "performance".
+    write /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor schedutil
+    write /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq 480000
+
+    # GPU (Mali-G31 devfreq): simple_ondemand, 420-600 MHz.
+    write /sys/devices/platform/soc/1800000.gpu/devfreq/1800000.gpu/governor simple_ondemand
+
+    # Backlight: pwm-backlight, max raw value 2499 (see docs/HARDWARE.md).
+    # ~40% so that recovery/early boot is readable; the lights HAL takes over
+    # once SystemServer is up.
+    write /sys/class/backlight/backlight/brightness 1000
+
+    # Second SD card (TF2 / ROM card) stays powered; harmless if absent.
+    write /sys/class/mmc_host/mmc2/device/power/control auto
+
+on property:sys.boot_completed=1
+    # Nothing to settle yet -- placeholder for wifi/bt bring-up hooks.
+
+service vendor-vibrator /vendor/bin/hw/vibrator-impl
+    class hal
+    user system
+    group system input
+    disabled
+    # Enabled once a vibrator HAL (PWM2 rumble) exists, see docs/PORTING.md.

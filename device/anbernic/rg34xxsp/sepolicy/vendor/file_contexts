@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Vendor file contexts for the RG34XXSP.
+# Deliberately minimal: during bring-up the board boots with
+# androidboot.selinux=permissive and these entries are the ones that are
+# already known to be needed by the gamepad / panel / LED sysfs nodes.
+#
+
+# PWM backlight and the LED class devices (power/status LEDs, PI12/PI11).
+/sys/class/backlight(/.*)?          u:object_r:sysfs_leds:s0
+
+# rumble_enable node of the joypad driver
+/sys/devices/platform/rocknix-singleadc-joypad(/.*)?   u:object_r:sysfs_leds:s0
+
+# Wi-Fi / Bluetooth rfkill state
+/sys/class/rfkill(/.*)?             u:object_r:sysfs_bluetooth_writable:s0
