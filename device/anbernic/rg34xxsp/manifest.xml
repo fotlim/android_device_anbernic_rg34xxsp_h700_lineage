@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SPDX-License-Identifier: Apache-2.0
+
+    RG34XX-SP 的 HAL 声明。
+
+    为什么必须存在：Android 没有"自动发现 HAL"这回事，SystemServer /
+    SurfaceFlinger 都是按这里的 fqname 去 servicemanager 找服务的。文件缺失时
+    不会报错，只会一直等 —— 典型症状是开机动画卡住不往下走。
+
+    图形三项是与 device.mk 里那组模块严格配对的：
+      composer 2.2  + hwcomposer.drm_minigbm
+      allocator 4.0 + android.hardware.graphics.allocator@4.0-service.minigbm
+      mapper 4.0    + android.hardware.graphics.mapper@4.0-impl.minigbm（passthrough）
+    32+64 那行是 passthrough 的标准写法：进程可能是 32 位也可能是 64 位。
+-->
+<manifest version="1.0" type="device" target-level="4">
+
+    <!-- 图形：drm_hwcomposer + minigbm -->
+    <hal format="hidl">
+        <name>android.hardware.graphics.composer</name>
+        <transport>hwbinder</transport>
+        <fqname>@2.2::IComposer/default</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>android.hardware.graphics.allocator</name>
+        <transport>hwbinder</transport>
+        <fqname>@4.0::IAllocator/default</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>android.hardware.graphics.mapper</name>
+        <transport arch="32+64">passthrough</transport>
+        <fqname>@4.0::IMapper/default</fqname>
+    </hal>
+
+    <!-- 基础服务 -->
+    <hal format="hidl">
+        <name>android.hardware.health</name>
+        <transport>hwbinder</transport>
+        <fqname>@2.1::IHealth/default</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>android.hardware.memtrack</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.0::IMemtrack/default</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>android.hardware.usb</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.0::IUsb/default</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>android.hardware.drm</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.3::ICryptoFactory/clearkey</fqname>
+        <fqname>@1.3::IDrmFactory/clearkey</fqname>
+    </hal>
+
+    <!-- 音频：设备侧 audio_hw 尚未实现（docs/PORTING.md §2） -->
+    <hal format="hidl">
+        <name>android.hardware.audio</name>
+        <transport>hwbinder</transport>
+        <fqname>@5.0::IDevicesFactory/default</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>android.hardware.audio.effect</name>
+        <transport>hwbinder</transport>
+        <fqname>@5.0::IEffectsFactory/default</fqname>
+    </hal>
+
+    <!-- 还没接线，等 Wi-Fi / BT HAL 上了再打开：
+         android.hardware.wifi (1.5)、wifi.supplicant (1.2)、wifi.hostapd (1.1)、
+         bluetooth (1.1)、gatekeeper 1.0 / keymaster 3.0（本机无 TEE，
+         这两个要走软件实现，见 docs/PORTING.md §6） -->
+
+</manifest>

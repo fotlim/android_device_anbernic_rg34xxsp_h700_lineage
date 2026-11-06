@@ -127,6 +127,37 @@ for p in "${patches[@]}"; do
 done
 find "$SRC" -name '*.rej' -delete
 
+# 0002 里同一段 sun50i_h616_tv_quirks 被写了两遍，git apply 会把两个 hunk 都塞进去
+# （上下文还匹配得上），编译时直接 redefinition 报错。这里按「完全相同的结构体块」
+# 去掉重复的那份；顺便断言它确实只剩一份。
+say "3a/6 去重 sun4i_tcon.c 里被重复写入的 quirk 块"
+python3 - "$SRC" <<'PY'
+import io, re, sys
+p = sys.argv[1] + '/drivers/gpu/drm/sun4i/sun4i_tcon.c'
+s = io.open(p, encoding='utf-8').read()
+pat = re.compile(r'static const struct sun4i_tcon_quirks (\w+) = \{.*?\n\};\n', re.S)
+seen, out, pos, dropped = {}, [], 0, []
+for m in pat.finditer(s):
+    name, body = m.group(1), m.group(0)
+    out.append(s[pos:m.start()])
+    pos = m.end()
+    if name in seen and seen[name] == body:
+        dropped.append(name)
+    else:
+        seen[name] = body
+        out.append(body)
+out.append(s[pos:])
+if dropped:
+    io.open(p, 'w', encoding='utf-8', newline='\n').write(''.join(out))
+    print('  去重: %s' % ', '.join(dropped))
+else:
+    print('  没有重复块')
+PY
+dups=$(grep -c '^static const struct sun4i_tcon_quirks sun50i_h616_tv_quirks' "$SRC/drivers/gpu/drm/sun4i/sun4i_tcon.c")
+if [ "$dups" != "1" ]; then
+  echo "错误：sun50i_h616_tv_quirks 出现 $dups 次（应恰好 1 次），内核编译会失败"; exit 1
+fi
+
 # 0110 补丁的 Kconfig / Makefile 两处 hunk 在 7.1.2 上会被拒，
 # 结果就是 panel-mipi.c 躺在树里但永远不参与编译（真机表现：背光亮、屏黑）。
 # 这里按锚点幂等补回，并在最后断言生效。
@@ -310,6 +341,33 @@ grep -q '^CONFIG_EXTRA_FIRMWARE_DIR="firmware-extra"' .config \
   || { echo "错误：EXTRA_FIRMWARE_DIR 没设成 firmware-extra"; exit 1; }
 grep -q '^CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD=y' .config \
   || { echo "错误：CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD 没生效（Kconfig 条目没补上？）"; exit 1; }
+
+# Android 起不来的那几件事，逐个断言。merge_config 遇到未知符号只 warn 不报错，
+# olddefconfig 又会静默丢掉依赖不满足的符号 —— 不断言就只能等开机黑屏再回来查。
+bad=0
+for want in \
+  'CONFIG_SECURITY_SELINUX=y' \
+  'CONFIG_SECURITY_NETWORK=y' \
+  'CONFIG_SECURITY_SELINUX_DEVELOP=y' \
+  'CONFIG_LSM=".*selinux.*"' \
+  'CONFIG_AUDIT=y' \
+  'CONFIG_ANDROID_BINDER_IPC=y' \
+  'CONFIG_ANDROID_BINDERFS=y' \
+  'CONFIG_MEMFD_CREATE=y' \
+  'CONFIG_DMABUF_HEAPS=y' \
+  'CONFIG_USB_CONFIGFS=y' \
+  'CONFIG_USB_CONFIGFS_F_FS=y' \
+  'CONFIG_BT_HCIUART_H4=y' \
+  'CONFIG_BT_RFCOMM=y' \
+  'CONFIG_BT_BNEP=y' \
+  'CONFIG_NETFILTER_XTABLES_LEGACY=y' \
+  'CONFIG_IP_NF_IPTABLES_LEGACY=y' \
+  'CONFIG_IP_NF_FILTER=y' \
+  'CONFIG_IP_NF_NAT=y' \
+  'CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y' ; do
+  grep -qE "^$want" .config || { echo "  缺少 $want（Android 需要它，检查 fragment.config 与该符号的依赖）"; bad=1; }
+done
+[ "$bad" = 0 ] || { echo "错误：配置没收敛，停下。"; exit 1; }
 for want in 'panels/anbernic,rg34xx-sp-panel.panel' 'rtw88/rtw8821c_fw.bin' 'rtl_bt/rtl8821cs_fw.bin' 'regulatory.db'; do
   grep -q "^CONFIG_EXTRA_FIRMWARE=.*$want" .config \
     || { echo "错误：EXTRA_FIRMWARE 里缺 $want"; exit 1; }

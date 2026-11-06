@@ -141,13 +141,20 @@ TARGET_COPY_OUT_VENDOR := vendor
 
 # Dynamic partitions are enabled with PRODUCT_USE_DYNAMIC_PARTITIONS := true in
 # lineage_rg34xxsp.mk (Android 11 has no TARGET_USE_DYNAMIC_PARTITIONS).
+#
+# 组名必须自己带上 `_dynamic_partitions` 后缀：Android 11 的 config.mk 是拿
+# BOARD_SUPER_PARTITION_GROUPS 里的每一项大写后去找 BOARD_<GROUP>_SIZE 和
+# BOARD_<GROUP>_PARTITION_LIST（见 build/make/core/config.mk:953）。
+# 组名写成裸的 `rg34xxsp`，它就会去找 BOARD_RG34XXSP_SIZE 而报
+# "BOARD_RG34XXSP_SIZE must not be empty"。
+# cuttlefish 用 google_dynamic_partitions 也是这个道理。
 BOARD_BUILD_SUPER_IMAGE_BY_DEFAULT := true
 BOARD_SUPER_PARTITION_METADATA_DEVICE := super
 BOARD_SUPER_PARTITION_SIZE := 4294967296             # 4 GiB
-BOARD_SUPER_PARTITION_GROUPS := rg34xxsp
+BOARD_SUPER_PARTITION_GROUPS := rg34xxsp_dynamic_partitions
 BOARD_RG34XXSP_DYNAMIC_PARTITIONS_PARTITION_LIST := \
     system system_ext product vendor
-BOARD_RG34XXSP_DYNAMIC_PARTITIONS_SIZE := 4290772992 # 4 GiB - 4 MiB slot metadata
+BOARD_RG34XXSP_DYNAMIC_PARTITIONS_SIZE := 4290772992 # 4 GiB - 4 MiB 元数据
 
 # No vendor_dlkm / system_dlkm on Android 11: the kernel is monolithic (all
 # drivers built in), which keeps the boot chain simple on this class of device.
@@ -155,12 +162,17 @@ BOARD_RG34XXSP_DYNAMIC_PARTITIONS_SIZE := 4290772992 # 4 GiB - 4 MiB slot metada
 # ---------------------------------------------------------------------------
 # Graphics / media
 # ---------------------------------------------------------------------------
-# There is no Allwinner HWC for mainline DRM. The working community recipe is
-#   hwcomposer  : drm_hwcomposer over DRM/KMS atomic (composer 2.1 on 18.1)
-#   gralloc     : gbm/dma-buf-heap based gralloc (allocator@4.0)
-#   GLES        : Mesa panfrost (Mali-G31 MP2)
-# See docs/PORTING.md -- this is the part of the port that needs the most work.
+# 没有 Allwinner 的 HWC，走社区这套（18.1 树里本来就有的模块，见 device.mk）：
+#   hwcomposer : drm_hwcomposer over DRM/KMS atomic（composer 2.2 + hwcomposer.drm_minigbm）
+#   gralloc    : minigbm 的 cros_gralloc（allocator@4.0 + mapper@4.0）
+#   GLES       : Mesa panfrost（Mali-G31 MP2）—— 这一块要外部工程，见 docs/PORTING.md §1
 BOARD_USES_ALSA_AUDIO := true
+
+# 1 GiB：用 svelte 版 malloc（不用 scudo 的完整分配器），省一块常驻内存
+MALLOC_SVELTE := true
+
+# 属性文件：落到 /vendor/build.prop，图形/内存相关的选择都在里面
+TARGET_VENDOR_PROP += $(DEVICE_PATH)/vendor.prop
 
 # Widevine is unavailable (no TEE); clearkey only.
 TARGET_ENABLE_MEDIADRM_64 := true
