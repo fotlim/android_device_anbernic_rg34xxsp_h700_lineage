@@ -8,7 +8,11 @@
 #   * 但那份配置里有两项是 ROCKNIX 构建系统的产物，直接拿来编会失败：
 #       CONFIG_INITRAMFS_SOURCE  -> 指向 buildroot 里的目录（usr/initramfs_data.cpio Error 1）
 #       CONFIG_EXTRA_FIRMWARE    -> 引用 external-firmware/rtl_bt/*.bin（No rule to make target）
-#     本脚本会把这两项清空：Android 自己有 ramdisk，固件走 /vendor/firmware。
+#     INITRAMFS_SOURCE 清空（Android 自己有 ramdisk）；
+#     EXTRA_FIRMWARE 改成内建本仓库 kernel/firmware/panels/*.panel ——
+#     面板驱动 probe 时按 compatible 读 `panels/<compatible>.panel`，内建才不受挂载时序影响。
+#   * ROCKNIX 的 0110 补丁在 7.1.2 上只能落下 panel-mipi.c，
+#     Kconfig/Makefile 两处 hunk 会被拒 —— 本脚本会幂等地补回，否则驱动根本不会编进内核。
 #   * 本仓库 kernel/fragment.config 只做增量（binder / fb / ALSA / 触屏无关之类）。
 #
 # 用法：
@@ -103,6 +107,53 @@ for p in "${patches[@]}"; do
 done
 find "$SRC" -name '*.rej' -delete
 
+# 0110 补丁的 Kconfig / Makefile 两处 hunk 在 7.1.2 上会被拒，
+# 结果就是 panel-mipi.c 躺在树里但永远不参与编译（真机表现：背光亮、屏黑）。
+# 这里按锚点幂等补回，并在最后断言生效。
+say "3b/6 补回 panel-mipi 的 Kconfig / Makefile 条目"
+if [ ! -f "$SRC/drivers/gpu/drm/panel/panel-mipi.c" ]; then
+  echo "  警告：panel-mipi.c 不存在（0110 补丁没落下），后面会编不出屏幕驱动"
+fi
+python3 - "$SRC" <<'PY'
+import io, sys, os
+src = sys.argv[1]
+k = os.path.join(src, 'drivers/gpu/drm/panel/Kconfig')
+s = io.open(k, encoding='utf-8').read()
+if 'config DRM_PANEL_MIPI' in s:
+    print('  Kconfig: 已有 DRM_PANEL_MIPI，跳过')
+else:
+    anchor = 'config DRM_PANEL_NEC_NL8048HL11'
+    entry = (
+        'config DRM_PANEL_MIPI\n'
+        '\ttristate "Generic MIPI-DSI/DPI(+SPI) panel"\n'
+        '\tdepends on OF\n'
+        '\tdepends on SPI || DRM_MIPI_DSI\n'
+        '\tselect DRM_MIPI_DBI if SPI\n'
+        '\tdepends on BACKLIGHT_CLASS_DEVICE\n'
+        '\thelp\n'
+        '\t  Say Y here if you want to enable support for Generic MIPI-DSI /\n'
+        '\t  MIPI-DPI(+SPI) panels.\n'
+        '\n'
+    )
+    if anchor in s:
+        s = s.replace(anchor, entry + anchor, 1)
+    else:
+        s = s + '\n' + entry
+    io.open(k, 'w', encoding='utf-8', newline='\n').write(s)
+    print('  Kconfig: 已插入 DRM_PANEL_MIPI')
+
+m = os.path.join(src, 'drivers/gpu/drm/panel/Makefile')
+s = io.open(m, encoding='utf-8').read()
+if 'panel-mipi.o' in s:
+    print('  Makefile: 已有 panel-mipi.o，跳过')
+else:
+    line = 'obj-$(CONFIG_DRM_PANEL_MIPI) += panel-mipi.o\n'
+    anchor = 'obj-$(CONFIG_DRM_PANEL_MOTOROLA_MOT)'
+    s = s.replace(anchor, line + anchor, 1) if anchor in s else s + line
+    io.open(m, 'w', encoding='utf-8', newline='\n').write(s)
+    print('  Makefile: 已插入 panel-mipi.o')
+PY
+
 # 脚手架节点：与 tools/verify-dts.sh 相同的三处（joypad / mmc2 3V3 / usb vbus）。
 # 这几处 hunk 在 7.1.2 上被拒，但本仓库 DTS 需要这些 label 才能编译。
 F="$AW/sun50i-h700-anbernic-rg35xx-2024.dts"
@@ -143,12 +194,36 @@ say "4/6 配置：ROCKNIX H700 全量 config + 本仓库 fragment"
 for _ in 1 2 3 4; do curl -fsS -m 90 -o "$WORK/base.config" "$CONF_URL" && break; sleep 2; done
 [ -s "$WORK/base.config" ] || { echo "拉不到 linux.aarch64.conf"; exit 1; }
 cp "$WORK/base.config" .config
-# 这两项属于 ROCKNIX 的 buildroot 树，脱离它必炸；Android 自己带 ramdisk 和固件。
-./scripts/config --file .config --set-str INITRAMFS_SOURCE '' --set-str EXTRA_FIRMWARE ''
+# INITRAMFS_SOURCE 属于 ROCKNIX 的 buildroot 树，脱离它必炸；Android 自己有 ramdisk。
+./scripts/config --file .config --set-str INITRAMFS_SOURCE ''
+# 面板固件内建：panel-mipi 驱动 probe 时读 panels/<compatible>.panel，
+# 内建进 Image 就不受 /vendor 挂载时序影响（这是点得亮屏的关键一笔）。
+rm -rf "$SRC/firmware-extra"
+mkdir -p "$SRC/firmware-extra/panels"
+cp -f "$REPO"/kernel/firmware/panels/*.panel "$SRC/firmware-extra/panels/"
+FW_LIST=""
+for f in "$REPO"/kernel/firmware/panels/*.panel; do
+  [ -e "$f" ] || continue
+  FW_LIST="${FW_LIST:+$FW_LIST }panels/$(basename "$f")"
+done
+if [ -n "$FW_LIST" ]; then
+  ./scripts/config --file .config --set-str EXTRA_FIRMWARE "$FW_LIST"
+  ./scripts/config --file .config --set-str EXTRA_FIRMWARE_DIR 'firmware-extra'
+  ./scripts/config --file .config --enable FW_LOADER
+  echo "  内建固件：$FW_LIST"
+else
+  ./scripts/config --file .config --set-str EXTRA_FIRMWARE ''
+  echo "  警告：kernel/firmware/panels/ 是空的，屏幕固件没内建"
+fi
 cp "$REPO/kernel/fragment.config" "$WORK/fragment.config"
 ARCH=arm64 ./scripts/kconfig/merge_config.sh -m -O . .config "$WORK/fragment.config" >/dev/null
 make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig >/dev/null
+grep -q '^CONFIG_DRM_PANEL_MIPI=y' .config \
+  || { echo "错误：CONFIG_DRM_PANEL_MIPI 没生效（Kconfig 条目没补上？）"; exit 1; }
+grep -q '^CONFIG_EXTRA_FIRMWARE_DIR="firmware-extra"' .config \
+  || { echo "错误：EXTRA_FIRMWARE_DIR 没设成 firmware-extra"; exit 1; }
 echo "  当前配置：$(grep -c '=y' .config) 个 =y / $(grep -c '=m' .config) 个 =m"
+echo "  屏幕驱动：$(grep '^CONFIG_DRM_PANEL_MIPI=' .config) / $(grep '^CONFIG_EXTRA_FIRMWARE=' .config)"
 
 say "5/6 编 Image（-j$JOBS）"
 cp "$REPO"/kernel/dts/*.dts "$AW"/

@@ -8,9 +8,8 @@ on early-init
     # probes; nothing to do here yet. Kept as the hook for bring-up debug.
     write /proc/sys/kernel/printk 7
 
-on init
-    # Only the debug UART exists as a console (UART0 on PH).
-    symlink /dev/ttyS0 /dev/console
+# No "on init" console symlink: Android's init creates /dev/console itself from
+# the kernel cmdline (console=ttyS0,115200). Re-creating it here would fight init.
 
 on fs
     # /metadata and /data are formattable ext4, nothing device specific.
@@ -18,6 +17,7 @@ on fs
 on post-fs-data
     mkdir /data/vendor 0771 root root
     mkdir /data/vendor/wifi 0771 wifi wifi
+    mkdir /data/vendor/wifi/wpa_supplicant 0770 wifi wifi
     mkdir /data/vendor/bluetooth 0771 bluetooth bluetooth
 
 on boot
