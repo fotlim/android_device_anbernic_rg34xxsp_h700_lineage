@@ -86,8 +86,21 @@ mka bacon -j$(nproc)
 | **A. 先试原厂 U-Boot** | 只替换 `p4` 里的内核/boot，或把 `boot.img` 塞进 boot 分区 | 要先把 Android 镜像搞出来；能不能吃 boot.img 待验证 |
 | **B. 换 sunxi U-Boot** | 把 `H700_DDR{3,4}_u-boot-sunxi-with-spl.bin` 写到 **8 KiB 偏移**，DTS 走 `extlinux.conf` | 需先确认 DDR3/DDR4，选错直接黑屏；快，但不可逆（可回刷原厂） |
 
-DDR3/DDR4 的确认方法：原厂 U-Boot 二进制里 `strings | grep -i ddr`，
-或对照 ROCKNIX 镜像里的 U-Boot；**别猜**。
+DDR3/DDR4 的确认方法（**已确认，本机是 LPDDR3**）：
+
+ROCKNIX 的 U-Boot 有两个 defconfig，靠 `vdd-dram` 的电压区分（原文 `bootloader/update.sh`）：
+`1200000 µV → H700_DDR3_u-boot-sunxi-with-spl.bin`、`1100000 µV → H700_DDR4_...`。
+真机实测 `axp2202-dcdc3 = 1200000 µV`（DCDC3 就是 DRAM 供电）→ **走 DDR3 那套**：
+
+```
+U-Boot  : 上游 u-boot v2026.01，defconfig anbernic_rg35xx_h700_lpddr3_defconfig
+           （DDR4 机型用 ..._lpddr4_defconfig）
+BL31    : ATF 平台 sun50i_h616（ATF_PLATFORM="sun50i_h616"）
+产物    : u-boot-sunxi-with-spl.bin → dd bs=1K seek=8（即 8 KiB 偏移）
+```
+
+两条路线里，**B 是社区验证过的**（ROCKNIX 在这块板上就是这套 U-Boot + bl31），A 只是省事
+但没人验证过 `boot_type=1` 的分支能不能吃标准 Android boot.img，别把它当默认路径。
 
 ## 5. 做卡 / 刷机
 

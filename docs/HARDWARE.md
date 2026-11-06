@@ -158,8 +158,9 @@ boot.img。这条捷径尚未验证（见 `docs/PORTING.md` M0）。
 
 ## 7. 还没确认的三件事
 
-1. **DDR3 还是 DDR4**：决定 U-Boot 用哪个二进制（`H700_DDR3_*` / `H700_DDR4_*`）。
-   stock 固件里读不到可靠标记，刷机前必须先确认，选错就黑屏。
+1. ~~**DDR3 还是 DDR4**~~ **已确认：LPDDR3。** 依据 ROCKNIX `bootloader/update.sh` 的判据
+   （`vdd-dram` 1200 mV = DDR3 板、1100 mV = DDR4 板），本机 `axp2202-dcdc3 = 1200000 µV`
+   → U-Boot 用 `anbernic_rg35xx_h700_lpddr3_defconfig`。内存 1 GiB（`MemTotal` 996480 kB）。
 2. **`3-003c` 是什么器件**：可能是某个传感器/触控（本机无触摸屏），也可能是 PMIC 的
    附属芯片。不影响 M0。
 3. **原厂 U-Boot 能否直接引导 Android boot.img**：见上文 §4。

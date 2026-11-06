@@ -78,8 +78,8 @@ cd ~/android/lineage && source build/envsetup.sh
 breakfast lineage_rg34xxsp-userdebug
 mka bacon
 
-# 4) 做卡 / 刷机（注意：先确认你的板子是 DDR3 还是 DDR4 的 U-Boot）
-sudo ./tools/mk-sdcard.sh /dev/sdX --force --uboot H700_DDR4_u-boot-sunxi-with-spl.bin \
+# 4) 做卡 / 刷机（本机已确认为 LPDDR3 → 用 DDR3 那份 U-Boot）
+sudo ./tools/mk-sdcard.sh /dev/sdX --force --uboot H700_DDR3_u-boot-sunxi-with-spl.bin \
      --image-dir out/target/product/rg34xxsp \
      --dtb <path>/sun50i-h700-anbernic-rg34xx-sp.dtb
 ```
