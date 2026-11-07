@@ -107,6 +107,18 @@ PRODUCT_PACKAGES += \
     android.hardware.drm@1.3-service-lazy.clearkey \
     disable_configstore
 
+# Keystore 的两根支柱。本机没有 TEE，两份都走软件实现：
+#   gatekeeper：hardware/interfaces/gatekeeper/1.0/software —— 纯软件，
+#               Android.bp 里带 vintf_fragments，manifest 会自动合入。
+#   keymaster ：hardware/interfaces/keymaster/4.0/default + system/keymaster
+#               的 libkeymaster4（软件模拟），manifest 条目手写在 manifest.xml。
+# 缺 gatekeeper 或 keymaster 时，droid 阶段的 check_vintf_compatible_log
+# 会直接报 "Device manifest and framework compatibility matrix are
+# incompatible"，构建失败。
+PRODUCT_PACKAGES += \
+    android.hardware.gatekeeper@1.0-service.software \
+    android.hardware.keymaster@4.0-service
+
 # 音频：Android 11 的 HIDL 5.0 服务 + tinyalsa。设备侧的 audio_hw 实现还没写
 # （见 docs/PORTING.md §2），先放服务本体，HAL 缺失只会让 AudioService 降级，
 # 不挡开机。

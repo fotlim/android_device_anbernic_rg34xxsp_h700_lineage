@@ -83,11 +83,22 @@ TARGET_NO_RADIOIMAGE := true
 # stages the whole boot.img at 0x45000000 first.
 BOARD_BOOT_HEADER_VERSION := 0
 BOARD_KERNEL_BASE := 0x40000000
-BOARD_KERNEL_OFFSET := 0x00080000
-BOARD_RAMDISK_OFFSET := 0x03000000
-BOARD_TAGS_OFFSET := 0x00000100
-BOARD_KERNEL_SECOND_OFFSET := 0x00f00000
 BOARD_KERNEL_PAGESIZE := 2048
+
+# 坑：Android 11 的 build/make 只认 BOARD_KERNEL_BASE 和 BOARD_KERNEL_PAGESIZE。
+# build/make/core/Makefile:1237-1241 只把这两个塞进 INTERNAL_BOOTIMAGE_ARGS，
+# 而 BOARD_KERNEL_OFFSET / BOARD_RAMDISK_OFFSET / BOARD_TAGS_OFFSET /
+# BOARD_KERNEL_SECOND_OFFSET 这四个变量在 11 的构建系统里**根本没有引用**
+# （全树 grep 只命中我们自己的 BoardConfig）—— 那是老 Android 的写法。
+# 只写它们的话 mkbootimg 会静默套用自带默认值：
+#   kernel 0x00008000 / ramdisk 0x01000000 / tags 0x00000100 / second 0x00f00000
+# 实测第一版 boot.img 就是这么出的：kernel_addr=0x40008000（应为 0x40080000）、
+# ramdisk_addr=0x41000000（应为 0x43000000）。内核会被搬到错 15 倍的地方，
+# 上机必然不启动。所以必须显式写进 BOARD_MKBOOTIMG_ARGS。
+BOARD_MKBOOTIMG_ARGS += --kernel_offset 0x00080000
+BOARD_MKBOOTIMG_ARGS += --ramdisk_offset 0x03000000
+BOARD_MKBOOTIMG_ARGS += --tags_offset 0x00000100
+BOARD_MKBOOTIMG_ARGS += --second_offset 0x00f00000
 
 # 内核从哪来：树外编好的 prebuilt。
 #
@@ -120,13 +131,23 @@ BOARD_KERNEL_CMDLINE := \
 BOARD_MKBOOTIMG_ARGS += --board sun50i_arm64
 BOARD_BOOTIMAGE_PARTITION_SIZE := 67108864   # 64 MiB
 
-# No separate recovery partition: recovery lives inside boot.img.
-BOARD_USES_RECOVERY_AS_BOOT := true
+# 本机没有 recovery 分区（原厂 GPT 里也没有，原厂 boot_recovery 那条 env 指向的
+# 分区根本不存在）。曾经写过 BOARD_USES_RECOVERY_AS_BOOT := true，那会把
+# ramdisk-recovery.img 塞进 boot.img —— 实测出的 boot.img 里 ramdisk_size 就是
+# 7,753,981（即 7.4 MB 的 recovery ramdisk），而不是 900 KB 的 normal ramdisk。
+# 那样启动只会进 recovery，进不了 Android。这里改成"没有 recovery"，
+# 并显式跳过 OTA 包：非 A/B 的 OTA 打包脚本会因拿不到 recovery.img 直接抛
+# ota_from_target_files.py:1979 "--- target build has specified no recovery ---"。
+TARGET_NO_RECOVERY := true
+TARGET_SKIP_OTA_PACKAGE := true
 TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/fstab.rg34xxsp
 
 # A/B is not used; the handheld boots one slot.
 AB_OTA_UPDATER := false
 BOARD_AVB_ENABLE := false
+# NOTE: PRODUCT_ENFORCE_VINTF_MANIFEST deliberately does NOT live here -- a
+# PRODUCT_* assignment in BoardConfig.mk is silently ignored. It sits at the end
+# of lineage_rg34xxsp.mk instead; see the long comment there.
 
 # ---------------------------------------------------------------------------
 # Partitions

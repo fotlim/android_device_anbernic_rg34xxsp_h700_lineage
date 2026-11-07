@@ -68,9 +68,27 @@
         <fqname>@5.0::IEffectsFactory/default</fqname>
     </hal>
 
+    <!-- Keystore 依赖的 keymaster。本机没有 TEE，用 system/keymaster 里的
+         软件实现（libkeymaster4）顶着。framework 兼容矩阵 level 4 明确要求
+         keymaster @3.0::IKeymasterDevice/default 或 @4.0-1，缺了它会直接让
+         droid 的 check_vintf_compatible_log 失败：
+             files are incompatible: HALs incompatible.
+             android.hardware.keymaster: required @3.0 OR @4.0-1, provided (空)
+         gatekeeper 那份不用写在这里 —— hardware/interfaces/gatekeeper/1.0/
+         software 的 Android.bp 带 vintf_fragments，Soong 会自动合进
+         /vendor/etc/vintf/manifest/，手写反而会重复。 -->
+    <hal format="hidl">
+        <name>android.hardware.keymaster</name>
+        <transport>hwbinder</transport>
+        <version>4.0</version>
+        <interface>
+            <name>IKeymasterDevice</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
     <!-- 还没接线，等 Wi-Fi / BT HAL 上了再打开：
          android.hardware.wifi (1.5)、wifi.supplicant (1.2)、wifi.hostapd (1.1)、
-         bluetooth (1.1)、gatekeeper 1.0 / keymaster 3.0（本机无 TEE，
-         这两个要走软件实现，见 docs/PORTING.md §6） -->
+         bluetooth (1.1) -->
 
 </manifest>

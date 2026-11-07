@@ -68,3 +68,34 @@ PRODUCT_PROPERTY_OVERRIDES += \
 PRODUCT_BUILD_PROP_OVERRIDES += \
     PRODUCT_NAME=RG34XXSP \
     TARGET_DEVICE=rg34xxsp
+
+# ---------------------------------------------------------------------------
+# Skip the kernel half of the VINTF compatibility check.
+#
+# The check has two halves and only one of them fails here. The HAL half runs
+# against our manifest and now passes completely (gatekeeper@1.0 and keymaster
+# 4.0 were the missing links). The kernel half is what breaks:
+#
+#   Runtime info and framework compatibility matrix are incompatible:
+#   No kernel entry found for kernel version 7.1
+#   Minimum LTS: 4.9.165, kernel FCM version: 4
+#
+# build/make/core/Makefile:3920 only adds "--kernel <ver>:<configs>" to
+# checkvintf when PRODUCT_OTA_ENFORCE_VINTF_KERNEL_REQUIREMENTS is true, and
+# product_config.mk:336 defaults it to true whenever it is empty. Setting it to
+# false removes the argument, so checkvintf skips the kernel row lookup and the
+# HAL checks still run -- which is exactly what we want: keep the safety net
+# that catches missing HALs, drop the table lookup that cannot succeed.
+#
+# The lookup cannot succeed by design: Android 11's compatibility matrix was
+# frozen in 2020 when mainline was 5.4, and it has no 7.x kernel row at all.
+# This is a missing row in a table, not an incompatible kernel. (AOSP documents
+# this exact escape hatch at build/make/core/Makefile:3947 as option 3.)
+#
+# Do NOT try PRODUCT_ENFORCE_VINTF_MANIFEST := false instead: build/make/core/
+# config.mk:712-716 force-overwrites it from PRODUCT_FULL_TREBLE (unless you
+# also set the deprecated _OVERRIDE form), and the override would drag
+# PRODUCT_FULL_TREBLE down to false, killing VNDK and the linker namespaces.
+#
+# Revisit when moving to a newer Lineage whose matrix knows modern kernels.
+PRODUCT_OTA_ENFORCE_VINTF_KERNEL_REQUIREMENTS := false
