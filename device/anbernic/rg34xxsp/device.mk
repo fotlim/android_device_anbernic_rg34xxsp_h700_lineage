@@ -56,7 +56,13 @@ DEVICE_MANIFEST_FILE += $(DEVICE_PATH)/manifest.xml
 PRODUCT_CHARACTERISTICS := tablet
 PRODUCT_AAPT_CONFIG := normal
 PRODUCT_AAPT_PREF_CONFIG := hdpi
-PRODUCT_LOCALES := en-US
+PRODUCT_LOCALES := en_US
+# 必须是下划线形式的 en_US，不能写 BCP47 的 en-US。
+# build/make/core/product_config.mk:224-229 把 PRODUCT_LOCALES 原样拼进
+# PRODUCT_AAPT_CONFIG（PRODUCT_AAPT_CONFIG := $(subst $(space),$(comma),
+# $(PRODUCT_LOCALES) $(PRODUCT_AAPT_CONFIG))），于是 aapt2 收到
+# `-c en-US,normal` 直接报 `error: invalid config 'en-US' for -c option`，
+# 死在 packages/modules/ModuleMetadata。en_US / en-rUS / en 三种写法实测都能过。
 
 # ---------------------------------------------------------------------------
 # 图形栈：drm_hwcomposer + cros_gralloc(minigbm)，两者 18.1 树里本来就有
