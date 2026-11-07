@@ -11,10 +11,11 @@
 ro.hardware.hwcomposer=drm_minigbm
 # mapper@4.0-impl.minigbm 是 passthrough，名字里的变体同样来自 ro.hardware
 ro.hardware.gralloc=minigbm
-# Mesa/panfrost 还没进树（见 docs/PORTING.md §1），先留正确的名字：
-# 等 libEGL_panfrost 编出来后这两个值就生效。
-ro.hardware.egl=mesa
-ro.hardware.vulkan=panfrost
+# EGL：M1 先用 SwiftShader 顶上（external/swiftshader 的 libEGL_swiftshader，
+# 取值沿用 goldfish fvp.mk 的写法）。真正吃 Mali-G31 的路线是 panfork-mesa，
+# 但它要求 libdrm >= 2.4.109 + panfrost_drm.h，本树只有 2.4.99，升级工作
+# 见 docs/PORTING.md §1。等 Mesa 进来后把这两行改成 mesa / panfrost。
+ro.hardware.egl=swiftshader
 
 # 内建固件在 /lib/firmware 由内核自身携带，不需要再配 firmware 路径
 

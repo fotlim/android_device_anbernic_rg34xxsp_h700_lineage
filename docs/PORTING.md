@@ -86,17 +86,37 @@ tools/verify-modules.py <aosp-root> [模块名...]
    - Android-x86 的 `gbm_gralloc`
    填 `android.hardware.graphics.allocator@4.0-service.gbm`，
    并把 `ro.hardware.gralloc=gbm`（本仓库已写）。
-3. **GLES**：Mesa **panfrost** —— **这一块是目前最大的缺口**。
-   Android 需要 `libEGL_mesa` + `libGLESv2_mesa` 和 EGL 平台实现
+3. **GLES**：两条路，M1 先用前者，后者是性能目标。**这是目前唯一的缺口。**
+   Android 需要 `libEGL_*` + `libGLESv2_*` 和 EGL 平台实现
    （走 `gralloc_handle_t` 的 `EGL_NATIVE_BUFFER_ANDROID` 路径）。
-   18.1 树里的 `external/mesa3d` 是**源码 + 只给 host 用的**（`Android.gen.bp`
-   里只有 `mesa_version_defaults`），编不出设备端的 `libEGL_mesa`。
-   所以必须外挂一份带 `android/` 构建目录的 Mesa：社区指的是
-   `leangangchen/panfork-mesa`（`VERSION` = 23.0.0-devel，带 `android/` 子目录），
-   或者 Android-x86 的 `mesa-android`。`ro.hardware.egl=mesa` 已经写进 `vendor.prop`。
 
-   **没有它之前，SurfaceFlinger 起不来**（SF 开局就要 EGL 建 RenderEngine），
-   所以 M1 之前必须先把这一项补上。
+   **路线 A（已接好，M1 用这个）：SwiftShader 软件渲染。**
+   18.1 树里 `external/swiftshader` 直接产出 `libEGL_swiftshader` /
+   `libGLESv2_swiftshader`，已加进 `PRODUCT_PACKAGES`，`vendor.prop` 里
+   `ro.hardware.egl=swiftshader`（取值照抄 `device/generic/goldfish/fvp.mk:89`）。
+   720×480 软件光栅很慢，但整条链（内核 → init → SF → 桌面）能验证，
+   而且不引入任何外部依赖。
+
+   **路线 B（真正吃 Mali-G31 MP2，待做）：panfork-mesa。**
+   它带 `android/` 交叉构建（`mesa3d_cross.mk`，GlobalLogic/Roman Stratiienko 那套，
+   就是 drm_hwcomposer 作者），机制是：`BOARD_MESA3D_USES_MESON_BUILD := true` +
+   `BOARD_MESA3D_GALLIUM_DRIVERS := panfrost`，用 meson 交叉文件把 Mesa 编成
+   `libgallium_dri.so` / `libEGL_mesa.so.1` / `libGLESv2_mesa.so.2` / `libglapi.so`
+   （模块名 `libgallium_dri` `libEGL_mesa` `libGLESv1_CM_mesa` `libGLESv2_mesa` `libglapi`，
+   装机路径 `/vendor/lib64/egl/*` 与 `/vendor/lib64/dri/*`）。
+
+   **动手前必须先解决三件事（都是实测出来的硬约束）**：
+   - **libdrm 版本不够**：Mesa 的 `meson.build` 里 `_drm_ver = '2.4.109'`，
+     而 18.1 树 `external/libdrm` 是 **2.4.99**，而且**缺 `include/drm/panfrost_drm.h`**
+     （panfrost 驱动必需）。要么把 `external/libdrm` 升到 2.4.109+（可参考
+     AOSP android-12/13 那一份），要么单独补头文件并谎报版本号。
+   - **分支要选对**：`leangangchen/panfork-mesa` 默认停在 **`csf`** 分支
+     （CSF 是 G78+/Mali-G610 之后的命令流前端），本机是 **G31 MP2 = Bifrost**，
+     必须切到 Bifrost 分支（仓库里有个 `(test): Add biforst patch` 提交可参考）。
+   - **宿主工具**：meson 交叉构建靠 `PATH` 里的 `meson` 和 `ninja`，本机已装
+     （`meson 1.12.1` / `ninja 1.13.2` / `mako 1.4.3`，`pip3 install`）。
+
+   **没有 EGL 之前 SurfaceFlinger 起不来**（SF 开局就要 EGL 建 RenderEngine）。
 
 验收：`adb shell dumpsys SurfaceFlinger` 能看到 720×480 的 `DisplayDeviceInfo`，
 `dumpsys gfxinfo` 有帧；`/sys/kernel/debug/dri/0/state` 有 plane 活动。

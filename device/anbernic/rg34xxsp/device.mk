@@ -76,6 +76,21 @@ PRODUCT_PACKAGES += \
     android.hardware.graphics.mapper@4.0-impl.minigbm \
     libdrm
 
+# EGL/GLES 先用 SwiftShader 顶上，把 M1（出画面）解锁。
+#
+# 为什么不是 Mesa：18.1 树里的 external/mesa3d 只有源码 + 给 host 用的
+# Android.gen.bp，编不出设备端 libEGL_mesa。真正的 GPU 路线是 panfork-mesa
+# （23.0.0-devel，带 android/ 的 meson 交叉构建），但它要求 libdrm >= 2.4.109
+# （mesa meson.build 里 _drm_ver = '2.4.109'），而本树 external/libdrm 是
+# 2.4.99 且**缺 include/drm/panfrost_drm.h** —— 得先把 libdrm 升上去。
+# 这一步不该卡住开机验证，所以先上 SwiftShader：Android 11 自带的
+# libEGL_swiftshader / libGLESv2_swiftshader（external/swiftshader），
+# goldfish 的 fvp.mk 就是这么用的（ro.hardware.egl=swiftshader）。
+# 720x480 的软件渲染很慢，但足够验证「内核 → init → SF → 桌面」整条链。
+PRODUCT_PACKAGES += \
+    libEGL_swiftshader \
+    libGLESv2_swiftshader
+
 # ---------------------------------------------------------------------------
 # 其它 HAL
 # ---------------------------------------------------------------------------
