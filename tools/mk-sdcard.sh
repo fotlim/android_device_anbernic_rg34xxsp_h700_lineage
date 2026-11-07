@@ -1,134 +1,278 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# mk-sdcard.sh -- lay out an Android SD card for the Anbernic RG34XXSP.
+# mk-sdcard.sh -- build a bootable Android SD-card *image* for the
+#                Anbernic RG34XXSP (Allwinner H700), no root-on-hardware needed.
 #
-#   sudo ./mk-sdcard.sh /dev/sdX --uboot H700_DDR4_u-boot-sunxi-with-spl.bin \
-#        --image-dir ../out/target/product/rg34xxsp \
-#        --dtb ../kernel/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg34xx-sp.dtb
+#   ./mk-sdcard.sh                                   # -> rg34xxsp-sd.img, 8 GiB
+#   ./mk-sdcard.sh --out /tmp/card.img --total-gib 30
 #
-# What it does:
-#   1. writes a GPT with boot / misc / metadata / super / userdata
-#   2. writes U-Boot (sunxi SPL + TF-A) raw at 8 KiB, like the stock OS does
-#   3. populates the FAT boot partition: extlinux.conf + Image + dtb + initrd
-#   4. writes super.img straight to the super partition (no fastboot needed)
+# Then write it to the TF card with Rufus (dd mode) or balenaEtcher on Windows.
 #
-# Everything on the target device is destroyed. Double-check the device name;
-# the script refuses to run without --force.
+# Why an image and not the card directly: Windows refuses raw writes to
+# removable media (ERROR_INVALID_ARGUMENT on the first write) unless every
+# mounted volume on the disk is locked and dismounted first. Producing an image
+# keeps that step in the user's hands, where picking the wrong disk is at least
+# visible.
+#
+# Layout (must stay in sync with device/anbernic/rg34xxsp/fstab.rg34xxsp and
+# BoardConfig.mk -- the super partition in particular has to be exactly
+# BOARD_SUPER_PARTITION_SIZE or the dm-linear metadata inside super.img
+# disagrees with the partition and first-stage init fails to map system):
+#
+#   offset      size      name        content
+#   8 KiB       ~646 KiB  -           u-boot-sunxi-with-spl.bin (sunxi SPL+ATF)
+#   1 MiB       64 MiB    boot        FAT32: extlinux/extlinux.conf, Image, initrd, dtb
+#   65 MiB      4 MiB     misc        zeroed
+#   69 MiB      16 MiB    metadata    ext4 (Android metadata encryption / vold)
+#   85 MiB      4 GiB     super       raw super.img (system/_ext/product/vendor)
+#   4181 MiB    rest      userdata    ext4
+#
+# The GPT is created with table-length: 8 on purpose. A default GPT has 128
+# entries and its entry array covers sectors 2..33, which is exactly where the
+# sunxi SPL lives (sector 16). sfdisk/sgdisk with defaults silently overwrite
+# the bootloader -- the stock Anbernic partition table also uses 8 entries.
 
 set -euo pipefail
 
-usage() {
-    sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'
-    exit 1
-}
+REPO=$(cd "$(dirname "$0")/.." && pwd)
 
-[ $# -ge 1 ] || usage
-DEV="$1"; shift || true
-
-UBOOT=""
-IMAGE_DIR=""
-DTB=""
+OUT="${REPO}/rg34xxsp-sd.img"
+TOTAL_GIB=8
+UBOOT="${REPO}/kernel/uboot/H700-DDR3-u-boot-sunxi-with-spl.bin"
+DTB="${REPO}/kernel/dtb/sun50i-h700-anbernic-rg34xx-sp.dtb"
+KERNEL="${REPO}/device/anbernic/rg34xxsp/kernel/Image"
+PRODUCT_OUT="${REPO}/out/target/product/rg34xxsp"
+RAMDISK=""
+SUPER=""
 FORCE=0
-DATA_SIZE=""
+
+usage() {
+    sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'
+    exit "${1:-1}"
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --uboot)      UBOOT="$2"; shift 2 ;;
-        --image-dir)  IMAGE_DIR="$2"; shift 2 ;;
-        --dtb)        DTB="$2"; shift 2 ;;
-        --data-size)  DATA_SIZE="$2"; shift 2 ;;
-        --force)      FORCE=1; shift ;;
-        -h|--help)    usage ;;
-        *) echo "unknown option: $1"; usage ;;
+        --out)         OUT="$2"; shift 2 ;;
+        --total-gib)   TOTAL_GIB="$2"; shift 2 ;;
+        --uboot)       UBOOT="$2"; shift 2 ;;
+        --dtb)         DTB="$2"; shift 2 ;;
+        --kernel)      KERNEL="$2"; shift 2 ;;
+        --ramdisk)     RAMDISK="$2"; shift 2 ;;
+        --super)       SUPER="$2"; shift 2 ;;
+        --product-out) PRODUCT_OUT="$2"; shift 2 ;;
+        --force)       FORCE=1; shift ;;
+        -h|--help)     usage 0 ;;
+        *) echo "unknown option: $1" >&2; usage ;;
     esac
 done
 
-[ -b "$DEV" ] || { echo "$DEV is not a block device"; exit 1; }
-[ "$FORCE" -eq 1 ] || { echo "refusing to wipe $DEV without --force"; exit 1; }
-for t in sgdisk mkfs.vfat mkfs.ext4 mcopy mmd; do
-    command -v "$t" >/dev/null || { echo "missing tool: $t (install gdisk, dosfstools, mtools)"; exit 1; }
+[ -n "$RAMDISK" ] || RAMDISK="${PRODUCT_OUT}/ramdisk.img"
+[ -n "$SUPER" ]   || SUPER="${PRODUCT_OUT}/super.img"
+
+say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; exit 1; }
+
+for f in "$UBOOT" "$DTB" "$KERNEL" "$RAMDISK" "$SUPER"; do
+    [ -f "$f" ] || die "missing input: $f"
 done
 
-UBOOT_OFFSET_KB=8      # sunxi: SPL at byte 8192, i.e. 1 KiB blocks, seek=8
-BOOT_MIB=64
-MISC_MIB=4
-META_MIB=16
-SUPER_MIB=4096
+for t in sfdisk losetup mkfs.vfat mkfs.ext4 dd python3; do
+    command -v "$t" >/dev/null || die "missing tool: $t"
+done
 
-echo "==> wiping and partitioning $DEV"
-sgdisk --zap-all "$DEV"
-sgdisk --clear \
-    --new=1:0:+${BOOT_MIB}M    --change-name=1:boot     --typecode=1:EF00 \
-    --new=2:0:+${MISC_MIB}M    --change-name=2:misc     --typecode=2:0700 \
-    --new=3:0:+${META_MIB}M    --change-name=3:metadata --typecode=3:0700 \
-    --new=4:0:+${SUPER_MIB}M   --change-name=4:super    --typecode=4:0700 \
-    --new=5:0:0                --change-name=5:userdata --typecode=5:0700 \
-    "$DEV"
-partprobe "$DEV" 2>/dev/null || true
-sleep 1
+SIMG2IMG=""
+for c in "$(command -v simg2img 2>/dev/null || true)" \
+         "${PRODUCT_OUT%/rg34xxsp}/../../../../host/linux-x86/bin/simg2img" \
+         "/root/android/lineage/out/host/linux-x86/bin/simg2img"; do
+    [ -n "$c" ] && [ -x "$c" ] && { SIMG2IMG="$c"; break; }
+done
 
-# /dev/sdX -> /dev/sdX1 ; /dev/mmcblk0 -> /dev/mmcblk0p1
-case "$DEV" in
-    *mmcblk*|*nvme*) P="${DEV}p" ;;
-    *)               P="${DEV}" ;;
-esac
-
-echo "==> formatting boot (vfat) and metadata (ext4)"
-mkfs.vfat -F 32 -n BOOT "${P}1" >/dev/null
-mkfs.ext4 -q -F -L metadata "${P}3"
-# super and userdata are written by AOSP images / formatted by the device.
-
-if [ -n "$UBOOT" ]; then
-    echo "==> writing U-Boot at ${UBOOT_OFFSET_KB} KiB"
-    dd if="$UBOOT" of="$DEV" bs=1K seek="$UBOOT_OFFSET_KB" conv=fsync,notrunc
+if [ "$FORCE" -eq 0 ] && [ -e "$OUT" ]; then
+    die "$OUT exists; pass --force to overwrite"
 fi
 
-if [ -n "$IMAGE_DIR" ] && [ -n "$DTB" ]; then
-    echo "==> populating boot partition"
+# --- geometry --------------------------------------------------------------
+SECT=512
+MiB=$((1024 * 1024 / SECT))
 
-    BOOTDIR="$(mktemp -d)"
-    trap 'rm -rf "$BOOTDIR"' EXIT
+BOOT_START=$((1 * MiB));      BOOT_SIZE=$((64 * MiB));   BOOT_NAME=boot
+MISC_START=$((65 * MiB));     MISC_SIZE=$((4 * MiB));    MISC_NAME=misc
+META_START=$((69 * MiB));     META_SIZE=$((16 * MiB));   META_NAME=metadata
+SUPER_START=$((85 * MiB));    SUPER_SIZE=$((4 * 1024 * MiB)); SUPER_NAME=super
+DATA_START=$((SUPER_START + SUPER_SIZE)); DATA_NAME=userdata
 
-    mcopy -i "${P}1" "$DTB" ::
-    mcopy -i "${P}1" "$IMAGE_DIR/kernel" ::/Image
-    if [ -f "$IMAGE_DIR/ramdisk.img" ]; then
-        mcopy -i "${P}1" "$IMAGE_DIR/ramdisk.img" ::/initrd.img
-    fi
+TOTAL_SECT=$((TOTAL_GIB * 1024 * MiB))
+# Reserve the tail: the backup GPT header lives in the very last sector and the
+# 8-entry backup entry array in the two before it. sfdisk computes its own
+# "last usable sector" and rejects a partition that runs into it.
+TAIL_RESERVE=34
+DATA_SIZE=$((TOTAL_SECT - DATA_START - TAIL_RESERVE))
+[ "$DATA_SIZE" -gt $((256 * MiB)) ] || \
+    die "--total-gib $TOTAL_GIB leaves only $((DATA_SIZE / MiB)) MiB for userdata"
 
-    cat > "$BOOTDIR/extlinux.conf" <<'EOF'
+say "layout: boot/$((BOOT_SIZE / MiB))M misc/$((MISC_SIZE / MiB))M meta/$((META_SIZE / MiB))M \
+super/$((SUPER_SIZE / MiB))M userdata/$((DATA_SIZE / MiB))M (total ${TOTAL_GIB} GiB)"
+
+# --- 1. blank image --------------------------------------------------------
+say "creating $OUT (${TOTAL_GIB} GiB sparse)"
+rm -f "$OUT"
+truncate -s $((TOTAL_SECT * SECT)) "$OUT"
+
+# --- 2. GPT with only 8 entries -------------------------------------------
+say "writing GPT (table-length 8 so the SPL at sector 16 survives)"
+sfdisk --quiet "$OUT" <<EOF
+label: gpt
+label-id: 52473334-5859-5350-4f53-000000000001
+unit: sectors
+first-lba: $BOOT_START
+table-length: 8
+sector-size: 512
+
+start=$BOOT_START, size=$BOOT_SIZE, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="$BOOT_NAME"
+start=$MISC_START, size=$MISC_SIZE, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="$MISC_NAME"
+start=$META_START, size=$META_SIZE, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="$META_NAME"
+start=$SUPER_START, size=$SUPER_SIZE, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="$SUPER_NAME"
+start=$DATA_START, size=$DATA_SIZE, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="$DATA_NAME"
+EOF
+
+# --- 3. bootloader at 8 KiB ------------------------------------------------
+say "writing U-Boot at 8 KiB ($(stat -c%s "$UBOOT") B)"
+dd if="$UBOOT" of="$OUT" bs=1K seek=8 conv=fsync,notrunc status=none
+python3 - "$OUT" <<'PY'
+import sys
+raw = open(sys.argv[1], 'rb').read(8192 + 64)
+hdr = raw[8192:8192 + 16]
+# The sunxi SPL ("eGON") starts with an ARM branch instruction whose word
+# encoding is 0xEAxxxxxx -> little-endian bytes xx xx 00 ea, and carries the
+# ASCII tag "eGON.BT0" at +4. The branch *offset* differs per build (Anbernic's
+# stock SPL uses be0400ea, ROCKNIX's uses 160000ea), so only the tag and the
+# branch opcode are asserted.
+assert hdr[:4][2:] == b'\x00\xea', 'no ARM branch instruction at 8 KiB: %r' % hdr
+assert hdr[4:12] == b'eGON.BT0', 'no eGON.BT0 tag at 8 KiB: %r' % hdr
+print('    sunxi SPL confirmed: branch %s + eGON.BT0 at 8 KiB' % hdr[:4].hex())
+PY
+
+# --- 4. attach the image as a loop device ---------------------------------
+LOOP=$(losetup -f --show -P "$OUT")
+cleanup() {
+    mountpoint -q /tmp/sdcard-boot && umount /tmp/sdcard-boot || true
+    losetup -d "$LOOP" 2>/dev/null || true
+}
+trap cleanup EXIT
+sleep 1
+partprobe "$LOOP" 2>/dev/null || true
+sleep 1
+[ -b "${LOOP}p1" ] || die "kernel did not expose ${LOOP}p1 (partscan?)"
+
+P1="${LOOP}p1"; P2="${LOOP}p2"; P3="${LOOP}p3"; P4="${LOOP}p4"; P5="${LOOP}p5"
+
+# --- 5. filesystems -------------------------------------------------------
+say "formatting boot (FAT32) / metadata / userdata (ext4)"
+mkfs.vfat -F 32 -n BOOT -i 48454C4C "$P1" >/dev/null
+mkfs.ext4 -q -F -L metadata  "$P3" >/dev/null
+mkfs.ext4 -q -F -L userdata "$P5" >/dev/null
+# misc stays zeroed: Android uses it for the bootloader message buffer only.
+
+# --- 6. super (sparse -> raw) --------------------------------------------
+say "converting super.img (sparse) to raw"
+TMP_SUPER=$(mktemp /tmp/super-raw.XXXXXX)
+trap 'rm -f "$TMP_SUPER"; cleanup' EXIT
+
+HEAD4=$(dd if="$SUPER" bs=4 count=1 status=none | od -An -tx1 | tr -d ' \n')
+if [ "$HEAD4" = "3aff26ed" ]; then
+    [ -n "$SIMG2IMG" ] || die "super.img is sparse but simg2img was not found (pass --super, or install it)"
+    "$SIMG2IMG" "$SUPER" "$TMP_SUPER"
+else
+    cp "$SUPER" "$TMP_SUPER"
+fi
+
+RAW=$(stat -c%s "$TMP_SUPER")
+[ "$RAW" -eq $((SUPER_SIZE * SECT)) ] || \
+    die "super raw size $RAW != partition size $((SUPER_SIZE * SECT)) -- BOARD_SUPER_PARTITION_SIZE changed?"
+say "writing super ($((RAW / 1048576)) MiB)"
+dd if="$TMP_SUPER" of="$P4" bs=4M conv=fsync,notrunc status=none
+
+# --- 7. boot partition ---------------------------------------------------
+say "populating boot partition"
+mkdir -p /tmp/sdcard-boot
+mount -t vfat "$P1" /tmp/sdcard-boot
+mkdir -p /tmp/sdcard-boot/extlinux
+cp "$KERNEL"  /tmp/sdcard-boot/Image
+cp "$RAMDISK" /tmp/sdcard-boot/initrd.img
+cp "$DTB"     /tmp/sdcard-boot/sun50i-h700-anbernic-rg34xx-sp.dtb
+
+# No LABEL= shortcut in APPEND on purpose: Android needs androidboot.* on the
+# kernel command line, and the dm-linear mapping for /system comes out of the
+# super partition found through /dev/block/by-name, so no root= is needed.
+cat > /tmp/sdcard-boot/extlinux/extlinux.conf <<'EOF'
 default android
 menu title Anbernic RG34XXSP
+prompt 0
+timeout 0
 
 label android
+    menu label Android 11 (LineageOS 18.1)
     linux /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb
     initrd /initrd.img
-    append console=ttyS0,115200 earlycon no_console_suspend coherent_pool=1M \
-           androidboot.hardware=rg34xxsp androidboot.selinux=permissive \
-           androidboot.boot_devices=mmcblk0
+    append console=ttyS0,115200 earlycon no_console_suspend coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=mmcblk0 androidboot.super_partition=super
 
-# Alternative: let U-Boot parse a classic Android boot image instead.
-# label bootimg
-#     linux /boot.img
-#     append bootm
+# Fallback shell if the kernel does not come up: drop to U-Boot prompt instead
+# of silently rebooting.
+label shell
+    menu label U-Boot shell
+    linux /Image
+    append console=ttyS0,115200
 EOF
-    mcopy -i "${P}1" "$BOOTDIR/extlinux.conf" ::/extlinux/extlinux.conf 2>/dev/null || {
-        mmd -i "${P}1" ::/extlinux
-        mcopy -i "${P}1" "$BOOTDIR/extlinux.conf" ::/extlinux/extlinux.conf
-    }
-
-    if [ -f "$IMAGE_DIR/super.img" ]; then
-        echo "==> writing super.img"
-        dd if="$IMAGE_DIR/super.img" of="${P}4" bs=4M conv=fsync,notrunc status=progress
-    else
-        echo "!! super.img not built yet -- flash it later with"
-        echo "   dd if=out/target/product/rg34xxsp/super.img of=${P}4 bs=4M"
-    fi
-else
-    echo "!! no --image-dir/--dtb given: boot partition left empty"
-fi
 
 sync
-echo "==> done. Put the card in the TF slot (the second SD slot) and power on."
-echo "    serial console: 115200 8N1 on the UART pads (UART0 / PH)"
+umount /tmp/sdcard-boot
+
+# --- 8. verify what we just built ----------------------------------------
+say "verifying"
+sfdisk --dump "$OUT" | sed -n '1,7p'
+sfdisk --dump "$OUT" | grep -E '\.img[0-9]+ *:'
+NPARTS=$(sfdisk --dump "$OUT" | grep -cE '\.img[0-9]+ *:')
+[ "$NPARTS" -eq 5 ] || die "expected 5 partitions, GPT has $NPARTS"
+echo
+python3 - "$OUT" "$BOOT_START" "$SUPER_START" <<'PY'
+import sys
+path, boot_start, super_start = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+h = open(path, 'rb')
+h.seek(boot_start * 512)
+bs = h.read(512)
+assert bs[510:512] == b'\x55\xaa', 'boot partition has no FAT boot sector'
+# FAT32 keeps the volume label at 0x47 (71); 0x2B is the FAT12/16 slot.
+label = bs[71:82].decode('ascii', 'replace').strip()
+fstype = bs[82:90].decode('ascii', 'replace').strip()
+oem = bs[3:11].decode('ascii', 'replace').strip()
+print('    boot: oem=%s label=%s fstype=%s' % (oem, label, fstype))
+# LP metadata geometry sits at LP_PARTITION_RESERVED_BYTES (4096), not at 0.
+# Magic is LP_METADATA_GEOMETRY_MAGIC = 0x616c4467 -> on disk 67 44 6c 61.
+h.seek(super_start * 512 + 4096)
+magic = h.read(4)
+assert magic == bytes.fromhex('67446c61'), 'no LP metadata geometry in super: %s' % magic.hex()
+print('    super: LP metadata geometry magic ok (67446c61)')
+PY
+
+# The FAT boot partition must actually contain what U-Boot's sysboot looks for.
+say "boot partition contents"
+LOOP2=$(losetup -f --show -P -o $((BOOT_START * 512)) --sizelimit $((BOOT_SIZE * 512)) "$OUT")
+mkdir -p /tmp/sdcard-check
+mount -o ro -t vfat "$LOOP2" /tmp/sdcard-check
+find /tmp/sdcard-check -type f | sed "s#/tmp/sdcard-check#    #" | sort
+umount /tmp/sdcard-check
+losetup -d "$LOOP2"
+
+say "done: $OUT ($(stat -c%s "$OUT") B)"
+cat <<EOF
+
+Next step (Windows):
+  Rufus -> 选择你的 TF 卡 -> 选 "$OUT" -> 写盘方式选 "DD 镜像" -> 开始
+  （不要选 ISO 模式，它是扇区级 raw 写；写完整张卡会被清空）
+
+首次开机：插卡上电。屏幕亮但黑屏 = 面板时序没走通；完全没反应 = SPL 没被 BROM 选中。
+串口 115200 8N1（UART0 = PH0 TX / PH1 RX，别接 VCC）能看到 U-Boot 和内核日志。
+EOF

@@ -2,32 +2,44 @@
 
 > 这份文件是给"关机之后重新开工"用的。所有数字都是实测值，不是估计。
 
-最后更新：2026-11-07 上午
+最后更新：2026-11-07 傍晚
 
 ---
 
 ## 一、当前进度一句话
 
-内核**已经编出可用 Image**（含 SELinux，32,020,488 B），Android 系统**正在编**。
-早上定位并修掉了两个足以让系统永远起不来的产品配置 bug（见第八节），现在构建在跑。
+内核**编好了**（含 SELinux，32,020,488 B），Android **编完了**（`mka droid` 11:34 成功，
+`DROID_RC=0`），**SD 卡启动镜像也做好了**（8 GiB，sha256 见第四节），只差人把它用 Rufus
+写到 TF 卡上插机实测。
 
-构建日志：`/tmp/bacon3.log`（脚本 `tmp/start-bacon3.sh`，末行是 `BACON_RC=`）；
-产物目录：`/root/android/lineage/out/target/product/rg34xxsp/`。
+构建产物：`/root/android/lineage/out/target/product/rg34xxsp/`
+（`boot.img` 32,950,272 / `super.img` 895M / `system.img` 709M / `vendor.img` 49M /
+`product.img` 105M / `system_ext.img` 35M / `ramdisk.img` 903K）。
+卡镜像：`F:\dsh-dl\rg34xxsp-sd.img`（8,589,934,592 B）。
 
 ## 二、续编命令
 
 ```bash
 # 确认内核产物还在（期望 32,020,488 字节）
-ls -l /root/artifacts/Image /root/android/lineage/device/anbernic/rg34xxsp/kernel/Image
+ls -l /root/android/lineage/device/anbernic/rg34xxsp/kernel/Image
 
-# 续编（增量）
-bash /mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/tmp/start-bacon3.sh
+# 续编。注意是 droid，不是 bacon —— TARGET_SKIP_OTA_PACKAGE := true 时
+# bacon 会在打包 OTA 那步因为 zip 不存在而 ln 失败。
+cd /root/android/lineage && source build/envsetup.sh \
+  && lunch lineage_rg34xxsp-userdebug && mka droid
+
+# 重做卡镜像（会自己 simg2img 并把 Image/dtb 摆进 FAT）
+cd /mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/anbernic-rg34xxsp
+./tools/mk-sdcard.sh --out /root/rg34xxsp-sd.img --total-gib 8 --force
 ```
 
 ## 三、已经改掉的参数（不用再改）
 
 ```
 BOARD_RAMDISK_OFFSET := 0x03000000     ← 已改，原来是 0x02000000
+TARGET_NO_RECOVERY := true             ← recovery-as-boot 会把 7.4 MB 的 recovery ramdisk 塞进 boot.img
+TARGET_SKIP_OTA_PACKAGE := true
+PRODUCT_ENFORCE_VINTF_MANIFEST         ← 这行**没用**，见第九节；真正的开关在 lineage_rg34xxsp.mk 末尾
 ```
 
 原因：内核 32,020,488 B 放在 `0x40080000`，**结束于 `0x41F0A0C8`**；ramdisk 原厂在 `0x42000000`，
@@ -80,21 +92,33 @@ table-length: 8        ← 只放 8 个分区表项 = 1 KiB
 
 第一个分区从扇区 73728（36 MiB）开始，不是 1 MiB —— 前面全留给引导程序。
 
-### 卡写入被 Windows 卡住了（待解决）
+### 卡写入被 Windows 卡住了 → 改成"做镜像 + Rufus"
 
 `\\.\PhysicalDrive3` 可以打开、`IOCTL_DISK_GET_LENGTH_INFO` 拿到 31.91 GB、
 读 16 KiB 也正常，但**第一次 `write()` 就 `OSError: [Errno 22] Invalid argument`**。
+`diskpart` 对可移动介质拒绝 `offline`（"此操作不受移动媒体支持"），
+`wsl --mount --bare` 报 `ERROR_INVALID_DRIVE` —— 这两条路都别再试。
 
-排查方向（按优先级）：
+**现在的办法**：在 WSL 里把整张卡做成一个镜像文件，Windows 侧用 Rufus 的 **DD 模式**写。
+风险留在用户手里（选错盘是人能看见的错），镜像也可以反复重做。
 
-1. **卷还挂着** —— `G:` / `H:` 两个卷在这张卡上，Windows 持有它们。先删盘符再写
-   （`Get-Volume` 显示其 Size=0，文件系统本来就坏了，该清掉）。
-2. `CreateFileW` + `FILE_FLAG_NO_BUFFERING` 重开句柄（ctypes 直接调 Win32，不走 python `open()`），
-   写入长度和偏移按 512 对齐。
-3. 绕开 raw 写：在 WSL 里做 **loop 文件**（`losetup -fP` 可用，`mkfs.vfat`/`sgdisk` 都在），
-   做成镜像再从 Windows 侧按偏移写入。
-4. 最后手段：`diskpart` 对可移动介质拒绝 `offline`（实测报"此操作不受移动媒体支持"），
-   **`wsl --mount --bare` 这条路走不通**，不要再试。
+`tools/mk-sdcard.sh` 的布局（与 `fstab.rg34xxsp` / `BoardConfig.mk` 严格对齐）：
+
+| 偏移 | 大小 | 分区名 | 内容 |
+|---|---|---|---|
+| 8 KiB | ~646 KiB | — | `u-boot-sunxi-with-spl.bin`（sunxi SPL + ATF） |
+| 1 MiB | 64 MiB | `boot` | FAT32：`extlinux/extlinux.conf`、`Image`、`initrd.img`、`dtb` |
+| 65 MiB | 4 MiB | `misc` | 全零（bootloader message buffer） |
+| 69 MiB | 16 MiB | `metadata` | ext4 |
+| 85 MiB | 4 GiB | `super` | raw `super.img`（**必须正好等于 BOARD_SUPER_PARTITION_SIZE**） |
+| 4181 MiB | 余下 | `userdata` | ext4 |
+
+实测产物：`/root/rg34xxsp-sd.img` → 拷到 `F:\dsh-dl\rg34xxsp-sd.img`，
+8,589,934,592 B，sha256 `e860bb186d97264647e1b10c72216144679dcfd72b2b6b5dcc2daa0273bf06db`（双端一致）。
+
+引导链：这份 U-Boot **没有 `abootimg` 支持**，走 `sysboot extlinux/extlinux.conf` + `booti`，
+所以 boot.img 在这条路线里用不上 —— 内核 / ramdisk / cmdline 全拆开由 U-Boot 传。
+详见 `kernel/uboot/README.md`。
 
 ## 五、已经做完的（不需要再动）
 
@@ -109,17 +133,26 @@ table-length: 8        ← 只放 8 个分区表项 = 1 KiB
   变成含 `init_system` / `init_vendor` / `linker` / `servicemanager` 的完整 416 项。
 - 原厂备份完整：`F:\dsh-backup\rg34xxsp-stock-20261106\`（含 SHA256SUMS，7-Zip 解压后大小与分区严格一致）。
 - 刷 eMMC 的脚本 `tools/flash-boot.ps1`（含 7 道校验，`-Restore` 回滚），dry-run 已验证。
+- Android **编完了**：`mka droid` 11:34 成功，ramdisk 里实测有 `/ramdisk/init`（2,090,096 B）
+  与 `/ramdisk/fstab.rg34xxsp`，`boot.img` 头各项几何全对（`kernel_addr 0x40080000` /
+  `ramdisk_addr 0x43000000` / `page_size 2048` / `ramdisk_size 924660`）。
+- 卡镜像 `tools/mk-sdcard.sh` 可用，产出 8 GiB 镜像并自带 5 项自检
+  （GPT 恰好 5 个分区 / FAT32 卷标 BOOT / super 的 LP metadata 魔数 `67446c61` /
+  boot 分区里 4 个文件 / 双端 sha256）。
 
 ## 六、还欠的
 
-1. **EGL**：`external/mesa3d` 是 host-only，编不出设备端 `libEGL_mesa`。
-   `/root/ref/panfork-mesa`（23.0.0-devel，带 `android/` 目录）是唯一缺口，要接进 18.1 的 soong。
-   这是 M1（SurfaceFlinger 出画面）之前最后一块。
-2. 构建跑完后：确认 `installed-files-ramdisk.txt` 里出现 `/ramdisk/init`，
-   再取 `boot.img` / `super.img`。
-3. 卡路线：解决 raw 写 → 分区（GPT table-length=8）→ U-Boot 写 8 KiB → FAT 启动分区放
-   `Image` / DTB / `initrd` / `extlinux/extlinux.conf` → `super.img` 写进对应分区。
-4. 掌机实测：插卡开机看 U-Boot 是否走卡（`boot_targets` 的 mmc0）、能否进 Android first-stage。
+1. **上机实测**（唯一真正未知的一步）：用 Rufus 的 DD 模式把 `F:\dsh-dl\rg34xxsp-sd.img`
+   写到 TF 卡，插机开机。观察顺序：U-Boot 有没有走 mmc0 → 内核有没有起来（串口 PH0/PH1，
+   115200）→ 面板有没有点亮 → first-stage init 能不能挂上 /system。
+2. **EGL**：`external/mesa3d` 是 host-only，编不出设备端 `libEGL_mesa`，现在用 SwiftShader 顶着。
+   `/root/ref/panfork-mesa`（23.0.0-devel，带 `android/` 目录）是那块缺口，接进来要先把
+   `external/libdrm` 升到 ≥2.4.109（补 `panfrost_drm.h`）并切 Bifrost 分支（本机 G31 MP2 不是 G78）。
+3. **kernel/dts 收回自己维护**：现在用的是 ROCKNIX 验证过的二进制 dtb，
+   自己那份覆盖式 dts 编不过（缺 `&panel` / `&joypad` label）。要做的话见
+   `kernel/dtb/README.md` 里写的两条路线。
+4. **低内存优化**：借 rk3326 的 `go_opt.mk`（`PRODUCT_DISABLE_SCUDO`、
+   `TARGET_VNDK_USE_CORE_VARIANT`、`PRODUCT_MINIMIZE_JAVA_DEBUG_INFO`），等系统能起来再谈。
 
 ## 七、踩过的坑（别再踩）
 
@@ -133,6 +166,11 @@ table-length: 8        ← 只放 8 个分区表项 = 1 KiB
 | `git commit -F -` / `<<<` 报错 | PowerShell 没有 heredoc。把 message 写进 `$env:TEMP\*.txt` 再 `git commit -F <file>` |
 | 脚本里 `source build/envsetup.sh` 后整段无声退出 | 脚本开了 `set -u`，envsetup.sh 引用未定义变量直接终止。**envsetup 之前不要 `set -u`** |
 | `get_build_var PRODUCT_PACKAGES` 里搜不到 `libc` / `toybox` | 不是缺包：18.1 里它们不是 PRODUCT_PACKAGES 的顶层项（`libc` 在 `com.android.runtime` APEX，`adbd` 叫 `adbd_system_api`）。搜 `init_system` / `init_vendor` 更可靠 |
+| 在 BoardConfig / 产品 mk 里写 `PRODUCT_ENFORCE_VINTF_MANIFEST := false` 完全没效果 | `build/make/core/config.mk:712-716` 用 `PRODUCT_FULL_TREBLE` 无条件覆盖它。**真开关是 `PRODUCT_OTA_ENFORCE_VINTF_KERNEL_REQUIREMENTS`**，见第九节 |
+| `mka bacon` 最后一步 `ln: cannot create hard link ... No such file` | `TARGET_SKIP_OTA_PACKAGE := true` 时不生成 OTA zip，但 bacon 的 ln 还在跑。**用 `mka droid`** |
+| `sfdisk` 报 `last usable GPT sector is 16777212, but 16777215 is requested` | 末分区吃满了尾部保留区。镜像尾部要留 34 个扇区给备份 GPT 头和 8 项表 |
+| 卡上 U-Boot 断言失败「no sunxi SPL at 8 KiB」 | 原厂 eMMC 的 SPL 是分支 `be0400ea`，ROCKNIX 的是 `160000ea`。**只校验 `xx xx 00 ea` + `eGON.BT0`，别写死偏移** |
+| `boot.img` 里的内核和我们编的不是同一份 | `TARGET_PREBUILT_KERNEL` 指向 `device/anbernic/rg34xxsp/kernel/Image`，而该文件被 `.gitignore` 掉、`build-kernel.sh` 只"打印"了拷贝命令。**现在脚本会自己装进设备树并打印 sha256**；当前期望 `1e74ef643081216cf93b23da0bf3e8ee0d59c23f67c09796b963f4a63b71e91f` |
 
 ---
 
@@ -176,3 +214,55 @@ $(call inherit-product, vendor/lineage/config/common_full_tablet_wifionly.mk)
 
 修后实测：`PRODUCT_PACKAGES` 里出现 `init_system` / `init_vendor` / `linker` / `servicemanager`，
 `PRODUCT_USES_DEFAULT_ART_CONFIG = true`，`WITH_DEXPREOPT = true`。
+
+---
+
+## 九、VINTF 兼容性检查：为什么只有这一个开关键有用
+
+### 症状
+
+`mka droid` 到 13% 死在这里：
+
+```
+files are incompatible: Runtime info and framework compatibility matrix are incompatible:
+No kernel entry found for kernel version 7.1 ... Minimum LTS: 4.9.165, kernel FCM version: 4
+```
+
+编译目标是 `out/target/product/rg34xxsp/obj/PACKAGING/check_vintf_all_intermediates/check_vintf_compatible_log`。
+
+### 为什么改不动
+
+`PRODUCT_ENFORCE_VINTF_MANIFEST := false` 写在 BoardConfig 里、写在产品 mk 里，**都没用**。
+`build/make/core/config.mk:712-716`：
+
+```make
+requirements := PRODUCT_TREBLE_LINKER_NAMESPACES PRODUCT_SEPOLICY_SPLIT \
+                PRODUCT_ENFORCE_VINTF_MANIFEST PRODUCT_NOTICE_SPLIT
+$(foreach req,$(requirements),\
+  $(eval $(req) := $(if $($(req)_OVERRIDE),$($(req)_OVERRIDE),$(PRODUCT_FULL_TREBLE))))
+```
+
+这个 foreach 无条件覆盖 —— 变量最终就等于 `PRODUCT_FULL_TREBLE`（本体是 true）。
+
+`_OVERRIDE` 那条路**更不能用**：紧接着一行 `PRODUCT_FULL_TREBLE := $(if $(filter false,$($(req))),false,...)`，
+设 `PRODUCT_ENFORCE_VINTF_MANIFEST_OVERRIDE := false` 会把 `PRODUCT_FULL_TREBLE` 一起拉成 false，
+VNDK / linker namespace / 一堆 treble 相关配置全灭，比原报错严重得多。
+
+### 正确开关
+
+```make
+# device/anbernic/rg34xxsp/lineage_rg34xxsp.mk 末尾（必须在所有 inherit-product 之后）
+PRODUCT_OTA_ENFORCE_VINTF_KERNEL_REQUIREMENTS := false
+```
+
+依据：
+
+- `build/make/core/Makefile:3920` `ifeq ($(PRODUCT_OTA_ENFORCE_VINTF_KERNEL_REQUIREMENTS),true)`
+  才把 `--kernel $$(cat $(BUILT_KERNEL_VERSION_FILE)):...` 加进 `check_vintf_compatible_args`；
+- `build/make/core/product_config.mk:336-339` 该变量为空时默认置 true，所以必须显式写 false；
+- AOSP 自己在 `build/make/core/Makefile:3947` 的注释里把它列为第 (3) 种解法。
+
+它只砍掉"内核版本查表"那一半，HAL 那一半（gatekeeper / keymaster 之类）照查 —— 安全性没丢。
+内核 7.1 在 Android 11 的 matrix 里查不到，是 2020 年的表没有 7.x 行，不是真不兼容。
+
+实测确认：`VINTF_KERNEL_REQ=false`、`ENFORCE=true`、`FULL_TREBLE=true`，然后 `mka droid` 一次过。

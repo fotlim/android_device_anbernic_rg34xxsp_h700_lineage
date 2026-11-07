@@ -248,25 +248,60 @@ scp -r root@192.168.137.30:/mnt/mmc/backup-stock-* F:\dsh-backup\
 
 ## 6. 做卡：从 TF 卡启动（路线 B）
 
-只在"想先从卡上跑、eMMC 一个字节都不动"时才需要：
+只在"想先从卡上跑、eMMC 一个字节都不动"时才需要。
+Windows 上 raw 写可移动介质会被拒（`OSError: [Errno 22]`），所以现在**不在 Windows 直接写卡**，
+而是在 WSL 里做镜像、再用 Rufus 的 DD 模式写。
 
 ```sh
-sudo ./tools/mk-sdcard.sh /dev/sdX --force \
-     --uboot H700_DDR3_u-boot-sunxi-with-spl.bin \
-     --image-dir ~/android/lineage/out/target/product/rg34xxsp \
-     --dtb /tmp/sun50i-h700-anbernic-rg34xx-sp.dtb
+# 在 WSL 里（需要 root：losetup + mount）
+cd anbernic-rg34xxsp
+sudo ./tools/mk-sdcard.sh \
+     --out /root/rg34xxsp-sd.img \
+     --total-gib 8 \
+     --product-out /root/android/lineage/out/target/product/rg34xxsp \
+     --force
 ```
 
-本机是 **DDR3**（`axp2202-dcdc3 = 1200000 µV`），所以 U-Boot 要用 DDR3 那份；
-用 ROCKNIX 的判据就是读这个 regulator 的微伏值：`1200000` → DDR3，`1100000` → DDR4。
+默认输入全部从仓库取，不用手传：
 
-脚本做的事：GPT（boot 64M / misc 4M / metadata 16M / super 4G / userdata 剩余）→
-U-Boot 写到 8 KiB → boot 分区放 `extlinux.conf` + `Image` + `dtb` + `initrd.img` →
-`super.img` 直接 dd 到 super 分区。
+| 参数 | 默认值 |
+|---|---|
+| `--uboot` | `kernel/uboot/H700-DDR3-u-boot-sunxi-with-spl.bin` |
+| `--dtb` | `kernel/dtb/sun50i-h700-anbernic-rg34xx-sp.dtb` |
+| `--kernel` | `device/anbernic/rg34xxsp/kernel/Image` |
+| `--ramdisk` | `<product-out>/ramdisk.img` |
+| `--super` | `<product-out>/super.img`（sparse，脚本自己 `simg2img`） |
+
+脚本做的事（顺序即依赖关系）：
+
+1. `truncate` 出 8 GiB 稀疏镜像；
+2. `sfdisk` 建 GPT，**`table-length: 8`** —— 默认 128 项的分区表会覆盖扇区 16，把 SPL 砸掉；
+3. U-Boot 写到 **8 KiB**，然后校验 `0xEA` 分支指令 + `eGON.BT0` tag；
+4. `losetup -P` 挂上去，`mkfs.vfat -F 32 -n BOOT` / `mkfs.ext4 metadata` / `mkfs.ext4 userdata`；
+5. `simg2img` 把超集转 raw，断言**大小正好 4 GiB**（等于 `BOARD_SUPER_PARTITION_SIZE`），再 dd 进 super 分区；
+6. 挂 FAT 分区，放 `extlinux/extlinux.conf` + `Image` + `initrd.img` + `dtb`；
+7. 自检：GPT 恰好 5 个分区、FAT32 卷标 `BOOT`、super 的 LP metadata 魔数 `67446c61`、
+   boot 分区里 4 个文件都在。
+
+做完把镜像拷到 Windows 给 Rufus：
+
+```powershell
+# 双端 sha256 必须一致
+wsl -u root sha256sum /root/rg34xxsp-sd.img
+```
+
+Rufus 里**写盘方式必须选 "DD 镜像"**，ISO 模式会按 El Torito 去解释分区、写出来是坏的。
+整张卡会被清空（这是预期行为）。
+
+本机是 **DDR3**（`axp2202-dcdc3 = 1200000 µV`），所以 U-Boot 用 DDR3 那份；
+ROCKNIX 的判据就是读这个 regulator 的微伏值：`1200000` → DDR3，`1100000` → DDR4。
 
 > 注意：卡虽然在 TF 槽里能启动，但 `androidboot.boot_devices` 写的是 `mmcblk0`。
 > 从 TF 卡启动时 TF 会变成 `mmcblk0`（eMMC 变 `mmcblk1` 或 `mmcblk2`，取决于 aliases），
 > **首次卡启动前先 `cat /proc/cmdline` 确认真实设备名**，必要时改 boot 分区里的 `extlinux.conf`。
+>
+> 另外这份 U-Boot 没有 `abootimg` 支持，所以**卡路线不需要 boot.img**：内核、ramdisk、
+> `androidboot.*` cmdline 全部拆开由 U-Boot 通过 extlinux 传。细节见 `kernel/uboot/README.md`。
 
 ## 7. 首次启动
 

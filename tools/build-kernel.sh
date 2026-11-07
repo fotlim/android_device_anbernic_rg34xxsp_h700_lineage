@@ -377,19 +377,25 @@ echo "  屏幕驱动：$(grep '^CONFIG_DRM_PANEL_MIPI=' .config) / $(grep '^CONF
 echo "  手柄驱动：$(grep '^CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD=' .config)"
 
 say "5/6 编 Image（-j$JOBS）"
-cp "$REPO"/kernel/dts/*.dts "$AW"/
 make ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$JOBS" Image
 cp -f "$SRC/arch/arm64/boot/Image" "$OUT/Image"
 
-say "6/6 编 DTB"
-for f in sun50i-h700-anbernic-rg34xx-sp.dtb sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb; do
-  make ARCH=arm64 CROSS_COMPILE="$CROSS" "allwinner/$f"
-  cp -f "$AW/$f" "$OUT/$f"
-done
+# 注意：这里不编 DTB，直接装仓库里那份 ROCKNIX 验证过的二进制。
+# 原因见 kernel/dtb/README.md：repo 里的 kernel/dts/*.dts 是 include 式覆盖，
+# 依赖 sun50i-h700-anbernic-rg35xx-2024.dts 里存在 panel/joypad 两个 label，
+# 而那两段是 ROCKNIX 的 0111/0140 补丁加进去的 —— 没打补丁的树编不过
+# （Error: Label or path panel not found）。
+say "6/6 安装 DTB"
+cp -f "$REPO"/kernel/dtb/sun50i-h700-anbernic-rg34xx-sp.dtb "$OUT/"
+cp -f "$REPO"/kernel/dtb/sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb "$OUT/"
+
+say "把 Image 装进设备树（TARGET_PREBUILT_KERNEL 就指这个文件）"
+DEST="$REPO/device/anbernic/rg34xxsp/kernel/Image"
+cp -f "$OUT/Image" "$DEST"
+echo "  $DEST"
+echo "  $(stat -c%s "$DEST") B  sha256 $(sha256sum "$DEST" | cut -d' ' -f1)"
 
 say "完成"
 ls -l "$OUT"
 echo
-echo "把 Image 拷到设备树里，供 mka 打进 boot.img："
-echo "  cp $OUT/Image $REPO/device/anbernic/rg34xxsp/kernel/Image"
-echo "DTB 交给 boot 分区（extlinux.conf）或 tools/mk-sdcard.sh。"
+echo "DTB 已就位，交给 boot 分区（extlinux.conf）或 tools/mk-sdcard.sh。"
