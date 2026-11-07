@@ -41,10 +41,12 @@ OUT="${REPO}/rg34xxsp-sd.img"
 TOTAL_GIB=8
 UBOOT="${REPO}/kernel/uboot/H700-DDR3-u-boot-sunxi-with-spl.bin"
 DTB="${REPO}/kernel/dtb/sun50i-h700-anbernic-rg34xx-sp.dtb"
+DTB_V2="${REPO}/kernel/dtb/sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb"
 KERNEL="${REPO}/device/anbernic/rg34xxsp/kernel/Image"
 PRODUCT_OUT="${REPO}/out/target/product/rg34xxsp"
 RAMDISK=""
 SUPER=""
+DEBUG_INIT=""
 FORCE=0
 
 usage() {
@@ -61,6 +63,7 @@ while [ $# -gt 0 ]; do
         --kernel)      KERNEL="$2"; shift 2 ;;
         --ramdisk)     RAMDISK="$2"; shift 2 ;;
         --super)       SUPER="$2"; shift 2 ;;
+        --debug-init)  DEBUG_INIT="$2"; shift 2 ;;
         --product-out) PRODUCT_OUT="$2"; shift 2 ;;
         --force)       FORCE=1; shift ;;
         -h|--help)     usage 0 ;;
@@ -202,10 +205,47 @@ mkdir -p /tmp/sdcard-boot/extlinux
 cp "$KERNEL"  /tmp/sdcard-boot/Image
 cp "$RAMDISK" /tmp/sdcard-boot/initrd.img
 cp "$DTB"     /tmp/sdcard-boot/sun50i-h700-anbernic-rg34xx-sp.dtb
+[ -f "$DTB_V2" ] && cp "$DTB_V2" /tmp/sdcard-boot/sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb
+
+# Optional debug initramfs: a tiny static PID 1 that mounts the FAT partition,
+# writes /proc/cmdline + the whole kernel ring buffer to DEBUG/dmesg.txt and
+# powers off. This is the only way to read a failing boot on this board -- no
+# UART is exposed, USB never enumerates when the kernel dies early, and pstore
+# is not compiled in. Build it with tools/debug-init/build.sh.
+DEBUG_LABEL=""
+if [ -n "$DEBUG_INIT" ]; then
+    [ -f "$DEBUG_INIT" ] || die "missing --debug-init file: $DEBUG_INIT"
+    say "packing debug initramfs from $DEBUG_INIT"
+    rm -rf /tmp/debug-initrd
+    mkdir -p /tmp/debug-initrd
+    cp "$DEBUG_INIT" /tmp/debug-initrd/init
+    chmod 0755 /tmp/debug-initrd/init
+    ( cd /tmp/debug-initrd && find . | cpio -o -H newc --quiet | gzip -9 ) \
+        > /tmp/sdcard-boot/initrd-debug.img
+    ls -l /tmp/sdcard-boot/initrd-debug.img
+    DEBUG_LABEL=yes
+fi
 
 # No LABEL= shortcut in APPEND on purpose: Android needs androidboot.* on the
 # kernel command line, and the dm-linear mapping for /system comes out of the
 # super partition found through /dev/block/by-name, so no root= is needed.
+#
+# Two APPEND details that are load-bearing:
+#
+#  * androidboot.boot_devices=4020000.mmc -- NOT mmcblk0. init compares this
+#    string against the *platform device name* (see
+#    system/core/init/devices.cpp:353, where `device` comes out of
+#    FindPlatformDevice() as "4020000.mmc" because `soc` is a simple-bus and
+#    therefore not itself a platform device). Only a match creates the global
+#    /dev/block/by-name/* symlinks that first-stage init follows to find
+#    metadata/userdata/super. With the wrong name those symlinks never appear
+#    and first-stage mount dies with "Failed to mount required partitions
+#    early" -> LOG(FATAL) -> boot loop.
+#
+#  * console=tty0 + ignore_loglevel -- the handheld has no exposed UART, so
+#    ttyS0 is a black hole. tty0 makes the kernel ring buffer and init's
+#    stderr visible on the panel once fbcon binds, which is the only way to
+#    see where a boot fails on this device.
 cat > /tmp/sdcard-boot/extlinux/extlinux.conf <<'EOF'
 default android
 menu title Anbernic RG34XXSP
@@ -217,15 +257,41 @@ label android
     linux /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb
     initrd /initrd.img
-    append console=ttyS0,115200 earlycon no_console_suspend coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=mmcblk0 androidboot.super_partition=super
+    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
 
-# Fallback shell if the kernel does not come up: drop to U-Boot prompt instead
-# of silently rebooting.
+# Same Android image but with the v2 panel firmware. The two DTB files differ
+# only in rocknix-dt-id and the panel node's first compatible string, which is
+# what panel-mipi uses to pick panels/<compatible>.panel -- so this label is
+# how we find out which panel an individual unit was built with.
+label android-v2
+    menu label Android 11 (v2 panel)
+    linux /Image
+    devicetree /sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb
+    initrd /initrd.img
+    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
+
+# Same kernel, but no Android ramdisk and no init: the kernel panics after
+# init_mount_root() because there is nothing to exec. Kept as an escape hatch
+# for when the panel never lights up.
 label shell
     menu label U-Boot shell
     linux /Image
-    append console=ttyS0,115200
+    append console=ttyS0,115200 console=tty0
 EOF
+
+if [ -n "$DEBUG_LABEL" ]; then
+    cat >> /tmp/sdcard-boot/extlinux/extlinux.conf <<'EOF'
+
+# Log collector: boots the same kernel with a 650 KiB static PID 1 that dumps
+# everything to DEBUG/dmesg.txt on this FAT partition and powers off.
+label debug
+    menu label Debug log dump
+    linux /Image
+    devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb
+    initrd /initrd-debug.img
+    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp
+EOF
+fi
 
 sync
 umount /tmp/sdcard-boot
