@@ -207,19 +207,26 @@ cp "$RAMDISK" /tmp/sdcard-boot/initrd.img
 cp "$DTB"     /tmp/sdcard-boot/sun50i-h700-anbernic-rg34xx-sp.dtb
 [ -f "$DTB_V2" ] && cp "$DTB_V2" /tmp/sdcard-boot/sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb
 
-# Optional debug initramfs: a tiny static PID 1 that mounts the FAT partition,
-# writes /proc/cmdline + the whole kernel ring buffer to DEBUG/dmesg.txt and
-# powers off. This is the only way to read a failing boot on this board -- no
-# UART is exposed, USB never enumerates when the kernel dies early, and pstore
-# is not compiled in. Build it with tools/debug-init/build.sh.
+# Optional "instrumented" initramfs: the real Android ramdisk with a small
+# static logger prepended as /init. The logger takes a snapshot of /proc and
+# /sys onto the FAT boot partition, forks a child that streams /dev/kmsg into
+# DEBUG/dmesg.txt, then exec's the real Android init (renamed /init.android) so
+# the system boots normally -- logging all the way. This is the only way to see
+# a failing boot on this board: no UART is exposed, USB never enumerates when
+# the kernel dies early, and pstore is not compiled in. Build the logger with
+# tools/debug-init/build.sh.
 DEBUG_LABEL=""
 if [ -n "$DEBUG_INIT" ]; then
     [ -f "$DEBUG_INIT" ] || die "missing --debug-init file: $DEBUG_INIT"
-    say "packing debug initramfs from $DEBUG_INIT"
+    say "packing instrumented initramfs from $DEBUG_INIT"
     rm -rf /tmp/debug-initrd
     mkdir -p /tmp/debug-initrd
+    # Unpack the stock Android ramdisk, then swap in our /init.
+    ( cd /tmp/debug-initrd && gzip -dc "$RAMDISK" | cpio -i -d --quiet )
+    [ -f /tmp/debug-initrd/init ] || die "stock ramdisk has no /init to wrap"
+    mv /tmp/debug-initrd/init /tmp/debug-initrd/init.android
     cp "$DEBUG_INIT" /tmp/debug-initrd/init
-    chmod 0755 /tmp/debug-initrd/init
+    chmod 0755 /tmp/debug-initrd/init /tmp/debug-initrd/init.android
     ( cd /tmp/debug-initrd && find . | cpio -o -H newc --quiet | gzip -9 ) \
         > /tmp/sdcard-boot/initrd-debug.img
     ls -l /tmp/sdcard-boot/initrd-debug.img
@@ -246,7 +253,17 @@ fi
 #    ttyS0 is a black hole. tty0 makes the kernel ring buffer and init's
 #    stderr visible on the panel once fbcon binds, which is the only way to
 #    see where a boot fails on this device.
-cat > /tmp/sdcard-boot/extlinux/extlinux.conf <<'EOF'
+#
+# When --debug-init is given the default label uses initrd-debug.img, which is
+# the stock ramdisk with a logger prepended: it records to DEBUG/dmesg.txt and
+# then exec's the real Android init, so this is still a normal boot.
+if [ -n "$DEBUG_LABEL" ]; then
+    BOOT_INITRD=/initrd-debug.img
+else
+    BOOT_INITRD=/initrd.img
+fi
+
+cat > /tmp/sdcard-boot/extlinux/extlinux.conf <<EOF
 default android
 menu title Anbernic RG34XXSP
 prompt 0
@@ -256,7 +273,7 @@ label android
     menu label Android 11 (LineageOS 18.1)
     linux /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb
-    initrd /initrd.img
+    initrd $BOOT_INITRD
     append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
 
 # Same Android image but with the v2 panel firmware. The two DTB files differ
@@ -267,10 +284,10 @@ label android-v2
     menu label Android 11 (v2 panel)
     linux /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb
-    initrd /initrd.img
+    initrd $BOOT_INITRD
     append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
 
-# Same kernel, but no Android ramdisk and no init: the kernel panics after
+# Same kernel, but no ramdisk and no init: the kernel panics after
 # init_mount_root() because there is nothing to exec. Kept as an escape hatch
 # for when the panel never lights up.
 label shell
@@ -282,14 +299,15 @@ EOF
 if [ -n "$DEBUG_LABEL" ]; then
     cat >> /tmp/sdcard-boot/extlinux/extlinux.conf <<'EOF'
 
-# Log collector: boots the same kernel with a 650 KiB static PID 1 that dumps
-# everything to DEBUG/dmesg.txt on this FAT partition and powers off.
-label debug
-    menu label Debug log dump
+# Escape hatch: the untouched stock ramdisk, no logger in the way. If the
+# instrumented boot behaves differently from this one, the logger is the
+# suspect rather than the image.
+label plain
+    menu label Android 11 (stock ramdisk)
     linux /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb
-    initrd /initrd-debug.img
-    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp
+    initrd /initrd.img
+    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
 EOF
 fi
 

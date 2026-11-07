@@ -221,63 +221,96 @@ static int wait_for(const char *path, int tries)
 	return -1;
 }
 
+/*
+ * Stream /dev/kmsg into a file on the FAT partition, forever.
+ *
+ * This runs as a forked child, not as PID 1, so the real Android init can take
+ * over PID 1 and boot normally while we keep recording.
+ *
+ * Both descriptors are opened by the parent *before* the fork, and that is
+ * load-bearing rather than stylistic: Android init replaces /dev with a fresh
+ * tmpfs and later stacks another tmpfs over /mnt, so anything opened after the
+ * handover would point at the wrong filesystem. An fd opened beforehand keeps
+ * resolving to the original devtmpfs and the original FAT directory, so the
+ * log survives both remounts.
+ *
+ * fsync() is called every so often because a first-stage failure ends in
+ * LOG(FATAL) -> abort -> panic -> reset, and anything still in the page cache
+ * at that point is gone.
+ */
+static void kmsg_logger(int kfd, int lfd)
+{
+	char buf[8192];
+	ssize_t n;
+	int quiet = 0, dirty = 0;
+
+	for (;;) {
+		n = read(kfd, buf, sizeof(buf));
+		if (n > 0) {
+			if (write(lfd, buf, (size_t)n) > 0)
+				dirty++;
+			quiet = 0;
+			if (dirty >= 32) {
+				fsync(lfd);
+				dirty = 0;
+			}
+			continue;
+		}
+		if (n < 0 && errno != EAGAIN && errno != EINTR)
+			break;
+		usleep(100000);
+		if (dirty && ++quiet >= 10) {
+			fsync(lfd);
+			quiet = 0;
+		}
+	}
+	fsync(lfd);
+	_exit(0);
+}
+
+/*
+ * Candidate boot partitions, in the order we try them.
+ *
+ * We cannot assume the TF card is mmcblk0: the DTB aliases say mmc0 is the SD
+ * slot, but the kernel only assigns mmcblkN in probe order, and on a cold boot
+ * the eMMC can win the race. The eMMC's p1 is the Allwinner `special`
+ * partition, not a filesystem, so mounting the wrong candidate just fails --
+ * hence we probe by mounting and looking for extlinux/extlinux.conf rather
+ * than trusting the index.
+ */
 static const char *boot_candidates[] = {
-	"/dev/mmcblk0p1", "/dev/mmcblk1p1", "/dev/mmcblk2p1", NULL
+	"/dev/mmcblk0p1", "/dev/mmcblk1p1", "/dev/mmcblk2p1",
+	"/dev/mmcblk0p2", "/dev/mmcblk1p2", "/dev/mmcblk2p2", NULL
 };
 
-int main(void)
+/* Mount each candidate read-write and keep the first that really holds our
+ * extlinux.conf. Returns 0 and leaves it mounted on /mnt, or -1. */
+static int mount_boot_partition(const char **used)
 {
-	const char *bootdev = NULL;
-	char logpath[128];
-	int i, j;
+	int j;
 
-	mkdir("/proc", 0555);
-	mkdir("/sys", 0555);
-	mkdir("/dev", 0755);
-	mkdir("/mnt", 0755);
-	mkdir("/tmp", 0777);
-	mount("proc", "/proc", "proc", 0, NULL);
-	mount("sysfs", "/sys", "sysfs", 0, NULL);
-	mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
-
-	con = fopen("/dev/console", "w");
-
-	say("rg34xxsp debug init starting\n");
-
-	/* Find the FAT boot partition: it is partition 1 of whichever mmc it is. */
-	for (i = 0; i < 60 && !bootdev; i++) {
-		for (j = 0; boot_candidates[j]; j++) {
-			if (access(boot_candidates[j], F_OK) == 0) {
-				bootdev = boot_candidates[j];
-				break;
-			}
+	for (j = 0; boot_candidates[j]; j++) {
+		if (access(boot_candidates[j], F_OK) != 0)
+			continue;
+		if (mount(boot_candidates[j], "/mnt", "vfat", 0, NULL) != 0)
+			continue;
+		if (access("/mnt/extlinux/extlinux.conf", F_OK) == 0) {
+			*used = boot_candidates[j];
+			return 0;
 		}
-		if (!bootdev)
-			usleep(250000);
+		umount("/mnt");
 	}
-	if (!bootdev) {
-		say("no mmcblk*p1 found, cannot persist the log\n");
-		dump_kmsg();
-		goto halt;
-	}
-	say("boot partition: %s\n", bootdev);
+	return -1;
+}
 
-	mkdir("/mnt", 0755);
-	if (mount(bootdev, "/mnt", "vfat", 0, NULL) != 0) {
-		say("mount %s failed: %s\n", bootdev, strerror(errno));
-		dump_kmsg();
-		goto halt;
-	}
-
-	mkdir("/mnt/DEBUG", 0755);
-	snprintf(logpath, sizeof(logpath), "/mnt/DEBUG/dmesg.txt");
-	out = fopen(logpath, "w");
-	if (!out) {
-		say("cannot create %s: %s\n", logpath, strerror(errno));
-		goto halt;
-	}
-
-	say("RG34XXSP boot debug dump\n");
+/*
+ * Take the one-shot snapshot of everything that is already known at this
+ * point, before Android init touches any of it.
+ */
+static void snapshot(FILE *o)
+{
+	out = o;
+	say("RG34XXSP boot snapshot\n");
 	dump_file("/proc/cmdline");
 	dump_file("/proc/version");
 	dump_file("/proc/partitions");
@@ -291,6 +324,32 @@ int main(void)
 	dump_dir("/sys/class/block");
 	dump_dir("/sys/bus/mmc/devices");
 	dump_dir("/sys/class/drm");
+	/*
+	 * The graphics side, which is what the "bright streaks instead of text"
+	 * symptom points at: /proc/fb and /sys/class/graphics tell us whether a
+	 * framebuffer was registered at all, and the per-connector drm dirs tell
+	 * us whether tcon-lcd0 came up. If fb0 is missing the panel is being fed
+	 * nothing and just holds whatever the SPI init sequence left in it.
+	 */
+	dump_file("/proc/fb");
+	dump_dir("/sys/class/graphics");
+	dump_dir("/sys/class/drm/card0");
+	/*
+	 * Whether the panel driver actually bound: the panel hangs off a
+	 * spi-gpio controller, so it only appears under /sys/bus/spi/devices if
+	 * spi-gpio probed, and only has a `driver` symlink if panel-mipi
+	 * matched the compatible string. A missing entry here means the panel
+	 * was never initialised at all, which is exactly what a stuck four-line
+	 * pattern looks like.
+	 */
+	dump_dir("/sys/bus/spi/devices");
+	dump_dir("/sys/bus/platform/drivers/panel-mipi-dpi-spi");
+	dump_dir("/sys/class/backlight");
+	/* debugfs is where panel-mipi exposes the decoded firmware, if it got
+	 * that far. Mounting it here is harmless -- Android remounts /sys later. */
+	if (mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL) == 0 ||
+	    errno == EBUSY)
+		dump_dir("/sys/kernel/debug/dri/0");
 	dump_block_sizes();
 	dump_platform_devices();
 	dump_partition_heads();
@@ -320,21 +379,112 @@ int main(void)
 	}
 
 	dump_kmsg();
+	say("\n===== SNAPSHOT COMPLETE =====\n");
+}
 
-	say("\n===== DUMP COMPLETE =====\n");
-	fclose(out);
-	out = NULL;
-	sync();
+int main(void)
+{
+	const char *bootdev = NULL;
+	char logpath[128];
+	int i, logged = 0;
 
-halt:
-	say("debug init done, powering off in 5s\n");
+	mkdir("/proc", 0555);
+	mkdir("/sys", 0555);
+	mkdir("/dev", 0755);
+	mkdir("/mnt", 0755);
+	mkdir("/tmp", 0777);
+	mount("proc", "/proc", "proc", 0, NULL);
+	mount("sysfs", "/sys", "sysfs", 0, NULL);
+	mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
+
+	con = fopen("/dev/console", "w");
+
+	say("rg34xxsp debug init starting\n");
+
+	/*
+	 * Find the FAT boot partition. Wait for *some* mmc block device to show
+	 * up first, then let mount_boot_partition() pick the right one by
+	 * content -- the TF card is not reliably mmcblk0 on a cold boot.
+	 */
+	for (i = 0; i < 60 && !bootdev; i++) {
+		if (access("/dev/mmcblk0", F_OK) != 0 &&
+		    access("/dev/mmcblk1", F_OK) != 0 &&
+		    access("/dev/mmcblk2", F_OK) != 0) {
+			usleep(250000);
+			continue;
+		}
+		if (mount_boot_partition(&bootdev) != 0)
+			usleep(250000);
+	}
+	if (!bootdev) {
+		say("no FAT boot partition with extlinux/extlinux.conf, cannot persist the log\n");
+		goto handover;
+	}
+	say("boot partition: %s (mounted on /mnt)\n", bootdev);
+
+	mkdir("/mnt/DEBUG", 0755);
+	snprintf(logpath, sizeof(logpath), "/mnt/DEBUG/dmesg.txt");
+
+	{
+		FILE *o = fopen(logpath, "w");
+
+		if (!o) {
+			say("cannot create %s: %s\n", logpath, strerror(errno));
+			goto handover;
+		}
+		snapshot(o);
+		fclose(o);
+		logged = 1;
+	}
+
+handover:
+	/*
+	 * Hand PID 1 over to the real Android init that ships in the same
+	 * initramfs (mk-sdcard.sh renames it to /init.android). Everything we
+	 * recorded is already on the card; the streaming child keeps appending
+	 * while Android boots, so a crash later still leaves a trace.
+	 *
+	 * Both descriptors are opened here, before the exec, because Android
+	 * init remounts /dev and later stacks tmpfs on /mnt -- an fd opened
+	 * afterwards would no longer reach the FAT partition.
+	 */
+	if (logged) {
+		int kfd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
+		int lfd = open(logpath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+
+		if (kfd >= 0 && lfd >= 0) {
+			pid_t pid = fork();
+
+			if (pid == 0) {
+				kmsg_logger(kfd, lfd);
+				_exit(0);
+			}
+			say("kmsg logger started (pid %d), log: %s\n", (int)pid,
+			    logpath);
+		} else {
+			say("kmsg logger not started (kmsg=%d log=%d)\n", kfd, lfd);
+		}
+	}
+
 	if (con) {
 		fclose(con);
 		con = NULL;
 	}
+	say("handing over to /init.android\n");
+
+	execl("/init.android", "/init", NULL);
+
+	/* Only reached if the Android init is missing -- keep the log, then stop. */
+	say("exec /init.android failed: %s\n", strerror(errno));
+	out = fopen(logpath, "a");
+	if (out) {
+		dump_kmsg();
+		say("\n===== exec failed, halting =====\n");
+		fclose(out);
+		out = NULL;
+	}
 	sync();
-	sleep(5);
-	sync();
+	sleep(3);
 	reboot(RB_POWER_OFF);
 	for (;;)
 		pause();
