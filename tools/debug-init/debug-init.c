@@ -423,6 +423,33 @@ int main(void)
 	say("boot partition: %s (mounted on /mnt)\n", bootdev);
 
 	mkdir("/mnt/DEBUG", 0755);
+
+	/*
+	 * Proof-of-life marker, written and fsync'd before anything else.
+	 *
+	 * This is not cosmetic. fclose() only drops the data in the page cache;
+	 * a watchdog reset roughly a dozen seconds later takes the whole FAT
+	 * directory entry with it, and the card then looks exactly as if this
+	 * init had never run at all. Getting one small file durably onto the
+	 * medium first tells us whether the problem is "init never ran" or
+	 * "init ran but could not do something".
+	 */
+	{
+		FILE *m = fopen("/mnt/DEBUG/ran.txt", "w");
+
+		if (m) {
+			fprintf(m, "debug-init reached main, boot partition %s\n",
+				bootdev);
+			fflush(m);
+			fsync(fileno(m));
+			fclose(m);
+		} else {
+			say("cannot create /mnt/DEBUG/ran.txt: %s\n",
+			    strerror(errno));
+		}
+		sync();
+	}
+
 	snprintf(logpath, sizeof(logpath), "/mnt/DEBUG/dmesg.txt");
 
 	{
@@ -433,7 +460,11 @@ int main(void)
 			goto handover;
 		}
 		snapshot(o);
+		/* Same reasoning as above: make it survive an abrupt reset. */
+		fflush(o);
+		fsync(fileno(o));
 		fclose(o);
+		sync();
 		logged = 1;
 	}
 

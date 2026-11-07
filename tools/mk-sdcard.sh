@@ -6,8 +6,25 @@
 #
 #   ./mk-sdcard.sh                                   # -> rg34xxsp-sd.img, 8 GiB
 #   ./mk-sdcard.sh --out /tmp/card.img --total-gib 30
+#   ./mk-sdcard.sh --embed-initramfs --kernel /path/Image
+#
+# --embed-initramfs builds a card for a kernel Image that already contains the
+# initramfs (CONFIG_INITRAMFS_SOURCE=<dir> at build time). Such a card has no
+# `initrd` line in extlinux.conf on purpose: an external initrd handed to booti
+# would *replace* the built-in one, putting us right back on the uncertain path
+# this mode exists to avoid. Requires a separate build of the kernel -- see
+# docs/BUILD.md.
 #
 # Then write it to the TF card with Rufus (dd mode) or balenaEtcher on Windows.
+#
+# IMPORTANT: extlinux.conf entries must say `kernel /Image`, NOT `linux /Image`.
+# U-Boot's syslinux parser keyword table contains only:
+#   menu|title|default|prompt|label|kernel|localboot|initrd|include|
+#   devicetree|devicetreedir|fdtdir|fdtoverlays|devicetree-overlay|
+#   ontimeout|ipappend|background|kaslrseed|fallback
+# "linux" is not there, so a `linux /Image` line is dropped with "No kernel
+# given, skipping" and the board hangs at a black screen with the power LED
+# lit -- indistinguishable from a kernel that never started.
 #
 # Why an image and not the card directly: Windows refuses raw writes to
 # removable media (ERROR_INVALID_ARGUMENT on the first write) unless every
@@ -47,6 +64,7 @@ PRODUCT_OUT="${REPO}/out/target/product/rg34xxsp"
 RAMDISK=""
 SUPER=""
 DEBUG_INIT=""
+EMBED_INITRAMFS=0
 FORCE=0
 
 usage() {
@@ -64,6 +82,7 @@ while [ $# -gt 0 ]; do
         --ramdisk)     RAMDISK="$2"; shift 2 ;;
         --super)       SUPER="$2"; shift 2 ;;
         --debug-init)  DEBUG_INIT="$2"; shift 2 ;;
+        --embed-initramfs) EMBED_INITRAMFS=1; shift ;;
         --product-out) PRODUCT_OUT="$2"; shift 2 ;;
         --force)       FORCE=1; shift ;;
         -h|--help)     usage 0 ;;
@@ -77,7 +96,14 @@ done
 say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; exit 1; }
 
-for f in "$UBOOT" "$DTB" "$KERNEL" "$RAMDISK" "$SUPER"; do
+# With --embed-initramfs the kernel Image already carries the initramfs (built
+# with CONFIG_INITRAMFS_SOURCE pointing at a directory that has our debug-init
+# as /init). In that mode we must NOT emit an `initrd` line: U-Boot's booti
+# hands any external initrd to the kernel, which *replaces* the built-in one,
+# and we would be back to depending on the exact thing we are trying to avoid.
+REQUIRED=("$UBOOT" "$DTB" "$KERNEL" "$SUPER")
+[ "$EMBED_INITRAMFS" -eq 1 ] || REQUIRED+=("$RAMDISK")
+for f in "${REQUIRED[@]}"; do
     [ -f "$f" ] || die "missing input: $f"
 done
 
@@ -203,7 +229,7 @@ mkdir -p /tmp/sdcard-boot
 mount -t vfat "$P1" /tmp/sdcard-boot
 mkdir -p /tmp/sdcard-boot/extlinux
 cp "$KERNEL"  /tmp/sdcard-boot/Image
-cp "$RAMDISK" /tmp/sdcard-boot/initrd.img
+[ "$EMBED_INITRAMFS" -eq 1 ] || cp "$RAMDISK" /tmp/sdcard-boot/initrd.img
 cp "$DTB"     /tmp/sdcard-boot/sun50i-h700-anbernic-rg34xx-sp.dtb
 [ -f "$DTB_V2" ] && cp "$DTB_V2" /tmp/sdcard-boot/sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb
 
@@ -257,10 +283,17 @@ fi
 # When --debug-init is given the default label uses initrd-debug.img, which is
 # the stock ramdisk with a logger prepended: it records to DEBUG/dmesg.txt and
 # then exec's the real Android init, so this is still a normal boot.
-if [ -n "$DEBUG_LABEL" ]; then
-    BOOT_INITRD=/initrd-debug.img
-else
-    BOOT_INITRD=/initrd.img
+#
+# With --embed-initramfs there is no initrd line at all (see the note at the top
+# of the input checks): the initramfs travels inside Image.
+INITRD_LINE=""
+if [ "$EMBED_INITRAMFS" -eq 0 ]; then
+    if [ -n "$DEBUG_LABEL" ]; then
+        BOOT_INITRD=/initrd-debug.img
+    else
+        BOOT_INITRD=/initrd.img
+    fi
+    INITRD_LINE="    initrd $BOOT_INITRD"
 fi
 
 cat > /tmp/sdcard-boot/extlinux/extlinux.conf <<EOF
@@ -271,9 +304,9 @@ timeout 0
 
 label android
     menu label Android 11 (LineageOS 18.1)
-    linux /Image
+    kernel /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb
-    initrd $BOOT_INITRD
+$INITRD_LINE
     append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
 
 # Same Android image but with the v2 panel firmware. The two DTB files differ
@@ -282,9 +315,9 @@ label android
 # how we find out which panel an individual unit was built with.
 label android-v2
     menu label Android 11 (v2 panel)
-    linux /Image
+    kernel /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb
-    initrd $BOOT_INITRD
+$INITRD_LINE
     append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
 
 # Same kernel, but no ramdisk and no init: the kernel panics after
@@ -292,7 +325,7 @@ label android-v2
 # for when the panel never lights up.
 label shell
     menu label U-Boot shell
-    linux /Image
+    kernel /Image
     append console=ttyS0,115200 console=tty0
 EOF
 
@@ -304,7 +337,7 @@ if [ -n "$DEBUG_LABEL" ]; then
 # suspect rather than the image.
 label plain
     menu label Android 11 (stock ramdisk)
-    linux /Image
+    kernel /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb
     initrd /initrd.img
     append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
@@ -347,6 +380,32 @@ LOOP2=$(losetup -f --show -P -o $((BOOT_START * 512)) --sizelimit $((BOOT_SIZE *
 mkdir -p /tmp/sdcard-check
 mount -o ro -t vfat "$LOOP2" /tmp/sdcard-check
 find /tmp/sdcard-check -type f | sed "s#/tmp/sdcard-check#    #" | sort
+
+# U-Boot's syslinux parser only knows "kernel", not "linux".  Writing
+# "linux /Image" makes sysboot skip the entry with "No kernel given" and the
+# board then sits at a black screen with the power LED on -- it looks exactly
+# like a dead kernel.  Guard against that regression here.
+if grep -qE '^[[:space:]]*linux[[:space:]]' /tmp/sdcard-check/extlinux/extlinux.conf; then
+    die "extlinux.conf uses 'linux', which U-Boot's syslinux parser ignores -- use 'kernel'"
+fi
+grep -qE '^[[:space:]]*kernel[[:space:]]+/Image' /tmp/sdcard-check/extlinux/extlinux.conf || \
+    die "extlinux.conf has no 'kernel /Image' line"
+say "extlinux keyword ok: kernel (not linux)"
+
+# Assert the two things that a bad card silently gets wrong.
+if [ "$EMBED_INITRAMFS" -eq 1 ]; then
+    if grep -qE '^[[:space:]]*initrd[[:space:]]' /tmp/sdcard-check/extlinux/extlinux.conf; then
+        die "embed mode wrote an initrd line -- it would override the built-in initramfs"
+    fi
+    # The built-in cpio is uncompressed inside Image, so the logger's banner
+    # string is greppable. If it is missing, the wrong kernel got copied in.
+    grep -qa 'debug-init reached main' /tmp/sdcard-check/Image || \
+        die "Image on the card has no embedded debug-init (wrong kernel?)"
+    say "embed mode ok: no initrd line, Image carries debug-init"
+else
+    grep -qE '^[[:space:]]*initrd[[:space:]]' /tmp/sdcard-check/extlinux/extlinux.conf || \
+        die "no initrd line but --embed-initramfs was not given"
+fi
 umount /tmp/sdcard-check
 losetup -d "$LOOP2"
 
