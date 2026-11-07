@@ -71,13 +71,20 @@ TARGET_NO_RADIOIMAGE := true
 # Those addresses decompose into base 0x40000000 plus per-component offsets,
 # which is exactly how mkbootimg composes them:
 #   kernel  = base + 0x00080000 = 0x40080000
-#   ramdisk = base + 0x02000000 = 0x42000000
+#   ramdisk = base + 0x03000000 = 0x43000000
 #   tags    = base + 0x00000100 = 0x40000100
 #   second  = base + 0x00f00000 = 0x40f00000
+#
+# The ramdisk offset is NOT the vendor's 0x02000000. Our Image is 32,020,488
+# bytes and starts at 0x40080000, so it ends at 0x41F0A0C8; with the original
+# offset only 983 KiB of headroom was left before the ramdisk load address.
+# 0x03000000 buys 16 MiB. Everything stays below 0x45000000, which matters:
+# the stock U-Boot's boot_normal does "sunxi_flash read 45000000 boot", so it
+# stages the whole boot.img at 0x45000000 first.
 BOARD_BOOT_HEADER_VERSION := 0
 BOARD_KERNEL_BASE := 0x40000000
 BOARD_KERNEL_OFFSET := 0x00080000
-BOARD_RAMDISK_OFFSET := 0x02000000
+BOARD_RAMDISK_OFFSET := 0x03000000
 BOARD_TAGS_OFFSET := 0x00000100
 BOARD_KERNEL_SECOND_OFFSET := 0x00f00000
 BOARD_KERNEL_PAGESIZE := 2048

@@ -10,10 +10,31 @@
 
 $(call inherit-product, device/anbernic/rg34xxsp/device.mk)
 
+# AOSP base, mandatory and easy to forget.
+#
+# Lineage's vendor/lineage/config/*.mk chain (common_full_tablet_wifionly ->
+# common_full -> common_mobile -> common) contains NO inherit of the AOSP base
+# product, because on a normal Lineage device the device makefile brings it in.
+# Without these two lines the product has no base_system/base_vendor, so:
+#   * PRODUCT_PACKAGES never gets "init_vendor" (build/make/target/product/
+#     base_vendor.mk), which is what pulls "init_first_stage" into
+#     TARGET_RAMDISK_OUT -> ramdisk.img ended up 777 bytes with only
+#     /ramdisk/fstab.rg34xxsp inside, i.e. an unbootable boot.img;
+#   * no boot classpath / PRODUCT_USES_DEFAULT_ART_CONFIG is configured, so
+#     Soong's dexpreopt bootjars singleton never emits
+#     out/soong/dexpreopt_soong.config, and the make-side dexpreopt rule runs
+#     dexpreopt_gen with an empty --global config and dies with
+#     "--global configuration file is required".
+#
+# core_64_bit.mk is documentation-only in 18.1 but kept for convention.
+# base.mk = base_system + base_system_ext + base_vendor + base_product, i.e.
+# every partition gets its base and nothing else is dragged in (we deliberately
+# avoid full_base.mk: its sounds/languages packages are dead weight on 1 GiB).
+$(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
+$(call inherit-product, $(SRC_TARGET_DIR)/product/base.mk)
+
 # Lineage's Wi-Fi-only tablet configuration: this is a handheld console with no
-# modem and no camera. (For a plain AOSP tree, replace this with
-#   $(call inherit-product, $(SRC_TARGET_DIR)/product/full_base.mk)
-# and drop the vendor/lineage inherit. Verified to exist on lineage-18.1.)
+# modem and no camera.
 $(call inherit-product, vendor/lineage/config/common_full_tablet_wifionly.mk)
 
 PRODUCT_NAME := lineage_rg34xxsp
