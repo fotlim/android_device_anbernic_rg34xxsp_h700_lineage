@@ -17,14 +17,27 @@
 #
 # Then write it to the TF card with Rufus (dd mode) or balenaEtcher on Windows.
 #
-# IMPORTANT: extlinux.conf entries must say `kernel /Image`, NOT `linux /Image`.
-# U-Boot's syslinux parser keyword table contains only:
-#   menu|title|default|prompt|label|kernel|localboot|initrd|include|
-#   devicetree|devicetreedir|fdtdir|fdtoverlays|devicetree-overlay|
-#   ontimeout|ipappend|background|kaslrseed|fallback
-# "linux" is not there, so a `linux /Image` line is dropped with "No kernel
-# given, skipping" and the board hangs at a black screen with the power LED
-# lit -- indistinguishable from a kernel that never started.
+# IMPORTANT: the partition table is a hybrid MBR, and that is not cosmetic.
+# This U-Boot image (661504 bytes, U-Boot 2026.01, byte-identical to the one
+# ROCKNIX ships) only registers the DOS/MBR partition parser: part_efi's
+# strings are absent from the binary while part_dos's are present. On a pure
+# GPT disk `part list mmc 0 -bootable` therefore returns nothing, `fstype
+# mmc 0:1` fails against the 0xEE protective entry, and scan_dev_for_boot is
+# never reached -- neither extlinux nor boot.scr is looked at, and the board
+# shows a lit power LED with a black screen.
+#
+# A pure MBR is not an option either: msdos.c clears volname, so the kernel
+# would expose no PARTNAME and /dev/block/by-name/* would disappear, which is
+# exactly what fstab.rg34xxsp needs. Hence both: entry 0 is 0x0C + bootable
+# pointing at the FAT boot partition (satisfies U-Boot's dos parser), entry 1
+# is 0xEE at LBA 1 (satisfies the kernel's is_pmbr_valid(), which classifies
+# this as GPT_MBR_HYBRID and then parses the real GPT). The 0x0C entry must
+# come first so U-Boot numbers the boot partition as 1.
+#
+# extlinux.conf entries say `kernel /Image` rather than `linux /Image`. Both
+# spellings are accepted by U-Boot (pxe_utils.c maps T_KERNEL and T_LINUX to
+# the same parse_label_kernel), so this is a style choice, not a workaround --
+# `kernel` is what the syslinux spec uses and what ROCKNIX writes.
 #
 # Why an image and not the card directly: Windows refuses raw writes to
 # removable media (ERROR_INVALID_ARGUMENT on the first write) unless every
@@ -549,16 +562,17 @@ mkdir -p /tmp/sdcard-check
 mount -o ro -t vfat "$LOOP2" /tmp/sdcard-check
 find /tmp/sdcard-check -type f | sed "s#/tmp/sdcard-check#    #" | sort
 
-# U-Boot's syslinux parser only knows "kernel", not "linux".  Writing
-# "linux /Image" makes sysboot skip the entry with "No kernel given" and the
-# board then sits at a black screen with the power LED on -- it looks exactly
-# like a dead kernel.  Guard against that regression here.
-if grep -qE '^[[:space:]]*linux[[:space:]]' /tmp/sdcard-check/extlinux/extlinux.conf; then
-    die "extlinux.conf uses 'linux', which U-Boot's syslinux parser ignores -- use 'kernel'"
+# Guard against the extlinux entry losing its kernel line entirely. The
+# keyword itself is not special -- U-Boot maps both T_KERNEL and T_LINUX to
+# parse_label_kernel() -- but a label with no kernel line is silently skipped
+# and the board then sits at a black screen with the power LED on, which looks
+# exactly like a dead kernel.
+if grep -qE '^[[:space:]]*(linux|kernel)[[:space:]]+/Image' /tmp/sdcard-check/extlinux/extlinux.conf; then
+    :
+else
+    die "extlinux.conf has no kernel line pointing at /Image"
 fi
-grep -qE '^[[:space:]]*kernel[[:space:]]+/Image' /tmp/sdcard-check/extlinux/extlinux.conf || \
-    die "extlinux.conf has no 'kernel /Image' line"
-say "extlinux keyword ok: kernel (not linux)"
+say "extlinux kernel line present"
 
 # Assert the two things that a bad card silently gets wrong.
 if [ "$EMBED_INITRAMFS" -eq 1 ]; then

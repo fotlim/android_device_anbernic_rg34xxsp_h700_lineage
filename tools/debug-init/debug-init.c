@@ -44,6 +44,18 @@
 static FILE *out;
 static FILE *con;
 
+/*
+ * When set, every line is fsync'd as soon as it is written.
+ *
+ * Needed for the hardware probing at the end of the boot: reading a
+ * clock-gated peripheral raises an external abort, which the kernel delivers
+ * as SIGBUS and which kills this process outright. Anything still sitting in
+ * the page cache is lost with it, and the card then shows a log that simply
+ * stops -- which is exactly what made the previous attempt look as if the
+ * paint test had never run.
+ */
+static int durable;
+
 static void say(const char *fmt, ...)
 {
 	va_list ap;
@@ -52,6 +64,8 @@ static void say(const char *fmt, ...)
 	if (out) {
 		vfprintf(out, fmt, ap);
 		fflush(out);
+		if (durable)
+			fsync(fileno(out));
 	}
 	va_end(ap);
 
@@ -441,12 +455,27 @@ static void mmio_dump(void)
 		{ "ui ch6      ", 0x11c1000, 0x100 },
 		{ "ui ch7      ", 0x11e1000, 0x100 },
 		{ "mixer0 glob ", 0x1280000, 0x40 },
+		/*
+		 * DE top block. mixer@280000 declares a second reg window of
+		 * 0x40 bytes at 0x8100; sun8i_mixer_bind() takes it as
+		 * "top_regs" and DE33 writes GLOBAL_SIZE (0x8) and
+		 * GLOBAL_CLK (0xc) there rather than into the mixer block.
+		 * Dumping it tells us whether the DE was clocked and sized.
+		 */
+		{ "mixer0 top  ", 0x1008100, 0x40 },
+		{ "mixer1 top  ", 0x1008140, 0x40 },
 		{ "mixer0 blend", 0x1281000, 0x100 },
 		{ "tcon-top    ", 0x6510000, 0x40 },
 		{ "tcon0       ", 0x6511000, 0x100 },
 		{ "tcon1       ", 0x6515000, 0x100 },
 		{ "pwm         ", 0x300a000, 0x40 },
-		{ "pinctrl PD  ", 0x300b000 + 0x700, 0x100 },
+		/*
+		 * PD bank base. pinctrl-sunxi maps one bank per 0x24 bytes
+		 * (BANK_MEM_SIZE) and PD starts at pin 96, so bank 3 starts at
+		 * 3 * 0x24 = 0x6c -- not at 0x700, which lands in the middle of
+		 * a different bank and made the earlier dump unreadable.
+		 */
+		{ "pinctrl PD  ", 0x300b000 + 0x6c, 0x100 },
 	};
 	int fd = open("/dev/mem", O_RDONLY);
 	unsigned int r, w;
@@ -480,6 +509,110 @@ static void mmio_dump(void)
 			say("\n");
 		}
 		munmap(map, span);
+	}
+
+	close(fd);
+}
+
+/*
+ * Where does the hardware actually point?
+ *
+ * The interesting question is not "what is in fb0" -- we know that, we painted
+ * it -- but "which address did the layer get told to scan". Two failure modes
+ * look identical on screen and are told apart by this scan:
+ *
+ *   a) the layer register write never happened (driver bound, but the plane
+ *      was never made visible), so every LADDR still reads back as whatever
+ *      reset left there; and
+ *   b) the write landed at a different offset than the one we dump, so the
+ *      DE scans address 0 while our pattern sits in CMA.
+ *
+ * Scanning the whole planes block for words that look like CMA addresses
+ * answers both: a hit gives us the real offset, no hit at all means nothing
+ * was ever programmed. Mixer 0 maps channels 0 (VI), 6 and 7 (UI); DE33 puts
+ * channel n at 0x1000 + n * 0x20000 relative to the planes block.
+ */
+#define CMA_LO 0x70000000UL
+#define CMA_HI 0x80000000UL
+
+static void mmio_scan(const char *name, unsigned long base, unsigned long size)
+{
+	unsigned long page = base & ~0xfffUL;
+	unsigned long off = base - page;
+	unsigned long span = ((off + size + 0xfff) & ~0xfffUL);
+	int fd = open("/dev/mem", O_RDONLY);
+	unsigned long w, hits = 0;
+	unsigned char *map;
+
+	say("\n===== scan %s for CMA pointers =====\n", name);
+	if (fd < 0) {
+		say("(open /dev/mem failed: %s)\n", strerror(errno));
+		return;
+	}
+	map = mmap(NULL, span, PROT_READ, MAP_SHARED, fd, (off_t)page);
+	if (map == MAP_FAILED) {
+		say("(mmap failed: %s)\n", strerror(errno));
+		close(fd);
+		return;
+	}
+
+	for (w = 0; w < size / 4; w++) {
+		unsigned int v = *(volatile unsigned int *)(map + off + w * 4);
+
+		if (v < CMA_LO || v >= CMA_HI)
+			continue;
+		say("  %s+0x%06lx = 0x%08x\n", name, w * 4, v);
+		if (++hits >= 24) {
+			say("  ... (stopping after 24 hits)\n");
+			break;
+		}
+	}
+	if (!hits)
+		say("  no CMA-looking word in %s (%lu bytes scanned)\n",
+		    name, size);
+
+	munmap(map, span);
+	close(fd);
+}
+
+/*
+ * One header per DE33 channel: ATTR / SIZE / COORD / PITCH / LADDR.
+ *
+ * Dumping only the offsets the driver claims to use cannot tell "never
+ * written" from "written somewhere else". Printing every channel's first six
+ * words covers the whole plausible range in a few lines, and ATTR.bit0 says
+ * directly whether that channel is enabled.
+ */
+static void mmio_channels(void)
+{
+	int fd = open("/dev/mem", O_RDONLY);
+	unsigned int ch;
+
+	say("\n===== DE33 channel headers (planes block) =====\n");
+	if (fd < 0) {
+		say("(open /dev/mem failed: %s)\n", strerror(errno));
+		return;
+	}
+
+	for (ch = 0; ch < 10; ch++) {
+		unsigned long base = 0x1100000 + 0x1000 + (unsigned long)ch * 0x20000;
+		unsigned long page = base & ~0xfffUL;
+		unsigned long off = base - page;
+		unsigned char *map = mmap(NULL, 0x1000, PROT_READ, MAP_SHARED,
+					  fd, (off_t)page);
+		unsigned int *p;
+
+		if (map == MAP_FAILED) {
+			say("  ch%-2u @ 0x%08lx: (mmap failed: %s)\n", ch, base,
+			    strerror(errno));
+			continue;
+		}
+		p = (unsigned int *)(map + off);
+		say("  ch%-2u @ 0x%08lx: attr=%08x size=%08x coord=%08x "
+		    "pitch=%08x laddr=%08x laddr2=%08x%s\n",
+		    ch, base, p[0], p[1], p[2], p[3], p[4], p[5],
+		    (p[0] & 1) ? "  [ENABLED]" : "");
+		munmap(map, 0x1000);
 	}
 
 	close(fd);
@@ -713,6 +846,16 @@ int main(void)
 
 		if (o) {
 			out = o;
+			/*
+			 * From here on every line has to reach the medium on
+			 * its own. Reading a clock-gated block through
+			 * /dev/mem raises an external abort, the kernel turns
+			 * it into SIGBUS and this process dies mid-sentence;
+			 * FAT only commits the file size on fsync/close, so
+			 * without this the whole paint-test + MMIO section
+			 * would be written to the card but stay invisible.
+			 */
+			durable = 1;
 			fb_paint_test();
 			/*
 			 * Read the pipeline back right after painting: this is
@@ -722,6 +865,17 @@ int main(void)
 			 * the framebuffer we painted, that is the answer.
 			 */
 			mmio_dump();
+			mmio_channels();
+			/*
+			 * Last, and most likely to abort: sweep the two big
+			 * blocks for words that look like CMA addresses. If the
+			 * layer got told to scan CMA we find its LADDR here even
+			 * when it sits at an offset the driver does not document;
+			 * if the sweep comes back empty, no plane was ever
+			 * programmed and the DE is scanning whatever reset left.
+			 */
+			mmio_scan("planes", 0x1100000, 0x180000);
+			mmio_scan("mixer0", 0x1280000, 0x20000);
 			fflush(o);
 			fsync(fileno(o));
 			fclose(o);
