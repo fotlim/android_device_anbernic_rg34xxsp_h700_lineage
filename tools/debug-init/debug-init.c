@@ -20,13 +20,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <linux/fb.h>
 #include <linux/fs.h>
+
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#endif
 
 #ifndef SYSLOG_ACTION_READ_ALL
 #define SYSLOG_ACTION_READ_ALL 3
@@ -304,6 +310,182 @@ static int mount_boot_partition(const char **used)
 }
 
 /*
+ * Paint /dev/fb0 with known solid colours.
+ *
+ * This is the decisive display test. Everything upstream of the pixel data
+ * (DRM binds, tcon timing, mixer planes, panel init) can look perfect in the
+ * logs while the screen still shows noise -- but if the framebuffer accepts a
+ * fill and the panel shows that exact colour, then the whole path works and
+ * the garbage was just whatever memory the scanout happened to point at.
+ *
+ * If instead a solid fill still comes out as stripes, the corruption is in the
+ * transport itself (RGB pin order, bus width, clock phase), which no amount of
+ * userspace work can fix.
+ *
+ * The card is redrawn a few times with a short pause so the colours can be
+ * observed and photographed; fbcon is not running yet, so nothing fights us
+ * for the buffer.
+ */
+static void fb_paint_test(void)
+{
+	struct fb_fix_screeninfo fix;
+	struct fb_var_screeninfo var;
+	static const char *names[] = {
+		"red", "green", "blue", "white", "black", "checker"
+	};
+	static const unsigned int colors[] = {
+		0xff0000, 0x00ff00, 0x0000ff, 0xffffff, 0x000000, 0
+	};
+	int fd = open("/dev/fb0", O_RDWR);
+	unsigned int i, x, y;
+	size_t stride, total;
+	unsigned char *map;
+
+	say("\n===== fb0 paint test =====\n");
+	if (fd < 0) {
+		say("(open /dev/fb0 failed: %s)\n", strerror(errno));
+		return;
+	}
+	if (ioctl(fd, FBIOGET_FSCREENINFO, &fix) != 0) {
+		say("(FBIOGET_FSCREENINFO failed: %s)\n", strerror(errno));
+		close(fd);
+		return;
+	}
+	if (ioctl(fd, FBIOGET_VSCREENINFO, &var) != 0) {
+		say("(FBIOGET_VSCREENINFO failed: %s)\n", strerror(errno));
+		close(fd);
+		return;
+	}
+
+	say("fix: id=%s smem_start=0x%lx smem_len=%u line_length=%u "
+	    "type=%u visual=%u\n",
+	    fix.id, (unsigned long)fix.smem_start, fix.smem_len,
+	    fix.line_length, fix.type, fix.visual);
+	say("var: %ux%u virt=%ux%u bpp=%u\n",
+	    var.xres, var.yres, var.xres_virtual, var.yres_virtual,
+	    var.bits_per_pixel);
+	say("var: red{off=%u,len=%u} green{off=%u,len=%u} blue{off=%u,len=%u} "
+	    "transp{off=%u,len=%u}\n",
+	    var.red.offset, var.red.length, var.green.offset,
+	    var.green.length, var.blue.offset, var.blue.length,
+	    var.transp.offset, var.transp.length);
+
+	stride = fix.line_length ? fix.line_length : (var.xres_virtual * 4);
+	total = stride * var.yres_virtual;
+	map = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (map == MAP_FAILED) {
+		say("(mmap %zu bytes failed: %s)\n", total, strerror(errno));
+		close(fd);
+		return;
+	}
+	say("mapped %zu bytes (stride %zu)\n", total, stride);
+
+	for (i = 0; i < ARRAY_SIZE(colors); i++) {
+		unsigned int px = colors[i];
+
+		if (i == ARRAY_SIZE(colors) - 1) {
+			/* 32x32 checkerboard: exposes wrong stride or offset. */
+			for (y = 0; y < var.yres_virtual; y++) {
+				unsigned int *row =
+					(unsigned int *)(map + y * stride);
+
+				for (x = 0; x < var.xres_virtual; x++)
+					row[x] = (((x >> 5) + (y >> 5)) & 1) ?
+							 0xffffff : 0x000000;
+			}
+		} else {
+			for (y = 0; y < var.yres_virtual; y++) {
+				unsigned int *row =
+					(unsigned int *)(map + y * stride);
+
+				for (x = 0; x < var.xres_virtual; x++)
+					row[x] = px;
+			}
+		}
+		msync(map, total, MS_SYNC);
+		say("painted %s, holding 3s\n", names[i]);
+		sleep(3);
+	}
+
+	munmap(map, total);
+	close(fd);
+	say("paint test done\n");
+}
+
+/*
+ * Read the display pipeline's registers straight out of the hardware.
+ *
+ * Why this is needed: every driver binds, fb0 is registered with exactly the
+ * geometry we expect, and painting it solid colours changes nothing on the
+ * panel. That can only mean the mixer is not scanning the buffer we are
+ * writing -- either it was never enabled, or its layer address points
+ * somewhere else. Neither question can be answered from sysfs, so read the
+ * actual MMIO. H700 puts DRAM at 0x40000000, so these addresses are device
+ * memory and /dev/mem lets us at them.
+ *
+ * Layout note: for DE33 the mixer's own block (mixer@280000 -> 0x1280000)
+ * only holds the global and blender registers; the per-channel blocks live in
+ * the "planes" block (planes@100000 -> 0x1100000) at
+ * 0x1000 + channel * 0x20000. Mixer 0 maps channels 0 (VI), 6 and 7 (UI).
+ */
+static void mmio_dump(void)
+{
+	static const struct {
+		const char *name;
+		unsigned long base;
+		unsigned long size;
+	} regions[] = {
+		{ "ccu-de2     ", 0x1008000, 0x100 }, /* CHN2CORE 0x24, PORT0/1 0x28/0x2c */
+		{ "planes hdr  ", 0x1100000, 0x40 },
+		{ "vi ch0      ", 0x1101000, 0x100 },
+		{ "ui ch6      ", 0x11c1000, 0x100 },
+		{ "ui ch7      ", 0x11e1000, 0x100 },
+		{ "mixer0 glob ", 0x1280000, 0x40 },
+		{ "mixer0 blend", 0x1281000, 0x100 },
+		{ "tcon-top    ", 0x6510000, 0x40 },
+		{ "tcon0       ", 0x6511000, 0x100 },
+		{ "tcon1       ", 0x6515000, 0x100 },
+		{ "pwm         ", 0x300a000, 0x40 },
+		{ "pinctrl PD  ", 0x300b000 + 0x700, 0x100 },
+	};
+	int fd = open("/dev/mem", O_RDONLY);
+	unsigned int r, w;
+
+	say("\n===== MMIO dump =====\n");
+	if (fd < 0) {
+		say("(open /dev/mem failed: %s)\n", strerror(errno));
+		return;
+	}
+
+	for (r = 0; r < ARRAY_SIZE(regions); r++) {
+		unsigned long page = regions[r].base & ~0xfffUL;
+		unsigned long off = regions[r].base - page;
+		unsigned long span = ((off + regions[r].size + 0xfff) & ~0xfffUL);
+		unsigned char *map = mmap(NULL, span, PROT_READ, MAP_SHARED, fd,
+					  (off_t)page);
+
+		say("--- %s @ 0x%08lx ---\n", regions[r].name,
+		    regions[r].base);
+		if (map == MAP_FAILED) {
+			say("(mmap failed: %s)\n", strerror(errno));
+			continue;
+		}
+		for (w = 0; w < regions[r].size / 4; w += 4) {
+			unsigned int k;
+
+			say("  +%03lx:", w * 4);
+			for (k = 0; k < 4 && (w + k) < regions[r].size / 4; k++)
+				say(" %08x", *(volatile unsigned int *)
+						     (map + off + (w + k) * 4));
+			say("\n");
+		}
+		munmap(map, span);
+	}
+
+	close(fd);
+}
+
+/*
  * Take the one-shot snapshot of everything that is already known at this
  * point, before Android init touches any of it.
  */
@@ -343,13 +525,67 @@ static void snapshot(FILE *o)
 	 * pattern looks like.
 	 */
 	dump_dir("/sys/bus/spi/devices");
-	dump_dir("/sys/bus/platform/drivers/panel-mipi-dpi-spi");
+	/*
+	 * panel-mipi is an *spi* driver (drivers/gpu/drm/panel/panel-mipi.c
+	 * registers panel_mipi_spi_driver with .name = "panel-mipi"), so its
+	 * driver directory lives under /sys/bus/spi/drivers -- looking under
+	 * platform/drivers only ever yields "no such file" and tells us nothing.
+	 * An empty directory means "driver registered, no device matched";
+	 * a missing one means "driver not built in at all".
+	 */
+	dump_dir("/sys/bus/spi/drivers/panel-mipi");
+	dump_dir("/sys/bus/spi/drivers");
 	dump_dir("/sys/class/backlight");
 	/* debugfs is where panel-mipi exposes the decoded firmware, if it got
 	 * that far. Mounting it here is harmless -- Android remounts /sys later. */
 	if (mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL) == 0 ||
-	    errno == EBUSY)
+	    errno == EBUSY) {
+		dump_dir("/sys/kernel/debug/dri");
 		dump_dir("/sys/kernel/debug/dri/0");
+		/*
+		 * The single most useful file when a whole DRM driver never
+		 * binds: every device that returned -EPROBE_DEFER and is
+		 * waiting for a supplier, with the reason. Without it we can
+		 * only guess which link of the chain (planes -> CCU regmap,
+		 * mixer -> planes, tcon-top -> mixers, drm -> components) is
+		 * the one that never resolved.
+		 */
+		dump_file("/sys/kernel/debug/devices_deferred");
+	}
+	/*
+	 * Bind state of each display/backlight driver. A driver directory
+	 * exists as soon as the driver registers, and contains a symlink per
+	 * bound device -- so an empty directory means "driver loaded, device
+	 * never matched", while a missing directory means "driver not built
+	 * in at all". Those two cases need completely different fixes.
+	 */
+	dump_dir("/sys/bus/platform/drivers/sun50i-planes");
+	dump_dir("/sys/bus/platform/drivers/sun8i-mixer");
+	dump_dir("/sys/bus/platform/drivers/sun8i-tcon-top");
+	dump_dir("/sys/bus/platform/drivers/sun4i-tcon");
+	dump_dir("/sys/bus/platform/drivers/sun4i-drm");
+	dump_dir("/sys/bus/platform/drivers/sun8i-pwm");
+	dump_dir("/sys/bus/platform/drivers/pwm-backlight");
+	dump_dir("/sys/bus/platform/drivers/sunxi-de2-clks");
+	/*
+	 * The DE2 CCU node is the supplier behind `allwinner,plane-mapping`;
+	 * if sunxi-de2-clks bound it, planes can resolve the regmap, otherwise
+	 * planes defers forever.
+	 *
+	 * Device names are bus-address prefixed: the DTS puts these under
+	 * bus@1000000, so clock@8000 becomes 1008000.clock, planes@100000
+	 * becomes 1100000.planes and mixer@280000 becomes 1280000.mixer --
+	 * the plain node address is never the sysfs name. Reading the
+	 * `driver` symlink tells us bound vs orphan.
+	 */
+	dump_file("/sys/bus/platform/devices/1100000.planes/driver/uevent");
+	dump_file("/sys/bus/platform/devices/1008000.clock/driver/uevent");
+	dump_file("/sys/bus/platform/devices/1280000.mixer/driver/uevent");
+	dump_file("/sys/bus/platform/devices/6510000.tcon-top/driver/uevent");
+	dump_file("/sys/bus/platform/devices/300a000.pwm/driver/uevent");
+	dump_file("/sys/bus/platform/devices/backlight/driver/uevent");
+	dump_dir("/sys/bus/platform/devices/1100000.planes");
+	dump_dir("/sys/bus/platform/devices/1008000.clock");
 	dump_block_sizes();
 	dump_platform_devices();
 	dump_partition_heads();
@@ -466,6 +702,32 @@ int main(void)
 		fclose(o);
 		sync();
 		logged = 1;
+	}
+
+	/*
+	 * Paint known colours now, while the log is already safely on the card
+	 * and before Android init starts competing for the display.
+	 */
+	if (logged) {
+		FILE *o = fopen(logpath, "a");
+
+		if (o) {
+			out = o;
+			fb_paint_test();
+			/*
+			 * Read the pipeline back right after painting: this is
+			 * the only moment where we know a known pattern sits in
+			 * fb0 and the drivers have already programmed the
+			 * hardware. If the layer address here does not match
+			 * the framebuffer we painted, that is the answer.
+			 */
+			mmio_dump();
+			fflush(o);
+			fsync(fileno(o));
+			fclose(o);
+			out = NULL;
+			sync();
+		}
 	}
 
 handover:

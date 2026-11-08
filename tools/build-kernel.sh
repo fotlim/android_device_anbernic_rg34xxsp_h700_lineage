@@ -433,6 +433,74 @@ grep -q 'writel(0x20, regs + TCON_TOP_PORT_SEL_REG)' "$SRC/drivers/gpu/drm/sun4i
   || { echo "  错误：sun8i_tcon_top.c 没有 0003 的首行修正"; exit 1; }
 echo "  DE33 显示链路就位（planes + tcon + tcon-top + hdmi-phy + display-engine）"
 
+# 3f/6 和 sun50i_planes.c 一模一样的坑：0008 补丁新建了 drivers/pwm/pwm-sun8i.c，
+# 但同一补丁里改 drivers/pwm/Kconfig 与 drivers/pwm/Makefile 的两个 hunk 被 --reject
+# 拒掉了 —— 结果是源码躺在树里、却从来没有被编译过。
+# 后果不是「背光暗一点」而是整条背光链断掉：
+#   pwm@300a000 (allwinner,sun50i-h616-pwm) 没有 provider
+#     → backlight (pwm-backlight) 的 pwm_get() 返回 -EPROBE_DEFER
+#       → backlight 永远 probe 不了
+#         → panel-mipi 拿不到 backlight 设备 → 屏幕黑（但系统照常跑）
+say "3f/6 补回 H616 PWM 驱动的 Kconfig / Makefile 条目（0008 的 hunk 被拒）"
+if [ ! -f "$SRC/drivers/pwm/pwm-sun8i.c" ]; then
+  echo "  错误：drivers/pwm/pwm-sun8i.c 不存在（0008 没打上？）"; exit 1
+fi
+python3 - "$SRC" <<'PY'
+import io, os, sys
+src = sys.argv[1]
+k = os.path.join(src, 'drivers/pwm/Kconfig')
+s = io.open(k, encoding='utf-8').read()
+if 'config PWM_SUN8I' in s:
+    print('  Kconfig: 已有 PWM_SUN8I，跳过')
+else:
+    entry = (
+        'config PWM_SUN8I\n'
+        '\ttristate "Allwinner sun8i/sun50i PWM support"\n'
+        '\tdepends on ARCH_SUNXI || COMPILE_TEST\n'
+        '\tdepends on HAS_IOMEM && COMMON_CLK\n'
+        '\thelp\n'
+        '\t  Generic PWM framework driver for Allwinner sun8i/sun50i SoCs.\n'
+        '\t  It supports the PWM controller found on H616 and newer SoCs,\n'
+        '\t  which is different from the one handled by PWM_SUN4I.\n'
+        '\n'
+        '\t  To compile this driver as a module, choose M here: the module\n'
+        '\t  will be called pwm-sun8i.\n'
+        '\n'
+    )
+    anchor = 'config PWM_SUN4I'
+    i = s.find(anchor)
+    if i < 0:
+        i = s.rstrip().rfind('endif')
+    else:
+        # 插到 PWM_SUN4I 整块之后：找下一个顶层 'config ' 或 'endif'
+        j = s.find('\nconfig ', i + len(anchor))
+        e = s.find('\nendif', i + len(anchor))
+        cands = [x for x in (j, e) if x > 0]
+        i = min(cands) + 1 if cands else len(s)
+    s = s[:i] + entry + s[i:]
+    io.open(k, 'w', encoding='utf-8', newline='\n').write(s)
+    print('  Kconfig: 已插入 PWM_SUN8I')
+
+m = os.path.join(src, 'drivers/pwm/Makefile')
+s = io.open(m, encoding='utf-8').read()
+if 'pwm-sun8i.o' in s:
+    print('  Makefile: 已有 pwm-sun8i.o，跳过')
+else:
+    line = 'obj-$(CONFIG_PWM_SUN8I)\t\t+= pwm-sun8i.o\n'
+    anchor = 'obj-$(CONFIG_PWM_SUN4I)\t\t+= pwm-sun4i.o\n'
+    if anchor in s:
+        s = s.replace(anchor, anchor + line, 1)
+    else:
+        s = s.rstrip('\n') + '\n' + line
+    io.open(m, 'w', encoding='utf-8', newline='\n').write(s)
+    print('  Makefile: 已加入 pwm-sun8i.o')
+PY
+grep -q 'config PWM_SUN8I' "$SRC/drivers/pwm/Kconfig" \
+  || { echo "  错误：Kconfig 里没有 PWM_SUN8I"; exit 1; }
+grep -q 'pwm-sun8i.o' "$SRC/drivers/pwm/Makefile" \
+  || { echo "  错误：Makefile 里没有 pwm-sun8i.o"; exit 1; }
+echo "  H616 PWM 驱动就位（背光链 pwm@300a000 → pwm-backlight → panel）"
+
 say "4/6 配置：ROCKNIX H700 全量 config + 本仓库 fragment"
 for _ in 1 2 3 4; do curl -fsS -m 90 -o "$WORK/base.config" "$CONF_URL" && break; sleep 2; done
 [ -s "$WORK/base.config" ] || { echo "拉不到 linux.aarch64.conf"; exit 1; }
@@ -476,6 +544,9 @@ grep -q '^CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD=y' .config \
 # DE33 planes：没有它 mixer 能 probe、屏幕会亮，但 plane 通道映射没配 → 满屏横线
 grep -q '^CONFIG_DRM_SUN50I_PLANES=y' .config \
   || { echo "错误：CONFIG_DRM_SUN50I_PLANES 没生效（sun4i/Kconfig 条目没补上？）"; exit 1; }
+# H616 PWM：没有它 pwm-backlight 永远 -EPROBE_DEFER → 背光不亮 → 屏幕黑
+grep -q '^CONFIG_PWM_SUN8I=y' .config \
+  || { echo "错误：CONFIG_PWM_SUN8I 没生效（pwm/Kconfig 条目没补上？）"; exit 1; }
 
 # Android 起不来的那几件事，逐个断言。merge_config 遇到未知符号只 warn 不报错，
 # olddefconfig 又会静默丢掉依赖不满足的符号 —— 不断言就只能等开机黑屏再回来查。
@@ -524,11 +595,12 @@ for compat in \
   'allwinner,sun50i-h616-display-engine' \
   'allwinner,sun50i-h616-tcon-tv' \
   'allwinner,sun8i-r40-tcon-lcd' \
-  'allwinner,sun50i-h616-hdmi-phy' ; do
+  'allwinner,sun50i-h616-hdmi-phy' \
+  'allwinner,sun50i-h616-pwm' ; do
   grep -aq "$compat" "$OUT/Image" \
-    || { echo "错误：Image 里没有 $compat，显示链路缺了这一环"; exit 1; }
+    || { echo "错误：Image 里没有 $compat，显示/背光链路缺了这一环"; exit 1; }
 done
-echo "  Image 内含完整显示链路 compatible（planes/mixer/engine/tcon/tcon-tv/hdmi-phy）"
+echo "  Image 内含完整显示链路 compatible（planes/mixer/engine/tcon/tcon-tv/hdmi-phy/pwm）"
 
 # 注意：这里不编 DTB，直接装仓库里那份 ROCKNIX 验证过的二进制。
 # 原因见 kernel/dtb/README.md：repo 里的 kernel/dts/*.dts 是 include 式覆盖，
