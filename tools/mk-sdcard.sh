@@ -49,6 +49,34 @@
 # entries and its entry array covers sectors 2..33, which is exactly where the
 # sunxi SPL lives (sector 16). sfdisk/sgdisk with defaults silently overwrite
 # the bootloader -- the stock Anbernic partition table also uses 8 entries.
+#
+# Why the image also carries a *hybrid* MBR (sector 0), on top of the GPT:
+#
+#   U-Boot on this board walks distro_bootcmd -> scan_dev_for_boot_part, which
+#   runs `part list ${devtype} ${devnum} -bootable devplist` and then
+#   `fstype ${devtype} ${devnum}:${part}` before it will look at extlinux.conf
+#   or boot.scr at all. A pure protective MBR (single 0xEE entry covering the
+#   whole disk) gives that code path nothing it can fstype, so *nothing* on the
+#   card is ever scanned: the board sits at a black screen with the power LED
+#   lit and leaves no trace whatsoever. ROCKNIX ships `label: dos` and boots
+#   with the byte-identical U-Boot binary, which is what pointed here.
+#
+#   Android, on the other hand, needs the GPT: partition *names* are what
+#   become /dev/block/by-name/<name>, and fstab.rg34xxsp is written against
+#   those names (msdos tables carry no volume name -- block/partitions/msdos.c
+#   clears info->volname, so a pure MBR card yields no PARTNAME uevent and the
+#   by-name symlinks never appear).
+#
+#   A hybrid MBR satisfies both: sector 0 gets a normal 0x0C bootable entry for
+#   the FAT boot partition (what U-Boot's dos driver needs) plus the protective
+#   0xEE entry at LBA 1 (what the kernel's efi_partition demands). The kernel
+#   classifies that as GPT_MBR_HYBRID -- see block/partitions/efi.c
+#   is_pmbr_valid() -- which is accepted, so it still parses the GPT and the
+#   partition names survive.
+#
+# The 0x0C entry must come first so U-Boot numbers the boot partition as
+# partition 1 (`devplist=1`), matching what a plain DOS-labelled card looks
+# like.
 
 set -euo pipefail
 
@@ -165,6 +193,55 @@ start=$META_START, size=$META_SIZE, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, n
 start=$SUPER_START, size=$SUPER_SIZE, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="$SUPER_NAME"
 start=$DATA_START, size=$DATA_SIZE, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="$DATA_NAME"
 EOF
+
+# --- 2b. hybrid MBR (see the long note at the top of this file) ------------
+say "writing hybrid MBR (0x0C boot entry + 0xEE protective)"
+python3 - "$OUT" "$BOOT_START" "$BOOT_SIZE" "$TOTAL_SECT" <<'PY'
+import struct, sys
+path, boot_start, boot_size, total = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+f = open(path, 'r+b')
+f.seek(0)
+mbr = bytearray(f.read(512))
+assert mbr[510:512] == b'\x55\xaa', 'no MBR signature to build on: %r' % mbr[510:512]
+
+def chs(lba, heads=255, sectors=63):
+    # Classic INT13 geometry. The values only matter to legacy BIOSes and to
+    # code that sanity-checks them, so a plain LBA->CHS conversion is enough.
+    c = lba // (heads * sectors)
+    if c > 1023:
+        return b'\xfe\xff\xff'
+    h = (lba // sectors) % heads
+    s = (lba % sectors) + 1
+    return bytes([h, (s & 0x3f) | ((c >> 2) & 0xc0), c & 0xff])
+
+def entry(bootable, ptype, start, size):
+    return bytes([0x80 if bootable else 0x00]) + chs(start) + bytes([ptype]) + \
+           chs(start + size - 1) + struct.pack('<II', start, size)
+
+# Entry 1: the FAT boot partition as a normal 0x0C (FAT32 LBA) partition. This
+# is what U-Boot's dos partition driver sees, and it must be first so that it
+# becomes partition number 1 -- scan_dev_for_boot_part falls back to devplist=1.
+# Entry 2: the protective 0xEE record the kernel's efi_partition insists on
+# (is_pmbr_valid requires os_type 0xEE with starting_lba == 1).
+mbr[446:462] = entry(True, 0x0C, boot_start, boot_size)
+mbr[462:478] = entry(False, 0xEE, 1, min(total - 1, 0xFFFFFFFF))
+mbr[478:510] = bytes(32)
+f.seek(0)
+f.write(mbr)
+f.close()
+
+# Read it back and prove both halves are present.
+f = open(path, 'rb')
+hdr = f.read(512)
+f.close()
+e = [hdr[446 + 16 * i: 462 + 16 * i] for i in range(4)]
+assert e[0][4] == 0x0C and e[0][0] == 0x80, 'boot entry wrong: %r' % e[0]
+assert struct.unpack('<I', e[0][8:12])[0] == boot_start, 'boot entry LBA wrong'
+assert struct.unpack('<I', e[0][12:16])[0] == boot_size, 'boot entry size wrong'
+assert e[1][4] == 0xEE, 'no protective entry: %r' % e[1]
+assert struct.unpack('<I', e[1][8:12])[0] == 1, 'protective entry must start at LBA 1'
+print('    hybrid MBR ok: [1] 0x0C bootable @%d +%d, [2] 0xEE @1' % (boot_start, boot_size))
+PY
 
 # --- 3. bootloader at 8 KiB ------------------------------------------------
 say "writing U-Boot at 8 KiB ($(stat -c%s "$UBOOT") B)"
@@ -286,14 +363,20 @@ fi
 #
 # With --embed-initramfs there is no initrd line at all (see the note at the top
 # of the input checks): the initramfs travels inside Image.
-INITRD_LINE=""
+#
+# The initrd line is carried as a *suffix* on the devicetree line rather than
+# its own template line, because an empty expansion there would leave a blank
+# line inside the label block -- and a blank line is the one thing we cannot
+# afford to guess about in a config we only get one shot at testing.
+INITRD_SUFFIX=""
 if [ "$EMBED_INITRAMFS" -eq 0 ]; then
     if [ -n "$DEBUG_LABEL" ]; then
         BOOT_INITRD=/initrd-debug.img
     else
         BOOT_INITRD=/initrd.img
     fi
-    INITRD_LINE="    initrd $BOOT_INITRD"
+    INITRD_SUFFIX="
+    initrd $BOOT_INITRD"
 fi
 
 cat > /tmp/sdcard-boot/extlinux/extlinux.conf <<EOF
@@ -305,8 +388,7 @@ timeout 0
 label android
     menu label Android 11 (LineageOS 18.1)
     kernel /Image
-    devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb
-$INITRD_LINE
+    devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb$INITRD_SUFFIX
     append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
 
 # Same Android image but with the v2 panel firmware. The two DTB files differ
@@ -316,8 +398,7 @@ $INITRD_LINE
 label android-v2
     menu label Android 11 (v2 panel)
     kernel /Image
-    devicetree /sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb
-$INITRD_LINE
+    devicetree /sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb$INITRD_SUFFIX
     append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
 
 # Same kernel, but no ramdisk and no init: the kernel panics after
@@ -344,20 +425,105 @@ label plain
 EOF
 fi
 
+# --- 7b. breadcrumb boot.scr (fallback evidence, never the primary path) ---
+#
+# scan_dev_for_boot runs, for each prefix:
+#     run scan_dev_for_extlinux      <- our extlinux.conf, should win
+#     run scan_dev_for_scripts       <- boot.scr, only reached if the above failed
+#
+# If extlinux works, booti never returns and boot.scr is dead weight. If it
+# fails, boot.scr runs and leaves small files on the card saying how far it got
+# -- which is the only telemetry this board offers, since it has no exposed UART
+# and USB never enumerates when the kernel dies early.
+#
+# The marker files are written with `fatwrite`, which this U-Boot build has.
+# Their *content* is incidental -- existence is the signal. To keep them
+# readable anyway they are copied out of the script buffer itself (U-Boot loads
+# boot.scr at scriptaddr=0x4FC00000 and executes it in place, so 0x4FC00040 is
+# the script text right after mkimage's 64-byte header).
+#
+# Conditionals use `&&` rather than `test $? -eq 0`: U-Boot's hush does not set
+# $? the way a POSIX shell does, but it does implement && / ||.
+if command -v mkimage >/dev/null 2>&1; then
+    say "building breadcrumb boot.scr"
+    cat > /tmp/sdcard-boot.cmd <<'EOF'
+fatwrite mmc 0:1 0x4FC00040 BREAD.TXT 32
+fatload mmc 0:1 0x4FA00000 /sun50i-h700-anbernic-rg34xx-sp.dtb && fatwrite mmc 0:1 0x4FA00000 STEP1DTB.TXT 16
+fatload mmc 0:1 0x40080000 /Image && fatwrite mmc 0:1 0x40080000 STEP2IMG.TXT 16
+setenv bootargs console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
+booti 0x40080000 - 0x4FA00000
+fatwrite mmc 0:1 0x4FC00040 STEP3FAIL.TXT 32
+EOF
+    mkimage -A arm64 -O linux -T script -C none -n rg34xxsp-breadcrumb \
+        -d /tmp/sdcard-boot.cmd /tmp/sdcard-boot/boot.scr >/dev/null
+    ls -l /tmp/sdcard-boot/boot.scr
+else
+    say "mkimage not found -- skipping breadcrumb boot.scr"
+fi
+
 sync
 umount /tmp/sdcard-boot
 
 # --- 8. verify what we just built ----------------------------------------
 say "verifying"
-sfdisk --dump "$OUT" | sed -n '1,7p'
-sfdisk --dump "$OUT" | grep -E '\.img[0-9]+ *:'
-NPARTS=$(sfdisk --dump "$OUT" | grep -cE '\.img[0-9]+ *:')
-[ "$NPARTS" -eq 5 ] || die "expected 5 partitions, GPT has $NPARTS"
-echo
-python3 - "$OUT" "$BOOT_START" "$SUPER_START" <<'PY'
-import sys
-path, boot_start, super_start = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+# sfdisk picks a table type by looking at sector 0, and our hybrid MBR makes it
+# report the image as `dos` even though a full GPT is present. So the GPT is
+# read back directly instead of through sfdisk, and the MBR is checked on its
+# own terms.
+python3 - "$OUT" "$BOOT_START" "$BOOT_SIZE" "$SUPER_START" <<'PY'
+import struct, sys
+path, boot_start, boot_size, super_start = (sys.argv[1], int(sys.argv[2]),
+                                            int(sys.argv[3]), int(sys.argv[4]))
 h = open(path, 'rb')
+
+# ---- sector 0: the hybrid MBR U-Boot's dos driver reads ------------------
+h.seek(0); mbr = h.read(512)
+assert mbr[510:512] == b'\x55\xaa', 'MBR signature missing'
+ents = [mbr[446 + 16 * i: 462 + 16 * i] for i in range(4)]
+types = [e[4] for e in ents if e[4] != 0]
+assert types[:2] == [0x0C, 0xEE], 'hybrid MBR entries wrong: %r' % types
+assert ents[0][0] == 0x80, 'boot entry not marked bootable'
+assert struct.unpack('<I', ents[0][8:12])[0] == boot_start, 'boot entry LBA wrong'
+assert struct.unpack('<I', ents[0][12:16])[0] == boot_size, 'boot entry size wrong'
+assert struct.unpack('<I', ents[1][8:12])[0] == 1, 'protective entry must start at LBA 1'
+print('    MBR: [1] 0x0C bootable @%d +%d, [2] 0xEE @1  (U-Boot dos driver)' %
+      (boot_start, boot_size))
+
+# ---- sector 1: the GPT the kernel and Android read -----------------------
+h.seek(512); gpt = h.read(512)
+assert gpt[:8] == b'EFI PART', 'no GPT header at LBA 1: %r' % gpt[:8]
+my_lba, alt_lba, first_usable, last_usable = struct.unpack('<QQQQ', gpt[24:56])
+entries_lba, num_entries, entry_size = struct.unpack('<QII', gpt[72:88])
+assert my_lba == 1, 'GPT my_lba is %d, expected 1' % my_lba
+assert entries_lba == 2, 'GPT entry array is at %d, expected 2' % entries_lba
+print('    GPT: my_lba=%d alt_lba=%d entries_lba=%d n=%d' %
+      (my_lba, alt_lba, entries_lba, num_entries))
+
+# ---- the entry array must not have clobbered the SPL at sector 16 --------
+# 8 entries * 128 B = 1024 B = sectors 2..3, which leaves 4..15 free before the
+# sunxi SPL at 16. Anything larger eats the bootloader.
+assert num_entries == 8 and entry_size == 128, \
+    'GPT has %d entries of %d B; must be 8x128 to keep sector 16 free' % (num_entries, entry_size)
+assert entries_lba + (num_entries * entry_size + 511) // 512 <= 16, \
+    'GPT entry array runs into the SPL at sector 16'
+
+h.seek(entries_lba * 512)
+raw = h.read(num_entries * entry_size)
+names = []
+for i in range(num_entries):
+    e = raw[i * entry_size:(i + 1) * entry_size]
+    if e[:16] == bytes(16):
+        continue
+    first, last = struct.unpack('<QQ', e[32:48])
+    name = e[56:128].decode('utf-16-le').rstrip('\x00')
+    names.append((i + 1, name, first, last - first + 1))
+for num, name, first, size in names:
+    print('    GPT part %d: %-9s start=%-8d size=%d' % (num, name, first, size))
+assert len(names) == 5, 'expected 5 GPT partitions, found %d' % len(names)
+assert names[0][1] == 'boot' and names[0][2] == boot_start, 'GPT boot partition wrong'
+assert any(n[1] == 'super' and n[2] == super_start for n in names), 'GPT super partition wrong'
+
+# ---- filesystems ---------------------------------------------------------
 h.seek(boot_start * 512)
 bs = h.read(512)
 assert bs[510:512] == b'\x55\xaa', 'boot partition has no FAT boot sector'
@@ -372,7 +538,9 @@ h.seek(super_start * 512 + 4096)
 magic = h.read(4)
 assert magic == bytes.fromhex('67446c61'), 'no LP metadata geometry in super: %s' % magic.hex()
 print('    super: LP metadata geometry magic ok (67446c61)')
+h.close()
 PY
+echo
 
 # The FAT boot partition must actually contain what U-Boot's sysboot looks for.
 say "boot partition contents"

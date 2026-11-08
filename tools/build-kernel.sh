@@ -301,6 +301,138 @@ EOF
   echo "  已注入脚手架节点"
 fi
 
+# 0002 系列里的 02/03/04 三个子补丁在 7.1.2 上会被拒（上下文漂移），结果是：
+#   sun50i_planes.c/.h 落在树里（--reject 的新建文件 hunk 成功），
+#   但 Kconfig / Makefile 条目、ccu-sun8i-de2.c 的 regmap 导出、
+#   sun8i_mixer.c 切到新绑定（sun50i_engine_ops）全都没落地。
+# 后果非常隐蔽：mixer 照样 probe（compatible 在 of_table 里），屏幕也能亮，
+# 但 DE33 的 plane→通道映射寄存器（0x24/0x28）从未被写过 —— 真机表现就是
+# 「满屏横向亮线」。ROCKNIX 官方内核里这三个补丁是生效的，所以它能正常显示。
+say "3d/6 启用 DE33 planes 驱动（0002 系列的子补丁 02/03/04）"
+SERIES="$PDIR/0002-rg35xx-enable-HDMI-LCD.patch"
+if [ ! -s "$SERIES" ]; then
+  echo "  错误：$SERIES 不存在（0002 没下载成功？）"; exit 1
+fi
+python3 - "$SERIES" <<'PY'
+import re, sys
+src = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+parts = re.split(r'(?m)^From [0-9a-f]{40} ', src)
+for p in parts[1:]:
+    m = re.search(r'Subject: \[PATCH (\d+)/21\]', p)
+    if not m:
+        continue
+    n = int(m.group(1))
+    if n in (1, 2, 3, 4, 5, 6, 7, 16):
+        open('/tmp/sub-%02d.patch' % n, 'w', encoding='utf-8').write(
+            'From ' + '0' * 40 + ' ' + p)
+        print('  拆出子补丁 %02d' % n)
+PY
+
+if grep -q 'sun50i_engine_ops' "$SRC/drivers/gpu/drm/sun4i/sun8i_mixer.c"; then
+  echo "  sun8i_mixer.c 已切到新绑定，跳过"
+else
+  # 02: DE2 CCU 导出 plane mapping 寄存器 regmap（allwinner,plane-mapping 靠它解析）
+  if grep -q 'of_syscon_register_regmap' "$SRC/drivers/clk/sunxi-ng/ccu-sun8i-de2.c"; then
+    echo "  ccu-sun8i-de2.c 已有 regmap 导出，跳过"
+  else
+    git apply /tmp/sub-02.patch && echo "  02 clk: regmap 导出已应用"
+  fi
+  # 03: Kconfig / Makefile 两处 hunk 会被拒，按锚点幂等补回
+  python3 - "$SRC" <<'PY'
+import io, os, sys
+src = sys.argv[1]
+k = os.path.join(src, 'drivers/gpu/drm/sun4i/Kconfig')
+s = io.open(k, encoding='utf-8').read()
+if 'config DRM_SUN50I_PLANES' in s:
+    print('  Kconfig: 已有 DRM_SUN50I_PLANES，跳过')
+else:
+    entry = (
+        'config DRM_SUN50I_PLANES\n'
+        '\ttristate\n'
+        '\tdefault DRM_SUN4I if DRM_SUN8I_MIXER!=n\n'
+        '\thelp\n'
+        '\t  Chose this option if you have an Allwinner Soc with the\n'
+        '\t  Display Engine 3.3 or newer. Planes are shared resource\n'
+        '\t  between multiple mixers.\n'
+        '\n'
+    )
+    i = s.rstrip().rfind('endif')
+    s = s[:i] + entry + s[i:]
+    io.open(k, 'w', encoding='utf-8', newline='\n').write(s)
+    print('  Kconfig: 已插入 DRM_SUN50I_PLANES')
+m = os.path.join(src, 'drivers/gpu/drm/sun4i/Makefile')
+s = io.open(m, encoding='utf-8').read()
+if 'sun50i_planes.o' in s:
+    print('  Makefile: 已有 sun50i_planes.o，跳过')
+else:
+    s = s.rstrip('\n') + '\nobj-$(CONFIG_DRM_SUN50I_PLANES)\t+= sun50i_planes.o\n'
+    io.open(m, 'w', encoding='utf-8', newline='\n').write(s)
+    print('  Makefile: 已追加 sun50i_planes.o')
+PY
+  # 04: 把 DE33 切到新绑定（engine->ops 换成 sun50i_engine_ops，取 top_regs 用 index 1）
+  patch -p1 -F3 --no-backup-if-mismatch -d "$SRC" < /tmp/sub-04.patch >/dev/null \
+    && echo "  04 mixer: DE33 已切到新绑定"
+fi
+
+# 01/05/06/07/16 同样是「补丁主体被拒、结果整条链路缺一块」的受害者，各自幂等补上。
+# 每一块缺了都会让屏幕停在「亮但没有正确画面」：
+#   01 DE33 VI plane 去掉 YUV 格式（YUV 需要 scaler，DE33 scaler 还没实现）
+#   05 H616 TCON TV quirks（hdmi_pad，否则 HDMI 通路打不开）
+#   06 H616 HDMI PHY 配置表
+#   07 H616 display-engine compatible（否则整个 DRM 驱动根本不 bind！）
+#   16 R40 TCON LCD quirks（H616/H700 的 LCD TCON 复用 R40 的，DTS 就写着 sun8i-r40-tcon-lcd）
+say "3e/6 补齐 0002 系列其余显示子补丁（01/05/06/07/16）"
+apply_if() { # $1=子补丁号 $2=目标文件 $3=判据 $4=说明
+  if grep -q "$3" "$SRC/$2"; then
+    echo "  $4 已在，跳过"
+  else
+    patch -p1 -F3 --no-backup-if-mismatch -d "$SRC" < "/tmp/sub-$1.patch" >/dev/null \
+      && echo "  $4 已应用"
+  fi
+}
+apply_if 01 drivers/gpu/drm/sun4i/sun8i_vi_layer.c 'sun8i_vi_layer_de33_formats' '01 DE33 VI plane 格式表'
+apply_if 05 drivers/gpu/drm/sun4i/sun4i_tcon.h          'hdmi_pad'                      '05 H616 TCON TV quirks'
+apply_if 06 drivers/gpu/drm/sun4i/sun8i_hdmi_phy.c      'sun50i-h616-hdmi-phy'          '06 H616 HDMI PHY'
+apply_if 07 drivers/gpu/drm/sun4i/sun4i_drv.c           'sun50i-h616-display-engine'    '07 H616 display-engine'
+apply_if 16 drivers/gpu/drm/sun4i/sun4i_tcon.c          'sun8i_r40_lcd_quirks'          '16 R40 TCON LCD quirks'
+
+# 0003 是 ROCKNIX 的「首行花屏」hack：tcon-top 的 PORT_SEL 复位值不清零而是写 0x20。
+if grep -q 'writel(0x20, regs + TCON_TOP_PORT_SEL_REG)' "$SRC/drivers/gpu/drm/sun4i/sun8i_tcon_top.c"; then
+  echo "  0003 tcon-top 首行修正 已在，跳过"
+else
+  patch -p1 -F3 --no-backup-if-mismatch -d "$SRC" \
+    < "$PDIR/0003-Update-sun8i_tcon_top.c.patch" >/dev/null \
+    && echo "  0003 tcon-top 首行修正 已应用"
+fi
+
+# 这些地方缺任何一处，屏幕就是「亮但满屏横线/黑屏」，所以全部断言。
+for chk in \
+  "$SRC/drivers/gpu/drm/sun4i/sun50i_planes.c" \
+  "$SRC/drivers/gpu/drm/sun4i/sun50i_planes.h" ; do
+  [ -f "$chk" ] || { echo "  错误：$chk 不存在（子补丁 03 没落下）"; exit 1; }
+done
+grep -q 'config DRM_SUN50I_PLANES' "$SRC/drivers/gpu/drm/sun4i/Kconfig" \
+  || { echo "  错误：Kconfig 里没有 DRM_SUN50I_PLANES"; exit 1; }
+grep -q 'sun50i_planes.o' "$SRC/drivers/gpu/drm/sun4i/Makefile" \
+  || { echo "  错误：Makefile 里没有 sun50i_planes.o"; exit 1; }
+grep -q 'of_syscon_register_regmap' "$SRC/drivers/clk/sunxi-ng/ccu-sun8i-de2.c" \
+  || { echo "  错误：ccu-sun8i-de2.c 没导出 regmap，allwinner,plane-mapping 会解析失败"; exit 1; }
+grep -q 'sun50i_engine_ops' "$SRC/drivers/gpu/drm/sun4i/sun8i_mixer.c" \
+  || { echo "  错误：sun8i_mixer.c 没切到 sun50i_engine_ops"; exit 1; }
+grep -q 'sun8i_vi_layer_de33_formats' "$SRC/drivers/gpu/drm/sun4i/sun8i_vi_layer.c" \
+  || { echo "  错误：sun8i_vi_layer.c 没有 DE33 格式表（子补丁 01）"; exit 1; }
+grep -q 'allwinner,sun50i-h616-display-engine' "$SRC/drivers/gpu/drm/sun4i/sun4i_drv.c" \
+  || { echo "  错误：sun4i_drv.c 没有 h616 display-engine（整个 DRM 不会 bind）"; exit 1; }
+grep -q 'allwinner,sun50i-h616-tcon-tv' "$SRC/drivers/gpu/drm/sun4i/sun4i_tcon.c" \
+  || { echo "  错误：sun4i_tcon.c 没有 h616-tcon-tv（子补丁 05）"; exit 1; }
+grep -q 'allwinner,sun8i-r40-tcon-lcd' "$SRC/drivers/gpu/drm/sun4i/sun4i_tcon.c" \
+  || { echo "  错误：sun4i_tcon.c 没有 r40-tcon-lcd（子补丁 16，DTS 用的就是它）"; exit 1; }
+grep -q 'sun50i-h616-hdmi-phy' "$SRC/drivers/gpu/drm/sun4i/sun8i_hdmi_phy.c" \
+  || { echo "  错误：sun8i_hdmi_phy.c 没有 h616 PHY（子补丁 06）"; exit 1; }
+grep -q 'writel(0x20, regs + TCON_TOP_PORT_SEL_REG)' "$SRC/drivers/gpu/drm/sun4i/sun8i_tcon_top.c" \
+  || { echo "  错误：sun8i_tcon_top.c 没有 0003 的首行修正"; exit 1; }
+echo "  DE33 显示链路就位（planes + tcon + tcon-top + hdmi-phy + display-engine）"
+
 say "4/6 配置：ROCKNIX H700 全量 config + 本仓库 fragment"
 for _ in 1 2 3 4; do curl -fsS -m 90 -o "$WORK/base.config" "$CONF_URL" && break; sleep 2; done
 [ -s "$WORK/base.config" ] || { echo "拉不到 linux.aarch64.conf"; exit 1; }
@@ -341,6 +473,9 @@ grep -q '^CONFIG_EXTRA_FIRMWARE_DIR="firmware-extra"' .config \
   || { echo "错误：EXTRA_FIRMWARE_DIR 没设成 firmware-extra"; exit 1; }
 grep -q '^CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD=y' .config \
   || { echo "错误：CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD 没生效（Kconfig 条目没补上？）"; exit 1; }
+# DE33 planes：没有它 mixer 能 probe、屏幕会亮，但 plane 通道映射没配 → 满屏横线
+grep -q '^CONFIG_DRM_SUN50I_PLANES=y' .config \
+  || { echo "错误：CONFIG_DRM_SUN50I_PLANES 没生效（sun4i/Kconfig 条目没补上？）"; exit 1; }
 
 # Android 起不来的那几件事，逐个断言。merge_config 遇到未知符号只 warn 不报错，
 # olddefconfig 又会静默丢掉依赖不满足的符号 —— 不断言就只能等开机黑屏再回来查。
@@ -379,6 +514,21 @@ echo "  手柄驱动：$(grep '^CONFIG_INPUT_ROCKNIX_SINGLEADC_JOYPAD=' .config)
 say "5/6 编 Image（-j$JOBS）"
 make ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$JOBS" Image
 cp -f "$SRC/arch/arm64/boot/Image" "$OUT/Image"
+
+# 符号在 vmlinux 里，Image 里只剩数据 —— 所以查 compatible 字符串才靠得住。
+# 显示链路上每一环都要在 Image 里出现，缺一环屏幕就停在「亮但没画面」。
+for compat in \
+  'allwinner,sun50i-h616-de33-planes' \
+  'allwinner,plane-mapping' \
+  'allwinner,sun50i-h616-de33-mixer-0' \
+  'allwinner,sun50i-h616-display-engine' \
+  'allwinner,sun50i-h616-tcon-tv' \
+  'allwinner,sun8i-r40-tcon-lcd' \
+  'allwinner,sun50i-h616-hdmi-phy' ; do
+  grep -aq "$compat" "$OUT/Image" \
+    || { echo "错误：Image 里没有 $compat，显示链路缺了这一环"; exit 1; }
+done
+echo "  Image 内含完整显示链路 compatible（planes/mixer/engine/tcon/tcon-tv/hdmi-phy）"
 
 # 注意：这里不编 DTB，直接装仓库里那份 ROCKNIX 验证过的二进制。
 # 原因见 kernel/dtb/README.md：repo 里的 kernel/dts/*.dts 是 include 式覆盖，
