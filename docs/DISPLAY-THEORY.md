@@ -123,6 +123,19 @@ v2 固件 730 B，长度前缀流已逐条 walk 干净）没有真正被面板�
   所以 `MIPI Display ID: 000000` 既不能证明通、也不能证明不通。
 - 没有任何 probe 失败、没有 `Failed to prepare the panel`、`devices_deferred` 为空。
 
+## 五之二、DE2 总线 / SRAM 已排除
+
+`bus@1000000` 的 `compatible = "allwinner,sun50i-h616-de33\0allwinner,sun50i-a64-de2"`，
+而 `drivers/bus/sun50i-de2.c` 的 `of_match_table` **只有 `allwinner,sun50i-a64-de2`**
+（第二串命中，能 bind）。它的 probe 做两件事：`sunxi_sram_claim()` 与
+`of_platform_populate()`。
+
+关键推理：**如果 `sunxi_sram_claim()` 失败，probe 会直接 return，`of_platform_populate()`
+就不会执行，planes / mixer / tcon-top 这些子节点根本不会被创建**。
+而实测 `1100000.planes`、`1280000.mixer`、`6510000.tcon-top` 全都 bind 成功了
+（dmesg 有 `bound 1280000.mixer (ops sun8i_mixer_ops)` 等），
+说明子节点确实被 populate 出来了 → **SRAM claim 成功、DE 总线正常**。
+
 ## 六、地址换算（复核过，避免踩坑）
 
 `planes@100000` 与 `mixer@280000` 都挂在 `bus@1000000` 下，所以绝对地址要加 `0x1000000`：

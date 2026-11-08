@@ -324,106 +324,158 @@ static int mount_boot_partition(const char **used)
 }
 
 /*
- * Paint /dev/fb0 with known solid colours.
+ * Brute-force the blender route, using the panel as the read-out.
  *
- * This is the decisive display test. Everything upstream of the pixel data
- * (DRM binds, tcon timing, mixer planes, panel init) can look perfect in the
- * logs while the screen still shows noise -- but if the framebuffer accepts a
- * fill and the panel shows that exact colour, then the whole path works and
- * the garbage was just whatever memory the scanout happened to point at.
+ * The dump proves everything else is right: channel 6 holds a valid, enabled
+ * XRGB8888 layer pointing at the CMA buffer we paint, the blender is sized and
+ * clocked, the pipe is enabled and the tcon is running. The one register that
+ * still looks wrong is BLEND_ROUTE, which sun8i_mixer_commit() fills from
+ * layer->index -- and on DE33 that is 1 while the layer physically lives on
+ * channel 6. Every other place in the tree addresses hardware by layer->channel.
  *
- * If instead a solid fill still comes out as stripes, the corruption is in the
- * transport itself (RGB pin order, bus width, clock phase), which no amount of
- * userspace work can fix.
- *
- * The card is redrawn a few times with a short pause so the colours can be
- * observed and photographed; fbcon is not running yet, so nothing fights us
- * for the buffer.
+ * Rather than guess, write each candidate into BLEND_ROUTE and paint the
+ * framebuffer a colour unique to that candidate. Whatever shows up on the panel
+ * names the correct value in one boot. ROUTE is per-pipe: pipe n occupies bits
+ * 4n..4n+3, and we only ever have zpos 0, so the raw value goes in unshifted.
  */
-static void fb_paint_test(void)
+static void route_probe(void)
 {
+	static const struct {
+		unsigned int route;
+		const char *label;
+		const char *colour;
+		unsigned int rgb;
+	} tries[] = {
+		{ 0x00000001, "layer->index (what the driver writes now)", "red", 0xff0000 },
+		{ 0x00000006, "physical channel 6", "green", 0x00ff00 },
+		{ 0x00000008, "channel 6 + 2 (PORT02CHN numbering)", "blue", 0x0000ff },
+		{ 0x00000002, "layer index 2", "white", 0xffffff },
+		{ 0x00000009, "channel 7 + 2", "magenta", 0xff00ff },
+		{ 0x00000000, "channel 0 (VI)", "yellow", 0xffff00 },
+	};
 	struct fb_fix_screeninfo fix;
 	struct fb_var_screeninfo var;
-	static const char *names[] = {
-		"red", "green", "blue", "white", "black", "checker"
-	};
-	static const unsigned int colors[] = {
-		0xff0000, 0x00ff00, 0x0000ff, 0xffffff, 0x000000, 0
-	};
-	int fd = open("/dev/fb0", O_RDWR);
+	int ffd = open("/dev/fb0", O_RDWR);
+	int mfd = open("/dev/mem", O_RDWR);
+	unsigned char *fb = MAP_FAILED;
+	unsigned char *mix = MAP_FAILED;
+	size_t stride = 0, total = 0;
 	unsigned int i, x, y;
-	size_t stride, total;
-	unsigned char *map;
+	unsigned long page, off = 0;
+	unsigned int original = 0;
 
-	say("\n===== fb0 paint test =====\n");
-	if (fd < 0) {
-		say("(open /dev/fb0 failed: %s)\n", strerror(errno));
-		return;
+	say("\n===== BLEND_ROUTE probe (watch the panel) =====\n");
+	if (ffd < 0 || mfd < 0) {
+		say("(open fb0/mem failed: %s)\n", strerror(errno));
+		goto out;
 	}
-	if (ioctl(fd, FBIOGET_FSCREENINFO, &fix) != 0) {
-		say("(FBIOGET_FSCREENINFO failed: %s)\n", strerror(errno));
-		close(fd);
-		return;
+	if (ioctl(ffd, FBIOGET_FSCREENINFO, &fix) != 0 ||
+	    ioctl(ffd, FBIOGET_VSCREENINFO, &var) != 0) {
+		say("(fb ioctl failed: %s)\n", strerror(errno));
+		goto out;
 	}
-	if (ioctl(fd, FBIOGET_VSCREENINFO, &var) != 0) {
-		say("(FBIOGET_VSCREENINFO failed: %s)\n", strerror(errno));
-		close(fd);
-		return;
-	}
-
-	say("fix: id=%s smem_start=0x%lx smem_len=%u line_length=%u "
-	    "type=%u visual=%u\n",
-	    fix.id, (unsigned long)fix.smem_start, fix.smem_len,
-	    fix.line_length, fix.type, fix.visual);
-	say("var: %ux%u virt=%ux%u bpp=%u\n",
-	    var.xres, var.yres, var.xres_virtual, var.yres_virtual,
-	    var.bits_per_pixel);
-	say("var: red{off=%u,len=%u} green{off=%u,len=%u} blue{off=%u,len=%u} "
-	    "transp{off=%u,len=%u}\n",
-	    var.red.offset, var.red.length, var.green.offset,
-	    var.green.length, var.blue.offset, var.blue.length,
-	    var.transp.offset, var.transp.length);
+	say("fb0: %s smem_len=%u line_length=%u bpp=%u %ux%u\n",
+	    fix.id, fix.smem_len, fix.line_length, var.bits_per_pixel,
+	    var.xres, var.yres);
 
 	stride = fix.line_length ? fix.line_length : (var.xres_virtual * 4);
 	total = stride * var.yres_virtual;
-	map = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-	if (map == MAP_FAILED) {
-		say("(mmap %zu bytes failed: %s)\n", total, strerror(errno));
-		close(fd);
-		return;
+	fb = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, ffd, 0);
+	if (fb == MAP_FAILED) {
+		say("(mmap fb0 failed: %s)\n", strerror(errno));
+		goto out;
 	}
-	say("mapped %zu bytes (stride %zu)\n", total, stride);
 
-	for (i = 0; i < ARRAY_SIZE(colors); i++) {
-		unsigned int px = colors[i];
+	/* BLEND_ROUTE for mixer 0: blender base 0x1000, route at +0x80. */
+	page = 0x1281000UL & ~0xfffUL;
+	off = 0x1281000UL - page;
+	mix = mmap(NULL, off + 0x100, PROT_READ | PROT_WRITE, MAP_SHARED, mfd,
+		   (off_t)page);
+	if (mix == MAP_FAILED) {
+		say("(mmap mixer blend failed: %s)\n", strerror(errno));
+		goto out;
+	}
 
-		if (i == ARRAY_SIZE(colors) - 1) {
-			/* 32x32 checkerboard: exposes wrong stride or offset. */
-			for (y = 0; y < var.yres_virtual; y++) {
-				unsigned int *row =
-					(unsigned int *)(map + y * stride);
+	{
+		volatile unsigned int *route =
+			(volatile unsigned int *)(mix + off + 0x80);
 
-				for (x = 0; x < var.xres_virtual; x++)
-					row[x] = (((x >> 5) + (y >> 5)) & 1) ?
-							 0xffffff : 0x000000;
-			}
-		} else {
-			for (y = 0; y < var.yres_virtual; y++) {
-				unsigned int *row =
-					(unsigned int *)(map + y * stride);
+		original = *route;
+		say("ROUTE before probe: 0x%08x\n", original);
+	}
 
-				for (x = 0; x < var.xres_virtual; x++)
-					row[x] = px;
-			}
+	/*
+	 * Orthogonal test first, because it decides how to read everything
+	 * after it: turn the blender background on and disable every pipe.
+	 *
+	 * If the panel goes green, the whole downstream chain (blender -> DE
+	 * top -> tcon-top -> tcon0 -> RGB pins -> panel) works and the only
+	 * fault is the route value. If it stays black while we know BKCOLOR
+	 * and OUTSIZE are programmed, the break is downstream of the blender
+	 * and probing route values is pointless.
+	 *
+	 * Pipe control bits 8..12 enable pipes; clearing them leaves only
+	 * BKCOLOR. Restored right after so the route loop starts clean.
+	 */
+	{
+		volatile unsigned int *pipe =
+			(volatile unsigned int *)(mix + off + 0x00);
+		volatile unsigned int *bk =
+			(volatile unsigned int *)(mix + off + 0x88);
+		unsigned int orig_pipe = *pipe;
+		unsigned int orig_bk = *bk;
+
+		*bk = 0xff00ff00;	/* solid green (ARGB, alpha in 31:24) */
+		*pipe = orig_pipe & ~0x00001f00u;
+		__sync_synchronize();
+		say("BKCOLOR probe: bk=0x%08x pipe=0x%08x -- panel should be GREEN\n",
+		    *bk, *pipe);
+		sleep(4);
+		*bk = orig_bk;
+		*pipe = orig_pipe;
+		__sync_synchronize();
+		say("BKCOLOR restored: bk=0x%08x pipe=0x%08x\n", *bk, *pipe);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(tries); i++) {
+		volatile unsigned int *route =
+			(volatile unsigned int *)(mix + off + 0x80);
+
+		for (y = 0; y < var.yres_virtual; y++) {
+			unsigned int *row = (unsigned int *)(fb + y * stride);
+
+			for (x = 0; x < var.xres_virtual; x++)
+				row[x] = tries[i].rgb;
 		}
-		msync(map, total, MS_SYNC);
-		say("painted %s, holding 3s\n", names[i]);
+		msync(fb, total, MS_SYNC);
+		*route = tries[i].route;
+		__sync_synchronize();
+		say("ROUTE=0x%08x (%s) -> painted %s, holding 3s, readback 0x%08x\n",
+		    tries[i].route, tries[i].label, tries[i].colour,
+		    *route);
 		sleep(3);
 	}
 
-	munmap(map, total);
-	close(fd);
-	say("paint test done\n");
+	/*
+	 * Put back what the driver wrote. Android re-programs this register on
+	 * its first commit anyway, but leaving a probe value behind would make
+	 * the next log lie about what the driver actually asked for.
+	 */
+	*(volatile unsigned int *)(mix + off + 0x80) = original;
+	__sync_synchronize();
+	say("ROUTE restored to 0x%08x\n",
+	    *(volatile unsigned int *)(mix + off + 0x80));
+
+out:
+	if (fb != MAP_FAILED)
+		munmap(fb, total);
+	if (mix != MAP_FAILED)
+		munmap(mix, off + 0x100);
+	if (ffd >= 0)
+		close(ffd);
+	if (mfd >= 0)
+		close(mfd);
+	say("route probe done\n");
 }
 
 /*
@@ -856,26 +908,35 @@ int main(void)
 			 * would be written to the card but stay invisible.
 			 */
 			durable = 1;
-			fb_paint_test();
 			/*
-			 * Read the pipeline back right after painting: this is
-			 * the only moment where we know a known pattern sits in
-			 * fb0 and the drivers have already programmed the
-			 * hardware. If the layer address here does not match
-			 * the framebuffer we painted, that is the answer.
+			 * Order matters: the register dump is the evidence we
+			 * actually came for, so it runs FIRST. On sd13 the
+			 * paint test ran first, held the screen for 18 s and
+			 * got cut short by a power-off before mmio_dump ever
+			 * printed a line -- 18 seconds of nothing is longer
+			 * than anyone waits.
 			 */
 			mmio_dump();
 			mmio_channels();
 			/*
-			 * Last, and most likely to abort: sweep the two big
-			 * blocks for words that look like CMA addresses. If the
-			 * layer got told to scan CMA we find its LADDR here even
-			 * when it sits at an offset the driver does not document;
-			 * if the sweep comes back empty, no plane was ever
-			 * programmed and the DE is scanning whatever reset left.
+			 * Most likely to abort, so after the two structured
+			 * dumps: sweep the big blocks for words that look like
+			 * CMA addresses. If the layer got told to scan CMA we
+			 * find its LADDR here even when it sits at an offset the
+			 * driver does not document; if the sweep comes back
+			 * empty, no plane was ever programmed.
 			 */
 			mmio_scan("planes", 0x1100000, 0x180000);
 			mmio_scan("mixer0", 0x1280000, 0x20000);
+			/*
+			 * Then let the hardware answer the one question the
+			 * dump could not: which channel id BLEND_ROUTE wants.
+			 * Each candidate gets its own colour on the panel, so a
+			 * single boot names the right value. This replaces the
+			 * old paint test -- it paints too, so it also still
+			 * proves fb0 maps the buffer the layer scans.
+			 */
+			route_probe();
 			fflush(o);
 			fsync(fileno(o));
 			fclose(o);

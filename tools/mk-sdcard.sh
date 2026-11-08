@@ -402,7 +402,7 @@ label android
     menu label Android 11 (LineageOS 18.1)
     kernel /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb$INITRD_SUFFIX
-    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
+    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super drm.debug=0x1f
 
 # Same Android image but with the v2 panel firmware. The two DTB files differ
 # only in rocknix-dt-id and the panel node's first compatible string, which is
@@ -412,7 +412,7 @@ label android-v2
     menu label Android 11 (v2 panel)
     kernel /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb$INITRD_SUFFIX
-    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
+    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super drm.debug=0x1f
 
 # Same kernel, but no ramdisk and no init: the kernel panics after
 # init_mount_root() because there is nothing to exec. Kept as an escape hatch
@@ -434,7 +434,7 @@ label plain
     kernel /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb
     initrd /initrd.img
-    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
+    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super drm.debug=0x1f
 EOF
 fi
 
@@ -463,7 +463,7 @@ if command -v mkimage >/dev/null 2>&1; then
 fatwrite mmc 0:1 0x4FC00040 BREAD.TXT 32
 fatload mmc 0:1 0x4FA00000 /sun50i-h700-anbernic-rg34xx-sp.dtb && fatwrite mmc 0:1 0x4FA00000 STEP1DTB.TXT 16
 fatload mmc 0:1 0x40080000 /Image && fatwrite mmc 0:1 0x40080000 STEP2IMG.TXT 16
-setenv bootargs console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super
+setenv bootargs console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=4020000.mmc androidboot.super_partition=super drm.debug=0x1f
 booti 0x40080000 - 0x4FA00000
 fatwrite mmc 0:1 0x4FC00040 STEP3FAIL.TXT 32
 EOF
