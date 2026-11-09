@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -1344,6 +1345,170 @@ static void snapshot(FILE *o)
 	say("\n===== SNAPSHOT COMPLETE =====\n");
 }
 
+/* ---- watching /init.android die as an ordinary child ---------------- */
+
+/*
+ * Android init installs handlers for SIGSEGV/SIGBUS/SIGABRT/... at the very
+ * top of FirstStageMain. As PID 1 they call InitFatalReboot(), which with
+ * androidboot.init_fatal_panic unset does RebootSystem(RESTART2,
+ * "bootloader") -- a reset the kernel may well end up converting into a halt,
+ * leaving no kernel message, no panic, no watchdog reset and a stale frame on
+ * the panel. That is exactly what every run so far looked like.
+ *
+ * As a *child*, the very same handler does `_exit(signal)`, so the parent gets
+ * the signal number back through waitpid(). Run init once that way first:
+ * whatever kills it names itself in the exit status, and nothing about the
+ * display or the kernel's restart path can hide it.
+ *
+ * The child gets its own mount namespace so that the tmpfs init stacks on
+ * /dev, /proc and /mnt stays out of ours -- otherwise the rest of this log
+ * would be written into a filesystem nobody will ever read again.
+ */
+static const char *syscall_name(long nr)
+{
+	switch (nr) {
+	case 29: return "ioctl";
+	case 33: return "mknodat";
+	case 34: return "mkdirat";
+	case 40: return "mount";
+	case 43: return "statfs";
+	case 53: return "fchmodat";
+	case 56: return "openat";
+	case 64: return "write";
+	case 66: return "writev";
+	case 78: return "readlinkat";
+	case 98: return "futex";
+	case 123: return "sched_getaffinity";
+	case 159: return "setgroups";
+	case 160: return "uname";
+	case 167: return "prctl";
+	case 220: return "clone";
+	case 221: return "execve";
+	case 222: return "mmap";
+	case 226: return "mprotect";
+	case 260: return "wait4";
+	case 273: return "finit_module";
+	case 278: return "getrandom";
+	case 291: return "statx";
+	default: return NULL;
+	}
+}
+
+static void read_first_line(const char *path, char *buf, size_t len,
+			    int keep_newline)
+{
+	FILE *f = fopen(path, "r");
+	size_t n;
+
+	buf[0] = 0;
+	if (!f)
+		return;
+	n = fread(buf, 1, len - 1, f);
+	buf[n] = 0;
+	fclose(f);
+	if (!keep_newline) {
+		char *nl = strchr(buf, '\n');
+
+		if (nl)
+			*nl = 0;
+	}
+}
+
+static void trace_child(pid_t pid, int sec)
+{
+	char path[64], stat[256], wchan[80], sysc[192], line[400];
+	char state = '?';
+	char *p;
+
+	snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+	read_first_line(path, stat, sizeof(stat), 0);
+	/* the comm field is parenthesised and may itself contain spaces */
+	p = strrchr(stat, ')');
+	if (p && p[1] == ' ' && p[2])
+		state = p[2];
+
+	snprintf(path, sizeof(path), "/proc/%d/wchan", (int)pid);
+	read_first_line(path, wchan, sizeof(wchan), 0);
+	if (!wchan[0])
+		strcpy(wchan, "-");
+
+	snprintf(path, sizeof(path), "/proc/%d/syscall", (int)pid);
+	read_first_line(path, sysc, sizeof(sysc), 0);
+	if (!sysc[0])
+		strcpy(sysc, "-");
+
+	{
+		long nr = strtol(sysc, NULL, 10);
+		const char *name = syscall_name(nr);
+
+		snprintf(line, sizeof(line),
+			 "stage 4b: t=%ds state=%c wchan=%s syscall=%s(%ld)",
+			 sec, state, wchan, name ? name : "?", nr);
+	}
+	hb(line);
+}
+
+static void child_probe(void)
+{
+	pid_t pid;
+	int i, alive = 1;
+	char line[256];
+
+	hb("stage 4b: child probe -- /init.android as a normal process");
+	pid = fork();
+	if (pid == 0) {
+		int fd;
+
+		if (unshare(CLONE_NEWNS) != 0)
+			_exit(125);
+		mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+		fd = open("/mnt/DEBUG/child-out.txt",
+			  O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (fd >= 0) {
+			dup2(fd, 1);
+			dup2(fd, 2);
+			if (fd > 2)
+				close(fd);
+		}
+		execl("/init.android", "/init", NULL);
+		_exit(127);
+	}
+	if (pid < 0) {
+		hb("stage 4b: fork for the child probe failed");
+		return;
+	}
+
+	for (i = 0; i < 80; i++) {
+		int st = 0;
+
+		if (waitpid(pid, &st, WNOHANG) == pid) {
+			alive = 0;
+			if (WIFEXITED(st))
+				snprintf(line, sizeof(line),
+					 "stage 4b: init.android exited with %d (125 = no namespaces, 127 = exec failed)",
+					 WEXITSTATUS(st));
+			else if (WIFSIGNALED(st))
+				snprintf(line, sizeof(line),
+					 "stage 4b: init.android died on signal %d",
+					 WTERMSIG(st));
+			else
+				snprintf(line, sizeof(line),
+					 "stage 4b: init.android status 0x%x",
+					 st);
+			hb(line);
+			break;
+		}
+		if (i % 4 == 0)
+			trace_child(pid, i / 4);
+		usleep(250000);
+	}
+	if (alive) {
+		hb("stage 4b: init.android still alive at 20s, killing it");
+		kill(pid, SIGKILL);
+		waitpid(pid, NULL, 0);
+	}
+}
+
 int main(void)
 {
 	const char *bootdev = NULL;
@@ -1518,6 +1683,12 @@ int main(void)
 			sync();
 		}
 	}
+
+/*
+	 * Before turning PID 1 into init, let it run once as a child: that is
+	 * the only configuration in which a fatal signal reports itself.
+	 */
+	child_probe();
 
 handover:
 	/*
