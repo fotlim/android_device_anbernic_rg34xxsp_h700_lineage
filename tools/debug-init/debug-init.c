@@ -175,6 +175,106 @@ static void dump_dir(const char *path)
 	closedir(d);
 }
 
+/*
+ * Copy whatever pstore/ramoops salvaged from the previous run into DEBUG/.
+ *
+ * Android init dies the instant it becomes PID 1 -- the kernel then panics,
+ * and with panic_timeout=0 the machine halts with the panic text stuck in the
+ * ring buffer while the console is already dead. Nothing is written anywhere,
+ * which is exactly the dead end sd21..sd23 all hit. ramoops keeps the panic
+ * dump in DRAM across the warm reset that panic=10 triggers, so the next boot
+ * is the one that finally gets to read it.
+ */
+/*
+ * Did the DT node reach the ramoops driver at all? /sys/bus/platform/drivers/
+ * ramoops holds one symlink per bound device; if it is empty the DT node was
+ * never populated, and an empty /sys/fs/pstore means "no driver", not
+ * "nothing crashed".
+ */
+static void report_ramoops(FILE *m)
+{
+	const char *dir = "/sys/bus/platform/drivers/ramoops";
+	DIR *d = opendir(dir);
+	struct dirent *e;
+	int bound = 0;
+
+	if (!d) {
+		fprintf(m, "ramoops driver: %s does not exist (CONFIG_PSTORE_RAM off?)\n",
+			dir);
+		return;
+	}
+	fprintf(m, "ramoops driver: bound to");
+	while ((e = readdir(d))) {
+		const char *n = e->d_name;
+
+		if (n[0] == '.' || !strcmp(n, "bind") || !strcmp(n, "unbind") ||
+		    !strcmp(n, "uevent") || !strcmp(n, "module"))
+			continue;
+		fprintf(m, " [%s]", n);
+		bound++;
+	}
+	if (!bound)
+		fprintf(m, " (NOTHING -- the DT node was not populated)");
+	fprintf(m, "\n");
+	closedir(d);
+}
+
+static int harvest_pstore(void)
+{
+	DIR *d;
+	struct dirent *e;
+	int files = 0;
+
+	/*
+	 * pstorefs is not mounted by anything in this initramfs -- without
+	 * this mount /sys/fs/pstore is an empty stub and the dump from the
+	 * previous boot is invisible.
+	 */
+	mkdir("/sys/fs/pstore", 0755);
+	mount("pstore", "/sys/fs/pstore", "pstore", 0, NULL);
+
+	d = opendir("/sys/fs/pstore");
+	if (!d)
+		return 0;
+
+	while ((e = readdir(d))) {
+		char src[160], dst[128];
+		char buf[4096];
+		FILE *in, *o;
+		size_t n;
+		int fd;
+
+		if (e->d_name[0] == '.')
+			continue;
+		snprintf(src, sizeof(src), "/sys/fs/pstore/%s", e->d_name);
+		snprintf(dst, sizeof(dst), "/mnt/DEBUG/pstore-%s.txt",
+			 e->d_name);
+
+		in = fopen(src, "r");
+		if (!in)
+			continue;
+		o = fopen(dst, "w");
+		if (!o) {
+			fclose(in);
+			continue;
+		}
+		fprintf(o, "===== %s (from the previous boot) =====\n", src);
+		while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+			fwrite(buf, 1, n, o);
+		fflush(o);
+		fsync(fileno(o));
+		fclose(o);
+		fclose(in);
+		fd = open(dst, O_RDONLY);
+		if (fd >= 0) {
+			close(fd);
+			files++;
+		}
+	}
+	closedir(d);
+	return files;
+}
+
 /* Print the whole kernel ring buffer in one shot (no /dev/kmsg races). */
 static void dump_kmsg(void)
 {
@@ -1248,7 +1348,7 @@ int main(void)
 {
 	const char *bootdev = NULL;
 	char logpath[128];
-	int i, logged = 0;
+	int i, logged = 0, pstore_files = 0;
 
 	mkdir("/proc", 0555);
 	mkdir("/sys", 0555);
@@ -1289,6 +1389,12 @@ int main(void)
 	mkdir("/mnt/DEBUG", 0755);
 
 	/*
+	 * First thing on every boot: did the previous run leave a crash dump
+	 * behind? Harvested before ran.txt is recreated, and reported in it.
+	 */
+	pstore_files = harvest_pstore();
+
+	/*
 	 * Proof-of-life marker, written and fsync'd before anything else.
 	 *
 	 * This is not cosmetic. fclose() only drops the data in the page cache;
@@ -1304,6 +1410,11 @@ int main(void)
 		if (m) {
 			fprintf(m, "debug-init reached main, boot partition %s\n",
 				bootdev);
+			fprintf(m, "pstore files from the previous boot: %d%s\n",
+				pstore_files,
+				pstore_files ? " (see DEBUG/pstore-*.txt)"
+					     : " (no crash was salvaged)");
+			report_ramoops(m);
 			fflush(m);
 			fsync(fileno(m));
 			fclose(m);
