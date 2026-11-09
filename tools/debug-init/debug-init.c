@@ -59,6 +59,64 @@ static FILE *con;
  */
 static int durable;
 
+/*
+ * Breadcrumbs and fault reporting.
+ *
+ * The single-stage probe on sd21 ended with the card's log stopping at
+ * "D1: route 0x1 -> 0x1 ... -- 8s" and the unit left sitting on the red
+ * framebuffer. Nothing afterwards reached the card, and a crash of PID 1 is
+ * indistinguishable from a hardware hang here: with CONFIG_PANIC_TIMEOUT=0 a
+ * fatal signal in PID 1 panics the kernel and then just stops.
+ *
+ * So two independent witnesses are added:
+ *  - hb() appends one line straight to DEBUG/ran.txt and fsyncs it, so the
+ *    card always names the last step that *started*;
+ *  - fault_handler() catches SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT, records the
+ *    signal and the current stage, then reboots -- a death becomes visible
+ *    (the panel comes back up) instead of freezing on stale pixels.
+ */
+static volatile int stage;
+
+static void hb(const char *what)
+{
+	int fd = open("/mnt/DEBUG/ran.txt", O_WRONLY | O_APPEND);
+
+	if (fd < 0)
+		return;
+	dprintf(fd, "hb: %s\n", what);
+	fsync(fd);
+	close(fd);
+}
+
+static void fault_handler(int sig)
+{
+	char buf[96];
+	int n;
+	int fd = open("/mnt/DEBUG/ran.txt", O_WRONLY | O_APPEND);
+
+	if (fd >= 0) {
+		n = snprintf(buf, sizeof(buf), "FAULT: signal %d at stage %d\n",
+			     sig, stage);
+		if (n > 0 && write(fd, buf, (size_t)n) < 0)
+			;	/* nothing sane to do from a fault handler */
+		fsync(fd);
+		close(fd);
+	}
+	sync();
+	reboot(RB_AUTOBOOT);
+	for (;;)
+		pause();
+}
+
+static void install_fault_handlers(void)
+{
+	signal(SIGSEGV, fault_handler);
+	signal(SIGBUS, fault_handler);
+	signal(SIGILL, fault_handler);
+	signal(SIGFPE, fault_handler);
+	signal(SIGABRT, fault_handler);
+}
+
 static void say(const char *fmt, ...)
 {
 	va_list ap;
@@ -261,11 +319,41 @@ static int wait_for(const char *path, int tries)
  * LOG(FATAL) -> abort -> panic -> reset, and anything still in the page cache
  * at that point is gone.
  */
-static void kmsg_logger(int kfd, int lfd)
+static void tb(int rfd)
+{
+	char line[192], up[64] = "?", comm[64] = "?";
+	int fd, r, n;
+	char *p;
+
+	fd = open("/proc/uptime", O_RDONLY);
+	if (fd >= 0) {
+		r = (int)read(fd, up, sizeof(up) - 1);
+		close(fd);
+		up[r > 0 ? r : 0] = 0;
+	}
+	fd = open("/proc/1/comm", O_RDONLY);
+	if (fd >= 0) {
+		r = (int)read(fd, comm, sizeof(comm) - 1);
+		close(fd);
+		comm[r > 0 ? r : 0] = 0;
+	}
+	for (p = up; *p; p++)
+		if (*p == '\n' || *p == ' ')
+			*p = 0;
+	for (p = comm; *p; p++)
+		if (*p == '\n' || *p == ' ')
+			*p = 0;
+
+	n = snprintf(line, sizeof(line), "tb: up=%s pid1=%s\n", up, comm);
+	if (n > 0 && write(rfd, line, (size_t)n) > 0)
+		fsync(rfd);
+}
+
+static void kmsg_logger(int kfd, int lfd, int rfd)
 {
 	char buf[8192];
 	ssize_t n;
-	int quiet = 0, dirty = 0;
+	int quiet = 0, dirty = 0, ticks = 0;
 
 	for (;;) {
 		n = read(kfd, buf, sizeof(buf));
@@ -285,6 +373,16 @@ static void kmsg_logger(int kfd, int lfd)
 		if (dirty && ++quiet >= 10) {
 			fsync(lfd);
 			quiet = 0;
+		}
+		/*
+		 * Once a second: prove that the kernel still schedules us and
+		 * say who PID 1 is now. If these lines stop, whatever we do
+		 * next took the whole SoC down; if they keep coming with
+		 * pid1=init, the handover happened and Android init is alive.
+		 */
+		if (rfd >= 0 && ++ticks >= 10) {
+			ticks = 0;
+			tb(rfd);
 		}
 	}
 	fsync(lfd);
@@ -755,6 +853,73 @@ out:
 }
 
 /*
+ * The cheap path: paint fb0 and nothing else.
+ *
+ * sd21 settled the two questions this probe existed for. With the v2 panel
+ * firmware the panel actually scans -- the user saw the Linux penguin logo,
+ * then the solid red fill -- and after the probe died the red was still on the
+ * glass, i.e. the framebuffer, the blender and the tcon are all live. What was
+ * still not proven is that PID 1 can get past the probe and hand over to
+ * Android at all, so this stage keeps only the safe half (mmap fb0, msync --
+ * exactly what painted the red the user saw) and touches no register.
+ *
+ * Red = debug-init is running and the framebuffer path is live; black hands
+ * the panel back so that whatever appears next is Android's, not ours.
+ */
+static void paint_test(void)
+{
+	struct fb_fix_screeninfo fix;
+	struct fb_var_screeninfo var;
+	int ffd = open("/dev/fb0", O_RDWR);
+	unsigned char *fb;
+	size_t stride, total;
+	unsigned int x, y;
+
+	if (ffd < 0) {
+		say("paint: open /dev/fb0 failed: %s\n", strerror(errno));
+		return;
+	}
+	if (ioctl(ffd, FBIOGET_FSCREENINFO, &fix) != 0 ||
+	    ioctl(ffd, FBIOGET_VSCREENINFO, &var) != 0) {
+		say("paint: fb ioctl failed: %s\n", strerror(errno));
+		close(ffd);
+		return;
+	}
+	stride = fix.line_length ? fix.line_length : (var.xres_virtual * 4);
+	total = stride * var.yres_virtual;
+	fb = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, ffd, 0);
+	if (fb == MAP_FAILED) {
+		say("paint: mmap failed: %s\n", strerror(errno));
+		close(ffd);
+		return;
+	}
+
+	for (y = 0; y < var.yres_virtual; y++) {
+		unsigned int *row = (unsigned int *)(fb + y * stride);
+
+		for (x = 0; x < var.xres_virtual; x++)
+			row[x] = 0xffff0000u;
+	}
+	msync(fb, total, MS_SYNC);
+	__sync_synchronize();
+	say("paint: solid RED on %ux%u, holding 3s\n", var.xres, var.yres);
+	sleep(3);
+
+	for (y = 0; y < var.yres_virtual; y++) {
+		unsigned int *row = (unsigned int *)(fb + y * stride);
+
+		for (x = 0; x < var.xres_virtual; x++)
+			row[x] = 0xff000000u;
+	}
+	msync(fb, total, MS_SYNC);
+	__sync_synchronize();
+	say("paint: black, releasing the panel to Android\n");
+
+	munmap(fb, total);
+	close(ffd);
+}
+
+/*
  * Read the display pipeline's registers straight out of the hardware.
  *
  * Why this is needed: every driver binds, fb0 is registered with exactly the
@@ -1096,6 +1261,8 @@ int main(void)
 
 	con = fopen("/dev/console", "w");
 
+	install_fault_handlers();
+	stage = 0;
 	say("rg34xxsp debug init starting\n");
 
 	/*
@@ -1147,6 +1314,9 @@ int main(void)
 		sync();
 	}
 
+	stage = 1;
+	hb("stage 1: main reached, boot partition mounted");
+
 	snprintf(logpath, sizeof(logpath), "/mnt/DEBUG/dmesg.txt");
 
 	{
@@ -1192,34 +1362,43 @@ int main(void)
 			 */
 			wdt_start();
 			/*
-			 * Order matters: the register dump is the evidence we
-			 * actually came for, so it runs FIRST. On sd13 the
-			 * paint test ran first, held the screen for 18 s and
-			 * got cut short by a power-off before mmio_dump ever
-			 * printed a line -- 18 seconds of nothing is longer
-			 * than anyone waits.
+			 * Two modes, chosen by a file on the FAT partition so no
+			 * rebuild is needed to switch:
+			 *
+			 *  - REGPROBE present  -> the sd21 register/route probe
+			 *    (mmio dump + blender route experiment). It is the
+			 *    thing that killed the sd21 run: the log stops right
+			 *    after "D1: ... -- 8s" and nothing since has been
+			 *    written, so it is kept behind an opt-in file.
+			 *  - otherwise         -> paint fb0 red for 3 s, black,
+			 *    hand straight over to Android. Safe half only.
+			 *
+			 * sd21 already proved the panel works with the v2 panel
+			 * firmware: the user saw the penguin logo and then the
+			 * red fill, and the red was still on the glass when the
+			 * probe died. What is still unproven is that PID 1 gets
+			 * to execl("/init.android") at all.
 			 */
-			mmio_dump();
-			mmio_channels();
-			/*
-			 * Most likely to abort, so after the two structured
-			 * dumps: sweep the big blocks for words that look like
-			 * CMA addresses. If the layer got told to scan CMA we
-			 * find its LADDR here even when it sits at an offset the
-			 * driver does not document; if the sweep comes back
-			 * empty, no plane was ever programmed.
-			 */
-			mmio_scan("planes", 0x1100000, 0x180000);
-			mmio_scan("mixer0", 0x1280000, 0x20000);
-			/*
-			 * Then let the hardware answer the one question the
-			 * dump could not: which channel id BLEND_ROUTE wants.
-			 * Each candidate gets its own colour on the panel, so a
-			 * single boot names the right value. This replaces the
-			 * old paint test -- it paints too, so it also still
-			 * proves fb0 maps the buffer the layer scans.
-			 */
-			display_probe();
+			if (access("/mnt/REGPROBE", F_OK) == 0) {
+				stage = 2;
+				hb("stage 2: register probe (REGPROBE present)");
+				mmio_dump();
+				mmio_channels();
+				/*
+				 * Most likely to abort, so after the two
+				 * structured dumps: sweep the big blocks for
+				 * words that look like CMA addresses.
+				 */
+				mmio_scan("planes", 0x1100000, 0x180000);
+				mmio_scan("mixer0", 0x1280000, 0x20000);
+				display_probe();
+			} else {
+				stage = 3;
+				hb("stage 3: fb0 paint test");
+				paint_test();
+			}
+			stage = 4;
+			hb("stage 4: probe returned");
 			wdt_stop();
 			fflush(o);
 			fsync(fileno(o));
@@ -1240,21 +1419,25 @@ handover:
 	 * init remounts /dev and later stacks tmpfs on /mnt -- an fd opened
 	 * afterwards would no longer reach the FAT partition.
 	 */
+	hb("stage 5: handover begin");
 	if (logged) {
 		int kfd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
 		int lfd = open(logpath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+		int rfd = open("/mnt/DEBUG/ran.txt", O_WRONLY | O_APPEND);
 
 		if (kfd >= 0 && lfd >= 0) {
 			pid_t pid = fork();
 
 			if (pid == 0) {
-				kmsg_logger(kfd, lfd);
+				kmsg_logger(kfd, lfd, rfd);
 				_exit(0);
 			}
 			say("kmsg logger started (pid %d), log: %s\n", (int)pid,
 			    logpath);
+			hb("stage 6: kmsg logger forked");
 		} else {
 			say("kmsg logger not started (kmsg=%d log=%d)\n", kfd, lfd);
+			hb("stage 6: kmsg logger NOT started");
 		}
 	}
 
@@ -1262,11 +1445,84 @@ handover:
 		fclose(con);
 		con = NULL;
 	}
+	hb("stage 7: console closed");
+
+	/*
+	 * Can this kernel still fork/exec/wait a brand-new static ELF after the
+	 * display has been painted? Nothing about Android's init matters if the
+	 * answer is no, and sd22 could not tell the two apart.
+	 */
+	{
+		pid_t p = fork();
+		char line[160];
+
+		if (p == 0) {
+			execl("/init.test", "/init.test", NULL);
+			_exit(127);
+		}
+		if (p > 0) {
+			int st = 0;
+
+			waitpid(p, &st, 0);
+			if (WIFEXITED(st))
+				snprintf(line, sizeof(line),
+					 "stage 7b: exec test exited %d (42 = it ran)",
+					 WEXITSTATUS(st));
+			else if (WIFSIGNALED(st))
+				snprintf(line, sizeof(line),
+					 "stage 7b: exec test killed by signal %d",
+					 WTERMSIG(st));
+			else
+				snprintf(line, sizeof(line),
+					 "stage 7b: exec test state 0x%x", st);
+			hb(line);
+		} else {
+			hb("stage 7b: fork for exec test failed");
+		}
+	}
+
+	/*
+	 * Pre-flight the binary we are about to turn PID 1 into. sd22 stopped
+	 * with "stage 5" on the card and not one kernel message after the
+	 * paint test, so the run died somewhere between that line and the
+	 * first thing Android init would have logged. Record what the file
+	 * actually is before the exec; if this is the last breadcrumb, the
+	 * exec itself is the killer.
+	 */
+	{
+		struct stat st;
+		unsigned char magic[4] = { 0, 0, 0, 0 };
+		char line[192];
+		int fd = open("/init.android", O_RDONLY);
+
+		if (fd >= 0) {
+			ssize_t r = read(fd, magic, sizeof(magic));
+
+			(void)r;
+			close(fd);
+			if (stat("/init.android", &st) != 0)
+				st.st_size = -1;
+			snprintf(line, sizeof(line),
+				 "stage 8: init.android xok=%d size=%ld magic=%02x%02x%02x%02x",
+				 access("/init.android", X_OK) == 0,
+				 (long)st.st_size, magic[0], magic[1], magic[2],
+				 magic[3]);
+		} else {
+			snprintf(line, sizeof(line),
+				 "stage 8: init.android unreadable: %s",
+				 strerror(errno));
+		}
+		hb(line);
+	}
+
+	stage = 5;
 	say("handing over to /init.android\n");
+	hb("stage 9: about to execl");
 
 	execl("/init.android", "/init", NULL);
 
 	/* Only reached if the Android init is missing -- keep the log, then stop. */
+	hb("stage 10: execl RETURNED");
 	say("exec /init.android failed: %s\n", strerror(errno));
 	out = fopen(logpath, "a");
 	if (out) {
