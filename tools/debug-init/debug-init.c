@@ -536,9 +536,17 @@ static void display_probe(void)
 		say("(fb ioctl failed: %s)\n", strerror(errno));
 		goto out;
 	}
-	say("fb0: %s smem_len=%u line_length=%u bpp=%u %ux%u transp@%u/%u\n",
-	    fix.id, fix.smem_len, fix.line_length, var.bits_per_pixel,
-	    var.xres, var.yres, var.transp.offset, var.transp.length);
+	/*
+	 * smem_start is only filled in when the kernel is booted with
+	 * drm_leak_fbdev_smem=1 (drm_fb_helper.c:363 otherwise sets
+	 * FBINFO_HIDE_SMEM_START and drm_fbdev_dma.c:219 skips the store).
+	 * With the parameter we get the real physical address of fb0 for free,
+	 * which is exactly the number the channel register has to match.
+	 */
+	say("fb0: %s smem_start=0x%lx smem_len=%u line_length=%u bpp=%u %ux%u transp@%u/%u\n",
+	    fix.id, (unsigned long)fix.smem_start, fix.smem_len,
+	    fix.line_length, var.bits_per_pixel, var.xres, var.yres,
+	    var.transp.offset, var.transp.length);
 
 	stride = fix.line_length ? fix.line_length : (var.xres_virtual * 4);
 	total = stride * var.yres_virtual;
@@ -617,53 +625,62 @@ static void display_probe(void)
 	fbaddr = *laddr;
 	{
 		/*
-		 * Compare addresses, not contents: /dev/mem cannot reach CMA,
-		 * but pagemap tells us the physical page behind fb0 and the
-		 * channel register tells us which page the hardware will scan.
-		 * If they differ, every earlier "painted it, saw nothing" result
-		 * was about a buffer nobody displays.
+		 * Where does fb0 actually live, and is the channel pointed
+		 * there?
+		 *
+		 * Two independent sources, because neither is reliable alone:
+		 *  - fix.smem_start is only filled in when the kernel boots with
+		 *    drm_leak_fbdev_smem=1 (drm_fb_helper.c:363 otherwise sets
+		 *    FBINFO_HIDE_SMEM_START and drm_fbdev_dma.c:219 skips the
+		 *    store); we now pass that on the command line.
+		 *  - pagemap returned PFN 0 here, which is why sd18 printed
+		 *    phys=0x0, decided the pages differed and never reached
+		 *    stage 0b. fb0's vma comes from drm_gem_prime_mmap rather
+		 *    than an anonymous page, so its pte is a PFNMAP entry that
+		 *    pagemap reports without a usable frame.
+		 *
+		 * A mismatch means the mixer scans a buffer nobody ever painted,
+		 * which alone would explain "painted every colour, panel stayed
+		 * black" -- and would mean the driver is programming the wrong
+		 * address.
 		 */
-		unsigned long long fbphys = virt_to_phys(fb);
-		unsigned long long fboff = (unsigned long long)fbaddr -
-					   ((unsigned long long)fbaddr & ~0xfffULL);
+		unsigned long long pgphys = virt_to_phys(fb);
+		unsigned long long fbphys = fix.smem_start ?
+					    (unsigned long long)fix.smem_start :
+					    pgphys;
 
-		say("S0: fb0 virt=%p -> phys=0x%llx, ch6 laddr=0x%08x -- %s\n",
-		    fb, fbphys, fbaddr,
+		say("S0: fb0 smem_start=0x%lx pagemap=0x%llx -> using 0x%llx, ch6 laddr=0x%08x -- %s\n",
+		    (unsigned long)fix.smem_start, pgphys, fbphys, fbaddr,
 		    (fbphys && (fbphys & ~0xfffULL) ==
 		     ((unsigned long long)fbaddr & ~0xfffULL)) ?
 		    "SAME PAGE" : "DIFFERENT PAGE");
+
 		if (fbphys) {
 			/*
-			 * Also prove the write lands: paint a magic word and
-			 * read it back through the fb mapping after msync, so a
-			 * mismatch below cannot be blamed on caching.
+			 * Prove the write lands before blaming the hardware:
+			 * paint a magic word and read it back through the same
+			 * mapping, so a later mismatch cannot be caching.
 			 */
 			*(volatile unsigned int *)fb = 0xdeadbeefu;
 			msync(fb, total, MS_SYNC);
 			__sync_synchronize();
-			say("S0: wrote 0xdeadbeef, read back 0x%08x (page offset 0x%llx)\n",
-			    *(volatile unsigned int *)fb, fboff);
+			say("S0: wrote 0xdeadbeef, read back 0x%08x\n",
+			    *(volatile unsigned int *)fb);
 
 			/*
 			 * Stage 0b -- the decisive repair, and a test in one.
-			 *
-			 * If the channel holds a different page than the one fb0
-			 * lives in, the mixer has been scanning a buffer nobody
-			 * ever painted: that alone explains "painted every
-			 * colour, panel stayed black" and it explains why the
-			 * panel showed garbage before we touched BLEND_MODE.
-			 * Point the channel at fb0's real page and paint it red.
-			 * Red here means the rest of the pipeline is fine and the
-			 * only bug left is whatever address the driver wrote.
+			 * Point the channel at fb0's real address, paint red,
+			 * hold. Red here means the rest of the pipeline is fine
+			 * and the only bug left is the address the driver wrote.
 			 */
 			if ((fbphys & ~0xfffULL) !=
 			    ((unsigned long long)fbaddr & ~0xfffULL)) {
 				*laddr = (unsigned int)fbphys;
 				__sync_synchronize();
 				PAINT_SOLID(0xffff0000u);
-				say("S0b: laddr was 0x%08x, set to fb0 phys 0x%llx (readback 0x%08x), painted RED -- 4s\n",
+				say("S0b: laddr 0x%08x -> 0x%llx (readback 0x%08x), painted RED -- 6s\n",
 				    fbaddr, fbphys, *laddr);
-				sleep(4);
+				sleep(6);
 				*laddr = fbaddr;
 				__sync_synchronize();
 				say("S0b: laddr restored to 0x%08x\n", *laddr);
@@ -672,93 +689,38 @@ static void display_probe(void)
 	}
 
 	/*
-	 * Stage 1 -- opaque red. Same format, same route, same everything the
-	 * driver set up; the only difference from every earlier attempt is
-	 * that the pixel alpha byte is 0xff instead of 0x00. If the panel goes
-	 * red here, alpha was the whole problem and no other change is needed.
+	 * One decisive test, and nothing else.
+	 *
+	 * Eight stages of three seconds each is more than anyone waits: sd16 and
+	 * sd18 both ended with the panel unchanged and the log cut off mid-stage,
+	 * so every "we saw nothing" after that is worthless. One colour, one
+	 * register, long enough to look.
+	 *
+	 * The hypothesis is BLEND_ROUTE -- and the evidence says our last change
+	 * to it went the wrong way. On sd14 the driver wrote layer->index (1) and
+	 * the panel showed dense bright lines: garbage, but *output*. On sd15,
+	 * after the driver was changed to write layer->channel (6), the same
+	 * setup gave pure black: no output at all. So the blender reads a layer
+	 * out of BLEND_ROUTE and pipe0 has to name the layer that holds the
+	 * framebuffer, i.e. index 1, not the physical channel 6; the CCU's
+	 * PORT02CHN mux is what maps layer -> channel afterwards.
+	 *
+	 * That also means the stripes on sd14 were real data drawn with the wrong
+	 * pixel format or timing, not an empty scan -- which is a much better
+	 * place to be. This stage re-tests index 1 with an opaque red buffer: if
+	 * the panel shows red, the route is settled and only format/timing is
+	 * left; if it shows stripes again, the buffer we paint is not the buffer
+	 * the channel scans, and stage 0's answer tells us which.
 	 */
 	PAINT_SOLID(0xffff0000u);
-	say("S1: opaque RED 0xffff0000, fmt=XRGB8888, route=0x%08x -- 3s\n",
-	    *route);
-	sleep(3);
-
-	/*
-	 * Stage 2..4 -- opaque red again, but walk the other 32-bit formats.
-	 * DE2 and DE3 share one format table in this driver; if DE33 numbers
-	 * its formats differently, the hardware is reading our red buffer as
-	 * some other layout and the hue (or the blackness) tells us which.
-	 */
-	for (i = 1; i < ARRAY_SIZE(fmts); i++) {
-		*attr = (o_attr & ~0x00000f00u) | (fmts[i].fmt << 8);
-		__sync_synchronize();
-		PAINT_SOLID(0xffff0000u);
-		say("S%d: opaque RED, fmt=%s (attr=0x%08x) -- 3s\n",
-		    i + 1, fmts[i].name, *attr);
-		sleep(3);
-	}
-	*attr = o_attr;
+	*route = 0x1;
 	__sync_synchronize();
-
-	/*
-	 * Stage 5 -- stop drawing from memory entirely and let pipe 0 fill
-	 * with a known colour. This is the orthogonal test: if the panel turns
-	 * green here, everything from the blender to the panel works and only
-	 * the layer path is wrong. Keep FC_EN(0) set (bit 0) and clear the
-	 * per-pipe enables (bits 8..12).
-	 */
-	*pipe_ctl = (o_pipe & ~0x00001f00u) | 0x00000001u;
-	*fcolor = 0x0000ff00u;
+	say("D1: route 0x%08x -> 0x%08x (layer index, opaque RED) -- 8s\n",
+	    o_route, *route);
+	sleep(8);
+	*route = o_route;
 	__sync_synchronize();
-	say("S5: fill colour GREEN, pipe_ctl=0x%08x fcolor=0x%08x (no layers) -- 3s\n",
-	    *pipe_ctl, *fcolor);
-	sleep(3);
-
-	/*
-	 * Stage 6 -- latch. sun8i_mixer_commit() writes GLOBAL_DBUFF only when
-	 * de_type != DE33, i.e. DE33 is assumed not to need the double-buffer
-	 * trigger. Every other DE generation does need it, so write it by hand
-	 * after painting: if the panel turns red only now, the driver has been
-	 * leaving DE33's register bank unlatched all along.
-	 */
-	{
-		volatile unsigned int *dbuff =
-			(volatile unsigned int *)(mix + moff + 0x08);
-
-		PAINT_SOLID(0xffff0000u);
-		o_dbuff = *dbuff;
-		*dbuff = 0x1;
-		__sync_synchronize();
-		say("S6: GLOBAL_DBUFF 0x%08x -> 0x%08x (readback 0x%08x), opaque RED -- 3s\n",
-		    o_dbuff, 0x1u, *dbuff);
-		sleep(3);
-	}
-
-	/*
-	 * Stage 7 -- alpha mode. attr bit1..2 select how the layer is blended;
-	 * the driver picks ALPHA_MODE_PIXEL (0), which for a format without an
-	 * alpha channel is exactly the wrong choice. Try COMBINED with a fully
-	 * opaque constant alpha instead.
-	 */
-	*attr = (o_attr & ~0x00000006u) | 0x00000004u;	/* COMBINED */
-	*attr = (*attr & ~0xff000000u) | 0xff000000u;	/* alpha = 0xff */
-	__sync_synchronize();
-	PAINT_SOLID(0xffff0000u);
-	say("S7: alpha=0xff ALPHA_MODE_COMBINED (attr=0x%08x), opaque RED -- 3s\n",
-	    *attr);
-	sleep(3);
-	*attr = o_attr;
-	__sync_synchronize();
-
-	/*
-	 * Stage 8 -- control. Back to the driver's exact configuration and a
-	 * transparent pixel, i.e. what fbcon has been producing all along.
-	 */
-	*pipe_ctl = o_pipe;
-	*fcolor = o_fcolor;
-	__sync_synchronize();
-	say("S8: control, transparent RED 0x00ff0000, fmt=XRGB8888 -- 3s\n");
-	PAINT_SOLID(0x00ff0000u);
-	sleep(3);
+	say("D1: route restored to 0x%08x\n", *route);
 
 #undef PAINT_SOLID
 
