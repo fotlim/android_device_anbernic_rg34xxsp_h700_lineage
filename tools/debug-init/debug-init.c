@@ -19,8 +19,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
@@ -29,6 +31,7 @@
 #include <unistd.h>
 #include <linux/fb.h>
 #include <linux/fs.h>
+#include <linux/watchdog.h>
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
@@ -338,6 +341,76 @@ static int mount_boot_partition(const char **used)
  * names the correct value in one boot. ROUTE is per-pipe: pipe n occupies bits
  * 4n..4n+3, and we only ever have zpos 0, so the raw value goes in unshifted.
  */
+
+/*
+ * Keep the SoC watchdog fed while we probe.
+ *
+ * sunxi-wdt programs a 16 second timeout at probe time. Nothing in this
+ * initramfs opens /dev/watchdog, so the very first time we spend longer
+ * than that poking at the display the SoC hard-resets us mid-sentence --
+ * which is exactly what truncated sd13 (18 s of paint test) and sd14
+ * (13 s of sleeps plus the register sweep). The log ends without a panic
+ * and without a closing line, and the card looks like the probe was
+ * never written.
+ *
+ * Opening the device starts the timer; a child pings it every 3 s. Before
+ * handing PID 1 to Android the child is killed and the magic character is
+ * written, which disarms the watchdog again so a real Android hang still
+ * reboots the device.
+ */
+static int wdt_fd = -1;
+static pid_t wdt_pid = -1;
+
+static void wdt_start(void)
+{
+	int fd = open("/dev/watchdog", O_WRONLY);
+	int tmo = 16;
+
+	if (fd < 0) {
+		say("watchdog: open failed (%s), probes may be cut at 16 s\n",
+		    strerror(errno));
+		return;
+	}
+	ioctl(fd, WDIOC_SETTIMEOUT, &tmo);
+	wdt_fd = fd;
+
+	wdt_pid = fork();
+	if (wdt_pid == 0) {
+		/* child: ping forever until killed */
+		for (;;) {
+			ioctl(fd, WDIOC_KEEPALIVE, 0);
+			if (write(fd, "\0", 1) < 0)
+				break;
+			sleep(3);
+		}
+		_exit(0);
+	}
+	if (wdt_pid < 0) {
+		say("watchdog: fork failed (%s)\n", strerror(errno));
+		wdt_pid = -1;
+	} else {
+		say("watchdog: fed by child pid %d\n", (int)wdt_pid);
+	}
+}
+
+static void wdt_stop(void)
+{
+	if (wdt_pid > 0) {
+		kill(wdt_pid, SIGKILL);
+		waitpid(wdt_pid, NULL, 0);
+		wdt_pid = -1;
+	}
+	if (wdt_fd >= 0) {
+		/* magic close disarms the timer */
+		if (write(wdt_fd, "V", 1) < 0)
+			say("watchdog: magic close failed (%s)\n",
+			    strerror(errno));
+		close(wdt_fd);
+		wdt_fd = -1;
+		say("watchdog: disarmed before handover\n");
+	}
+}
+
 static void route_probe(void)
 {
 	static const struct {
@@ -346,12 +419,12 @@ static void route_probe(void)
 		const char *colour;
 		unsigned int rgb;
 	} tries[] = {
-		{ 0x00000001, "layer->index (what the driver writes now)", "red", 0xff0000 },
-		{ 0x00000006, "physical channel 6", "green", 0x00ff00 },
+		{ 0x00000006, "channel 6 (what the driver writes now)", "red", 0xff0000 },
+		{ 0x00000001, "old layer->index value", "green", 0x00ff00 },
 		{ 0x00000008, "channel 6 + 2 (PORT02CHN numbering)", "blue", 0x0000ff },
-		{ 0x00000002, "layer index 2", "white", 0xffffff },
-		{ 0x00000009, "channel 7 + 2", "magenta", 0xff00ff },
-		{ 0x00000000, "channel 0 (VI)", "yellow", 0xffff00 },
+		{ 0x00000007, "channel 7 (second UI layer)", "white", 0xffffff },
+		{ 0x00000002, "layer index 2", "magenta", 0xff00ff },
+		{ 0x00000000, "channel 0 (VI layer)", "yellow", 0xffff00 },
 	};
 	struct fb_fix_screeninfo fix;
 	struct fb_var_screeninfo var;
@@ -425,12 +498,18 @@ static void route_probe(void)
 		unsigned int orig_pipe = *pipe;
 		unsigned int orig_bk = *bk;
 
-		*bk = 0xff00ff00;	/* solid green (ARGB, alpha in 31:24) */
+		/*
+		 * Solid green. The alpha byte is dropped by the hardware:
+		 * we wrote 0xff00ff00 on sd14 and read back 0x0000ff00,
+		 * and restoring 0xff000000 read back 0x00000000. So the
+		 * value below is what actually lands in the register.
+		 */
+		*bk = 0xff00ff00;
 		*pipe = orig_pipe & ~0x00001f00u;
 		__sync_synchronize();
 		say("BKCOLOR probe: bk=0x%08x pipe=0x%08x -- panel should be GREEN\n",
 		    *bk, *pipe);
-		sleep(4);
+		sleep(3);
 		*bk = orig_bk;
 		*pipe = orig_pipe;
 		__sync_synchronize();
@@ -450,10 +529,10 @@ static void route_probe(void)
 		msync(fb, total, MS_SYNC);
 		*route = tries[i].route;
 		__sync_synchronize();
-		say("ROUTE=0x%08x (%s) -> painted %s, holding 3s, readback 0x%08x\n",
+		say("ROUTE=0x%08x (%s) -> painted %s, holding 2s, readback 0x%08x\n",
 		    tries[i].route, tries[i].label, tries[i].colour,
 		    *route);
-		sleep(3);
+		sleep(2);
 	}
 
 	/*
@@ -909,6 +988,13 @@ int main(void)
 			 */
 			durable = 1;
 			/*
+			 * Everything below pokes at hardware and then waits
+			 * for a human to look at the panel, which is far
+			 * longer than the 16 s watchdog. Feed it or lose the
+			 * tail of the log.
+			 */
+			wdt_start();
+			/*
 			 * Order matters: the register dump is the evidence we
 			 * actually came for, so it runs FIRST. On sd13 the
 			 * paint test ran first, held the screen for 18 s and
@@ -937,6 +1023,7 @@ int main(void)
 			 * proves fb0 maps the buffer the layer scans.
 			 */
 			route_probe();
+			wdt_stop();
 			fflush(o);
 			fsync(fileno(o));
 			fclose(o);
