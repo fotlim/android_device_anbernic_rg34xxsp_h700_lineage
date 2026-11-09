@@ -40,7 +40,10 @@ initramfs WSL /root/initramfs-embed     （init = debug-init，init.android = �
 旧镜像    F:\dsh-dl\old-images\
 ```
 
-**git 状态**：仓库 HEAD `58c79f7`，工作区干净。内核树 HEAD `a58a1f9c4`，**工作区有一处未提交改动**（见 §6 的 route 回滚）。
+**git 状态**：
+
+- 仓库 HEAD **`3483a5d`**（`docs: handover notes for the display work`），工作区干净。
+- 内核树在分支 **`rg34xxsp-display`**，HEAD **`0ab7af527`**（route 回滚，见 §5 候选 A）。原来是 detached HEAD，已顺手建了分支。`master` 指向 `f66469d99`（上游 7.4-rc2），**不要切过去**。
 
 ---
 
@@ -143,7 +146,7 @@ sd14 与 sd15 恰好构成对照：
 
 **亮线 = 扫描链路在工作、数据用错格式/时序画了出来；纯黑 = 什么都没合成。** 所以结论是：`BLEND_ROUTE` 要的是**层号（index）**，`PORT02CHN` 那个 CCU mux 才是「层 → 物理通道」的映射。`layer->channel` 那个改动是**错误方向**。
 
-> 这一条是本鱼自己改错又改回来的，`sun8i_mixer.c:315` 现在是 `route |= layer->index << ...`，**工作区未提交**（HEAD 里仍是 `0df434bc9` 的 channel 版）。接手后第一件事建议把这次回滚提交掉。
+> 这一条是本鱼自己改错又改回来的。`sun8i_mixer.c:315` 现在是 `route |= layer->index << ...`，已提交为内核树 `0ab7af527`（在分支 `rg34xxsp-display` 上），**sd21 用的 Image 就是这一版**。
 
 ### 候选 B：面板是 v2 变体，v1 固件点不亮它
 
@@ -305,4 +308,4 @@ cp /root/rg34xxsp-sdNN.img /mnt/f/dsh-dl/
 2. 让用户刷 `sd21`（sha256 `490975A9...81C84`），按 §6 的三种结果分流。
 3. 若出红 → 转查格式/位宽（`FBFMT`、面板总线位宽、`TCON0_HV_IF`）。
 4. 若还全黑 → 测 `GLOBAL_DBUFF` 手写 latch（§7 第一条）。
-5. 顺手把内核树的 route 回滚提交掉（§5 候选 A 末尾）。
+5. 内核树已经在 `rg34xxsp-display` 分支上，route 回滚也已提交（`0ab7af527`），不用再动 git。
