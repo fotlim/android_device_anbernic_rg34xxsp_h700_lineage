@@ -28,6 +28,7 @@
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <linux/fb.h>
@@ -78,13 +79,53 @@ static int durable;
  */
 static volatile int stage;
 
+/*
+ * One trace file per boot, named after the kernel's boot_id.
+ *
+ * The machine now reboots itself ten seconds after it panics, so a single
+ * DEBUG/ran.txt would be truncated by the next boot and the previous run's
+ * breadcrumbs -- the only witness there is -- would be gone. boot_id changes
+ * per boot and survives on the card, so every boot keeps its own file.
+ */
+static char trace_path[64];
+static char bootlog_path[64];
+static char kmsg_path[64];
+
+static void trace_path_init(void)
+{
+	char id[64] = "";
+	char *dash;
+	ssize_t n;
+	int fd = open("/proc/sys/kernel/random/boot_id", O_RDONLY);
+
+	if (fd >= 0) {
+		n = read(fd, id, sizeof(id) - 1);
+		close(fd);
+		if (n > 0) {
+			id[n] = 0;
+			dash = strchr(id, '-');
+			if (dash)
+				*dash = 0;
+		}
+	}
+	if (!id[0])
+		snprintf(id, sizeof(id), "unknown");
+	snprintf(trace_path, sizeof(trace_path), "/mnt/DEBUG/ran-%s.txt", id);
+	snprintf(bootlog_path, sizeof(bootlog_path), "/mnt/DEBUG/dmesg-%s.txt",
+		 id);
+	snprintf(kmsg_path, sizeof(kmsg_path), "/mnt/DEBUG/kmsg-%s.txt", id);
+}
+
 static void hb(const char *what)
 {
 	char up[40] = "?";
 	char *sp;
 	FILE *f;
-	int fd = open("/mnt/DEBUG/ran.txt", O_WRONLY | O_APPEND);
+	int fd;
 
+	if (!trace_path[0])
+		trace_path_init();
+	fd = open(trace_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
 	if (fd < 0)
 		return;
 	f = fopen("/proc/uptime", "r");
@@ -104,8 +145,11 @@ static void hb(const char *what)
 static void fault_handler(int sig)
 {
 	char buf[96];
-	int n;
-	int fd = open("/mnt/DEBUG/ran.txt", O_WRONLY | O_APPEND);
+	int n, fd;
+
+	if (!trace_path[0])
+		trace_path_init();
+	fd = open(trace_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
 
 	if (fd >= 0) {
 		n = snprintf(buf, sizeof(buf), "FAULT: signal %d at stage %d\n",
@@ -466,27 +510,40 @@ static void kmsg_logger(int kfd, int lfd, int rfd)
 {
 	char buf[8192];
 	ssize_t n;
-	int quiet = 0, dirty = 0, ticks = 0;
+	struct timespec now, last;
+	int dirty = 0, ticks = 0;
 
+	clock_gettime(CLOCK_MONOTONIC, &last);
 	for (;;) {
 		n = read(kfd, buf, sizeof(buf));
 		if (n > 0) {
 			if (write(lfd, buf, (size_t)n) > 0)
 				dirty++;
-			quiet = 0;
-			if (dirty >= 32) {
+			/*
+			 * A panic is at most a second away from the reboot and
+			 * FAT keeps the file size until fsync, so a count-based
+			 * flush (32 messages) can lose exactly the message that
+			 * matters. Flush at most every 200 ms instead: fast
+			 * enough for a panic, cheap enough for the drm storm at
+			 * boot.
+			 */
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			if ((now.tv_sec - last.tv_sec) * 1000 +
+			    (now.tv_nsec - last.tv_nsec) / 1000000 >= 200) {
 				fsync(lfd);
 				dirty = 0;
+				last = now;
 			}
 			continue;
 		}
 		if (n < 0 && errno != EAGAIN && errno != EINTR)
 			break;
-		usleep(100000);
-		if (dirty && ++quiet >= 10) {
+		if (dirty) {
 			fsync(lfd);
-			quiet = 0;
+			dirty = 0;
+			clock_gettime(CLOCK_MONOTONIC, &last);
 		}
+		usleep(100000);
 		/*
 		 * Once a second: prove that the kernel still schedules us and
 		 * say who PID 1 is now. If these lines stop, whatever we do
@@ -1015,8 +1072,8 @@ static void paint_test(void)
 	}
 	msync(fb, total, MS_SYNC);
 	__sync_synchronize();
-	say("paint: solid RED on %ux%u, holding 3s\n", var.xres, var.yres);
-	sleep(3);
+	say("paint: solid RED on %ux%u, holding 1s\n", var.xres, var.yres);
+	sleep(1);
 
 	for (y = 0; y < var.yres_virtual; y++) {
 		unsigned int *row = (unsigned int *)(fb + y * stride);
@@ -1357,38 +1414,32 @@ static void snapshot(FILE *o)
 	say("\n===== SNAPSHOT COMPLETE =====\n");
 }
 
-static void read_first_line(const char *path, char *buf, size_t len,
-			    int keep_newline);
-
 /*
- * Is the watchdog really disarmed, and who reset the machine last time?
+ * What does the driver itself think, and did anything reset us?
  *
- * /sys/class/watchdog/watchdog0/bootstatus carries WDIOF_CARDRESET when the
- * previous reset came from the watchdog itself. Runs have been dying between
- * 8 and 12 s with the timer supposedly stopped, so read the driver's own
- * opinion instead of trusting the ioctl return value.
+ * CONFIG_WATCHDOG_SYSFS is off in this kernel, so /sys/class/watchdog does
+ * not exist (sd26 reported exactly that). The ioctls are the only way in:
+ * GETTIMEOUT proves the handle is the 16 s timer, GETTIMELEFT shows whether
+ * it is still counting down after WDIOS_DISABLECARD, and GETBOOTSTATUS says
+ * whether the previous reset came from the watchdog -- the difference between
+ * a kernel panic that panic=10 rebooted and a hardware reset we never saw.
  */
-static void report_wdt_state(const char *tag)
+static void report_wdt_ioctl(const char *tag)
 {
-	const char *dir = "/sys/class/watchdog/watchdog0";
-	char path[128], state[40], tmo[40], left[40], boot[40], line[320];
+	char line[224];
+	int tmo = -1, left = -1, bs = -1;
+	int r1, r2, r3;
 
-	snprintf(path, sizeof(path), "%s/state", dir);
-	read_first_line(path, state, sizeof(state), 0);
-	if (!state[0]) {
-		hb("wdt: /sys/class/watchdog/watchdog0 does not exist");
+	if (wdt_fd < 0) {
+		hb("wdt: no open descriptor to ask");
 		return;
 	}
-	snprintf(path, sizeof(path), "%s/timeout", dir);
-	read_first_line(path, tmo, sizeof(tmo), 0);
-	snprintf(path, sizeof(path), "%s/timeleft", dir);
-	read_first_line(path, left, sizeof(left), 0);
-	snprintf(path, sizeof(path), "%s/bootstatus", dir);
-	read_first_line(path, boot, sizeof(boot), 0);
+	r1 = ioctl(wdt_fd, WDIOC_GETTIMEOUT, &tmo);
+	r2 = ioctl(wdt_fd, WDIOC_GETTIMELEFT, &left);
+	r3 = ioctl(wdt_fd, WDIOC_GETBOOTSTATUS, &bs);
 	snprintf(line, sizeof(line),
-		 "wdt[%s]: state=%s timeout=%s timeleft=%s bootstatus=%s",
-		 tag, state, tmo[0] ? tmo : "-", left[0] ? left : "-",
-		 boot[0] ? boot : "-");
+		 "wdt[%s]: timeout=%d(rc %d) timeleft=%d(rc %d) bootstatus=0x%x(rc %d)",
+		 tag, tmo, r1, left, r2, bs, r3);
 	hb(line);
 }
 
@@ -1578,15 +1629,21 @@ static int logger_started;
 static void start_kmsg_logger(void)
 {
 	int kfd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
-	int lfd = open("/mnt/DEBUG/kmsg-tail.txt",
-		       O_WRONLY | O_CREAT | O_APPEND, 0644);
-	int rfd = open("/mnt/DEBUG/ran.txt", O_WRONLY | O_APPEND);
+	int lfd = open(kmsg_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	int rfd = open(trace_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
 	pid_t pid;
 
 	if (kfd < 0 || lfd < 0) {
 		hb("logger: cannot start (/dev/kmsg or the log file)");
 		return;
 	}
+	/*
+	 * Start at the *new* messages only. Reading the ring buffer from the
+	 * beginning means replaying a few hundred kilobytes of boot log into
+	 * FAT, which on sd26 ate the whole second the machine had left and
+	 * buried the panic. DEBUG/dmesg.txt already holds the boot log.
+	 */
+	lseek(kfd, 0, SEEK_END);
 	pid = fork();
 	if (pid == 0) {
 		kmsg_logger(kfd, lfd, rfd);
@@ -1640,6 +1697,7 @@ int main(void)
 	say("boot partition: %s (mounted on /mnt)\n", bootdev);
 
 	mkdir("/mnt/DEBUG", 0755);
+	trace_path_init();
 
 	/*
 	 * First thing on every boot: did the previous run leave a crash dump
@@ -1658,11 +1716,12 @@ int main(void)
 	 * "init ran but could not do something".
 	 */
 	{
-		FILE *m = fopen("/mnt/DEBUG/ran.txt", "w");
+		FILE *m = fopen(trace_path, "w");
 
 		if (m) {
 			fprintf(m, "debug-init reached main, boot partition %s\n",
 				bootdev);
+			fprintf(m, "trace file %s\n", trace_path);
 			fprintf(m, "pstore files from the previous boot: %d%s\n",
 				pstore_files,
 				pstore_files ? " (see DEBUG/pstore-*.txt)"
@@ -1672,7 +1731,7 @@ int main(void)
 			fsync(fileno(m));
 			fclose(m);
 		} else {
-			say("cannot create /mnt/DEBUG/ran.txt: %s\n",
+			say("cannot create %s: %s\n", trace_path,
 			    strerror(errno));
 		}
 		sync();
@@ -1681,7 +1740,7 @@ int main(void)
 	stage = 1;
 	hb("stage 1: main reached, boot partition mounted");
 
-	snprintf(logpath, sizeof(logpath), "/mnt/DEBUG/dmesg.txt");
+	snprintf(logpath, sizeof(logpath), "%s", bootlog_path);
 
 	{
 		FILE *o = fopen(logpath, "w");
@@ -1724,7 +1783,7 @@ int main(void)
 			 * still leaves the kernel's last words on the card.
 			 */
 			start_kmsg_logger();
-			report_wdt_state("before-disarm");
+			report_wdt_ioctl("before-arm");
 			/*
 			 * Everything below pokes at hardware and then waits
 			 * for a human to look at the panel, which is far
@@ -1732,7 +1791,7 @@ int main(void)
 			 * tail of the log.
 			 */
 			wdt_start();
-			report_wdt_state("after-disarm");
+			report_wdt_ioctl("after-disarm");
 			/*
 			 * Two modes, chosen by a file on the FAT partition so no
 			 * rebuild is needed to switch:
@@ -1771,8 +1830,8 @@ int main(void)
 			}
 			stage = 4;
 			hb("stage 4: probe returned");
+			report_wdt_ioctl("before-rearm");
 			wdt_stop();
-			report_wdt_state("after-rearm");
 			fflush(o);
 			fsync(fileno(o));
 			fclose(o);
