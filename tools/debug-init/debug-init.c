@@ -80,11 +80,23 @@ static volatile int stage;
 
 static void hb(const char *what)
 {
+	char up[40] = "?";
+	char *sp;
+	FILE *f;
 	int fd = open("/mnt/DEBUG/ran.txt", O_WRONLY | O_APPEND);
 
 	if (fd < 0)
 		return;
-	dprintf(fd, "hb: %s\n", what);
+	f = fopen("/proc/uptime", "r");
+	if (f) {
+		if (fgets(up, sizeof(up), f)) {
+			sp = strchr(up, ' ');
+			if (sp)
+				*sp = 0;
+		}
+		fclose(f);
+	}
+	dprintf(fd, "hb: [%s] %s\n", up, what);
 	fsync(fd);
 	close(fd);
 }
@@ -1345,6 +1357,41 @@ static void snapshot(FILE *o)
 	say("\n===== SNAPSHOT COMPLETE =====\n");
 }
 
+static void read_first_line(const char *path, char *buf, size_t len,
+			    int keep_newline);
+
+/*
+ * Is the watchdog really disarmed, and who reset the machine last time?
+ *
+ * /sys/class/watchdog/watchdog0/bootstatus carries WDIOF_CARDRESET when the
+ * previous reset came from the watchdog itself. Runs have been dying between
+ * 8 and 12 s with the timer supposedly stopped, so read the driver's own
+ * opinion instead of trusting the ioctl return value.
+ */
+static void report_wdt_state(const char *tag)
+{
+	const char *dir = "/sys/class/watchdog/watchdog0";
+	char path[128], state[40], tmo[40], left[40], boot[40], line[320];
+
+	snprintf(path, sizeof(path), "%s/state", dir);
+	read_first_line(path, state, sizeof(state), 0);
+	if (!state[0]) {
+		hb("wdt: /sys/class/watchdog/watchdog0 does not exist");
+		return;
+	}
+	snprintf(path, sizeof(path), "%s/timeout", dir);
+	read_first_line(path, tmo, sizeof(tmo), 0);
+	snprintf(path, sizeof(path), "%s/timeleft", dir);
+	read_first_line(path, left, sizeof(left), 0);
+	snprintf(path, sizeof(path), "%s/bootstatus", dir);
+	read_first_line(path, boot, sizeof(boot), 0);
+	snprintf(line, sizeof(line),
+		 "wdt[%s]: state=%s timeout=%s timeleft=%s bootstatus=%s",
+		 tag, state, tmo[0] ? tmo : "-", left[0] ? left : "-",
+		 boot[0] ? boot : "-");
+	hb(line);
+}
+
 /* ---- watching /init.android die as an ordinary child ---------------- */
 
 /*
@@ -1459,6 +1506,12 @@ static void child_probe(void)
 	if (pid == 0) {
 		int fd;
 
+		/*
+		 * The child writes its own breadcrumbs: the parent cannot tell a
+		 * child that never started from a child that died silently, and
+		 * child-out.txt came back empty on sd25.
+		 */
+		hb("stage 4c: child alive, about to unshare");
 		if (unshare(CLONE_NEWNS) != 0)
 			_exit(125);
 		mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
@@ -1470,6 +1523,7 @@ static void child_probe(void)
 			if (fd > 2)
 				close(fd);
 		}
+		hb("stage 4d: child about to execl /init.android");
 		execl("/init.android", "/init", NULL);
 		_exit(127);
 	}
@@ -1477,6 +1531,7 @@ static void child_probe(void)
 		hb("stage 4b: fork for the child probe failed");
 		return;
 	}
+	hb("stage 4b: child forked, tracing it");
 
 	for (i = 0; i < 80; i++) {
 		int st = 0;
@@ -1507,6 +1562,39 @@ static void child_probe(void)
 		kill(pid, SIGKILL);
 		waitpid(pid, NULL, 0);
 	}
+}
+
+static int logger_started;
+
+/*
+ * Start the /dev/kmsg follower now rather than at handover time.
+ *
+ * The runs die somewhere between the paint test and the exec, and the
+ * snapshot on the card only covers the kernel up to the moment it was taken.
+ * With the follower running from here on, DEBUG/kmsg-tail.txt holds whatever
+ * the kernel said right up to the freeze -- including any panic, which is the
+ * one thing that would settle this.
+ */
+static void start_kmsg_logger(void)
+{
+	int kfd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
+	int lfd = open("/mnt/DEBUG/kmsg-tail.txt",
+		       O_WRONLY | O_CREAT | O_APPEND, 0644);
+	int rfd = open("/mnt/DEBUG/ran.txt", O_WRONLY | O_APPEND);
+	pid_t pid;
+
+	if (kfd < 0 || lfd < 0) {
+		hb("logger: cannot start (/dev/kmsg or the log file)");
+		return;
+	}
+	pid = fork();
+	if (pid == 0) {
+		kmsg_logger(kfd, lfd, rfd);
+		_exit(0);
+	}
+	logger_started = (pid > 0);
+	hb(logger_started ? "logger: kmsg follower running from the paint test on"
+			   : "logger: fork failed");
 }
 
 int main(void)
@@ -1631,12 +1719,20 @@ int main(void)
 			 */
 			durable = 1;
 			/*
+			 * Keep a kernel-message follower alive from here on, so
+			 * a freeze during the paint test or the child probe
+			 * still leaves the kernel's last words on the card.
+			 */
+			start_kmsg_logger();
+			report_wdt_state("before-disarm");
+			/*
 			 * Everything below pokes at hardware and then waits
 			 * for a human to look at the panel, which is far
 			 * longer than the 16 s watchdog. Feed it or lose the
 			 * tail of the log.
 			 */
 			wdt_start();
+			report_wdt_state("after-disarm");
 			/*
 			 * Two modes, chosen by a file on the FAT partition so no
 			 * rebuild is needed to switch:
@@ -1676,6 +1772,7 @@ int main(void)
 			stage = 4;
 			hb("stage 4: probe returned");
 			wdt_stop();
+			report_wdt_state("after-rearm");
 			fflush(o);
 			fsync(fileno(o));
 			fclose(o);
@@ -1702,26 +1799,10 @@ handover:
 	 * afterwards would no longer reach the FAT partition.
 	 */
 	hb("stage 5: handover begin");
-	if (logged) {
-		int kfd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
-		int lfd = open(logpath, O_WRONLY | O_CREAT | O_APPEND, 0644);
-		int rfd = open("/mnt/DEBUG/ran.txt", O_WRONLY | O_APPEND);
-
-		if (kfd >= 0 && lfd >= 0) {
-			pid_t pid = fork();
-
-			if (pid == 0) {
-				kmsg_logger(kfd, lfd, rfd);
-				_exit(0);
-			}
-			say("kmsg logger started (pid %d), log: %s\n", (int)pid,
-			    logpath);
-			hb("stage 6: kmsg logger forked");
-		} else {
-			say("kmsg logger not started (kmsg=%d log=%d)\n", kfd, lfd);
-			hb("stage 6: kmsg logger NOT started");
-		}
-	}
+	if (logger_started)
+		hb("stage 6: kmsg logger already running (started before the paint)");
+	else
+		start_kmsg_logger();
 
 	if (con) {
 		fclose(con);
