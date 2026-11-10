@@ -481,30 +481,42 @@ static int harvest_data(void)
 		if (!dd)
 			continue;
 		while ((e = readdir(dd)) && per_dir < 4 && copied < 12) {
+			char dst2[64];
+			FILE *m;
+
 			if (e->d_name[0] == '.')
 				continue;
 			snprintf(src, sizeof(src), "%s/%s", d, e->d_name);
-			snprintf(dst, sizeof(dst),
-				 "/mnt/DEBUG/prev-%s-%s", dirs[k], e->d_name);
-			{
-				/* '/' is not a legal FAT file name character. */
-				char *s = dst;
-
-				while (*s) {
-					if (*s == '/')
-						*s = '_';
-					s++;
-				}
-			}
-			if (!copy_capped(src, dst, 384 * 1024))
+			/*
+			 * Short names on purpose: sd43 reported five files
+			 * collected and the card had none of them, so the long
+			 * "prev-<dir>-<name>" spelling is not trusted on this
+			 * FAT. p01.txt..p12.txt always fit, and pmap.txt says
+			 * what each one was.
+			 */
+			snprintf(dst2, sizeof(dst2), "/mnt/DEBUG/p%02d.txt",
+				 copied + 1);
+			if (!copy_capped(src, dst2, 384 * 1024))
 				continue;
-			hb(strcat(strcpy(src, "data: saved "), dst));
+			if (access(dst2, F_OK) != 0)
+				continue;
+			m = fopen("/mnt/DEBUG/pmap.txt", "a");
+			if (m) {
+				fprintf(m, "p%02d.txt = %s\n", copied + 1, src);
+				fflush(m);
+				fsync(fileno(m));
+				fclose(m);
+			}
+			snprintf(dst, sizeof(dst), "data: saved %s <- %s", dst2,
+				 e->d_name);
+			hb(dst);
 			per_dir++;
 			copied++;
 		}
 		closedir(dd);
 	}
 	umount("/olddata");
+	sync();	/* the card is what we are standing on: flush the names too */
 	if (!copied)
 		hb("data: the previous boot left nothing in /data/tombstones etc.");
 	return copied;

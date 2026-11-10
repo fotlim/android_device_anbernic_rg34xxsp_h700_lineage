@@ -1,5 +1,5 @@
 diff --git a/init/first_stage_init.cpp b/init/first_stage_init.cpp
-index 0215576..17b5dc5 100644
+index 0215576..0195882 100644
 --- a/init/first_stage_init.cpp
 +++ b/init/first_stage_init.cpp
 @@ -19,6 +19,7 @@
@@ -10,7 +10,7 @@ index 0215576..17b5dc5 100644
  #include <stdlib.h>
  #include <sys/mount.h>
  #include <sys/stat.h>
-@@ -98,6 +99,269 @@ bool ForceNormalBoot(const std::string& cmdline) {
+@@ -98,6 +99,278 @@ bool ForceNormalBoot(const std::string& cmdline) {
      return cmdline.find("androidboot.force_normal_boot=1") != std::string::npos;
  }
  
@@ -121,6 +121,10 @@ index 0215576..17b5dc5 100644
 +    pubnote("rc: wrote %zd/%zu bytes to %s", written, len, path);
 +}
 +
++// The complete log goes to /data/local/tmp/dsh-android.log, but
++// /data is on the card the machine boots from, so the crash buffer
++// and the graphics tags are duplicated into /dev/kmsg, where
++// debug-init carries them to the same card's DEBUG directory.
 +// zygote starts and then vanishes without a word in the kernel log: services
 +// log to logd, and logd keeps its buffers in RAM. /dev/kmsg was the first
 +// choice, but printk is slow enough that logd dropped hundreds of records
@@ -135,7 +139,12 @@ index 0215576..17b5dc5 100644
 +    "# logd's buffers die with the machine. Rewriting them into /dev/kmsg puts\n"
 +    "# them where debug-init can copy them to the card before the panic lands.\n"
 +    "on post-fs-data\n"
-+    "    exec_background - root root -- /system/bin/logcat -b main -b system -b crash -v threadtime -r 4096 -n 2 -f /data/local/tmp/dsh-android.log\n";
++    "    exec_background - root root -- /system/bin/logcat -b main -b system -b crash -v threadtime -r 4096 -n 2 -f /data/local/tmp/dsh-android.log\n"
++"on post-fs-data\n"
++    "    exec_background - root root -- /system/bin/logcat -b crash -v threadtime -f /dev/kmsg\n"
++"on post-fs-data\n"
++    "    exec_background - root root -- /system/bin/logcat -b main -b system -v threadtime"
++    " -s SurfaceFlinger -s hwcomposer -s libc -s DEBUG -f /dev/kmsg\n";
 +
 +void PublishLogRc() {
 +    const char* path = "/vendor/etc/init/98-framework-logs.rc";
@@ -280,7 +289,7 @@ index 0215576..17b5dc5 100644
  }  // namespace
  
  std::string GetModuleLoadList(bool recovery, const std::string& dir_path) {
-@@ -303,6 +567,11 @@ int FirstStageMain(int argc, char** argv) {
+@@ -303,6 +576,11 @@ int FirstStageMain(int argc, char** argv) {
          LOG(FATAL) << "Failed to mount required partitions early ...";
      }
  
