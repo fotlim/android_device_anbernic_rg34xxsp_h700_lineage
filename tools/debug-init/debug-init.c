@@ -386,6 +386,14 @@ static int harvest_metadata(void)
 		hb(strcat(strcpy(buf, "meta: saved "), dst));
 		copied++;
 	}
+	/*
+	 * fsync() flushes the file, not the directory entry that names it. Last
+	 * round the card came out of the machine with the seven p??.txt files
+	 * present and both meta-*.txt files gone, written by the same loop: the
+	 * difference was the sync() at the end of harvest_data(). Do the same
+	 * here before the power goes away.
+	 */
+	sync();
 	umount("/meta");
 	if (!copied)
 		hb("meta: nothing left behind (the first stage wrote no receipt)");
