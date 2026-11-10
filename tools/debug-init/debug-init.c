@@ -159,6 +159,44 @@ static void fault_handler(int sig)
 		fsync(fd);
 		close(fd);
 	}
+	/*
+	 * Reboot, but not forever.
+	 *
+	 * sd30 faulted in the same place on every boot and this handler
+	 * dutifully reset the machine each time: ten boots in two minutes,
+	 * thirty fresh trace files, and the interesting one scrolled off the
+	 * card. Three reboots is enough to show that a fault is systematic;
+	 * after that stop dead so the panel keeps whatever init printed and
+	 * the card keeps exactly one copy of the evidence.
+	 *
+	 * A boot that reaches the handover deletes the counter, so this only
+	 * ever counts consecutive faults.
+	 */
+	fd = open("/mnt/FAULTCOUNT", O_RDWR | O_CREAT, 0644);
+	if (fd >= 0) {
+		char c[16];
+		int tries = 0;
+
+		n = read(fd, c, sizeof(c) - 1);
+		if (n > 0) {
+			c[n] = 0;
+			tries = atoi(c);
+		}
+		tries++;
+		lseek(fd, 0, SEEK_SET);
+		n = snprintf(c, sizeof(c), "%d\n", tries);
+		if (n > 0) {
+			if (write(fd, c, (size_t)n) < 0)
+				;
+			fsync(fd);
+		}
+		close(fd);
+		if (tries > 3) {
+			sync();
+			for (;;)
+				pause();
+		}
+	}
 	sync();
 	reboot(RB_AUTOBOOT);
 	for (;;)
@@ -1451,51 +1489,28 @@ static void report_wdt_ioctl(const char *tag)
  * is_boot_device test gates that symlink), and the string it tests is the
  * sysfs device path with "/devices/platform/" stripped. On this board the mmc
  * lives under the "soc" platform device, so the string is "soc/4020000.mmc",
- * while the cmdline has been saying "4020000.mmc". With no match the symlink
+ * while the cmdline had been saying "4020000.mmc". With no match the symlink
  * is never created, and first-stage mount dies on exactly what sd29's kmsg
  * shows: "realpath failed: /dev/block/by-name/super".
  *
- * Print the string init will compute, so the cmdline can be nailed instead of
- * guessed at.
+ * The cmdline now carries both spellings, so this is only a receipt. Keep it
+ * to readlink() into a small stack buffer: sd30's first attempt used realpath()
+ * plus stdio here, and that alone was enough to abort PID 1 before it wrote
+ * anything -- ten boots in two minutes before anything reached the card.
  */
 static void report_boot_device(void)
 {
-	const char *const node = "/sys/bus/platform/devices/4020000.mmc";
-	const char *const syspre = "/sys/devices/platform/";
-	char rp[512], line[768], have[128] = "(none)";
-	const char *dev = rp;
-	FILE *f;
+	char buf[128], line[256];
+	ssize_t n;
 
-	if (!realpath(node, rp)) {
-		hb("platdev: realpath failed for /sys/bus/platform/devices/4020000.mmc");
+	n = readlink("/sys/bus/platform/devices/4020000.mmc", buf, sizeof(buf) - 1);
+	if (n < 0) {
+		hb("platdev: /sys/bus/platform/devices/4020000.mmc is not there");
 		return;
 	}
-	if (strncmp(rp, syspre, strlen(syspre)) == 0)
-		dev = rp + strlen(syspre);
-
-	f = fopen("/proc/cmdline", "r");
-	if (f) {
-		char cmd[512] = "";
-
-		if (fgets(cmd, sizeof(cmd), f)) {
-			const char *p = strstr(cmd, "androidboot.boot_devices=");
-
-			if (p) {
-				size_t n = strcspn(p, " \n");
-
-				if (n >= sizeof(have))
-					n = sizeof(have) - 1;
-				memcpy(have, p, n);
-				have[n] = 0;
-			}
-		}
-		fclose(f);
-	}
-	snprintf(line, sizeof(line),
-		 "platdev: %s -> init compares \"%s\"; cmdline says \"%s\"", rp,
-		 dev, have);
+	buf[n > 0 ? n : 0] = 0;
+	snprintf(line, sizeof(line), "platdev: 4020000.mmc -> %s", buf);
 	hb(line);
-	say("%s\n", line);
 }
 
 /* ---- does the machine die of time, or of what we do? ---------------- */
@@ -2070,6 +2085,11 @@ handover:
 	 * ours is needed past this point.
 	 */
 	hb("stage 9b: unmounting our /dev, /proc, /sys and /mnt");
+	/*
+	 * We got all the way here, so no fault loop is in progress: clear the
+	 * counter the fault handler uses to stop rebooting forever.
+	 */
+	unlink("/mnt/FAULTCOUNT");
 	umount2("/dev", MNT_DETACH);
 	umount2("/proc", MNT_DETACH);
 	umount2("/sys", MNT_DETACH);
