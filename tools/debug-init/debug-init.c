@@ -1443,6 +1443,38 @@ static void report_wdt_ioctl(const char *tag)
 	hb(line);
 }
 
+/* ---- does the machine die of time, or of what we do? ---------------- */
+
+/*
+ * Every run so far has stopped somewhere between 8.6 s and 12 s, sometimes
+ * while painting, sometimes while handing over -- never at the same
+ * instruction. A death that follows the clock rather than the code points at
+ * the watchdog: sunxi-wdt arms a 16 s timer when it probes at 0.266 s, and
+ * opening /dev/watchdog may start it again even if we then try to disarm it.
+ *
+ * So sit still for a while and say once a second that we are alive, together
+ * with what the driver thinks is left on the timer. If the log stops around
+ * 16 s with timeleft counting down, the watchdog is the killer and the paint
+ * test is innocent. If timeleft stops counting and we sail past 16 s, the
+ * timer is really off and whatever kills us does it in response to our code.
+ */
+static void soak(int seconds)
+{
+	char line[200];
+	int t, left, rc;
+
+	for (t = 1; t <= seconds; t++) {
+		sleep(1);
+		left = -1;
+		rc = ioctl(wdt_fd, WDIOC_GETTIMELEFT, &left);
+		snprintf(line, sizeof(line),
+			 "soak: t=%ds alive, wdt timeleft=%d (rc %d)", t, left,
+			 rc);
+		say("%s\n", line);
+		hb(line);
+	}
+}
+
 /* ---- watching /init.android die as an ordinary child ---------------- */
 
 /*
@@ -1793,6 +1825,13 @@ int main(void)
 			wdt_start();
 			report_wdt_ioctl("after-disarm");
 			/*
+			 * Sit still first: a death that follows the clock
+			 * (watchdog) looks nothing like one that follows the
+			 * code (display pipeline), and one boot can tell them
+			 * apart.
+			 */
+			soak(20);
+			/*
 			 * Two modes, chosen by a file on the FAT partition so no
 			 * rebuild is needed to switch:
 			 *
@@ -1823,6 +1862,14 @@ int main(void)
 				mmio_scan("planes", 0x1100000, 0x180000);
 				mmio_scan("mixer0", 0x1280000, 0x20000);
 				display_probe();
+			} else if (access("/mnt/NOPAINT", F_OK) == 0) {
+				/*
+				 * Control run: the soak happened, touch nothing
+				 * on the display, hand straight over. If this
+				 * one survives, the paint is what kills us.
+				 */
+				stage = 3;
+				hb("stage 3: paint skipped (NOPAINT present)");
 			} else {
 				stage = 3;
 				hb("stage 3: fb0 paint test");
