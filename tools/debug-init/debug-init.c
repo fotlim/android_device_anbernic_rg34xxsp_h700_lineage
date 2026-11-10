@@ -1443,6 +1443,61 @@ static void report_wdt_ioctl(const char *tag)
 	hb(line);
 }
 
+/*
+ * What does first-stage init compare against androidboot.boot_devices?
+ *
+ * It creates /dev/block/by-name/<part> only for block devices whose platform
+ * device counts as a "boot device" (system/core/init/devices.cpp: the
+ * is_boot_device test gates that symlink), and the string it tests is the
+ * sysfs device path with "/devices/platform/" stripped. On this board the mmc
+ * lives under the "soc" platform device, so the string is "soc/4020000.mmc",
+ * while the cmdline has been saying "4020000.mmc". With no match the symlink
+ * is never created, and first-stage mount dies on exactly what sd29's kmsg
+ * shows: "realpath failed: /dev/block/by-name/super".
+ *
+ * Print the string init will compute, so the cmdline can be nailed instead of
+ * guessed at.
+ */
+static void report_boot_device(void)
+{
+	const char *const node = "/sys/bus/platform/devices/4020000.mmc";
+	const char *const syspre = "/sys/devices/platform/";
+	char rp[512], line[768], have[128] = "(none)";
+	const char *dev = rp;
+	FILE *f;
+
+	if (!realpath(node, rp)) {
+		hb("platdev: realpath failed for /sys/bus/platform/devices/4020000.mmc");
+		return;
+	}
+	if (strncmp(rp, syspre, strlen(syspre)) == 0)
+		dev = rp + strlen(syspre);
+
+	f = fopen("/proc/cmdline", "r");
+	if (f) {
+		char cmd[512] = "";
+
+		if (fgets(cmd, sizeof(cmd), f)) {
+			const char *p = strstr(cmd, "androidboot.boot_devices=");
+
+			if (p) {
+				size_t n = strcspn(p, " \n");
+
+				if (n >= sizeof(have))
+					n = sizeof(have) - 1;
+				memcpy(have, p, n);
+				have[n] = 0;
+			}
+		}
+		fclose(f);
+	}
+	snprintf(line, sizeof(line),
+		 "platdev: %s -> init compares \"%s\"; cmdline says \"%s\"", rp,
+		 dev, have);
+	hb(line);
+	say("%s\n", line);
+}
+
 /* ---- does the machine die of time, or of what we do? ---------------- */
 
 /*
@@ -1833,13 +1888,15 @@ int main(void)
 			 */
 			wdt_start();
 			report_wdt_ioctl("after-disarm");
+			report_boot_device();
 			/*
-			 * Sit still first: a death that follows the clock
-			 * (watchdog) looks nothing like one that follows the
-			 * code (display pipeline), and one boot can tell them
-			 * apart.
+			 * The soak settled the watchdog question: timeleft
+			 * counts 16 -> 0 and the machine keeps running, so the
+			 * timer never fires and nothing here dies of the clock.
+			 * Three seconds is plenty to keep a visible heartbeat
+			 * without making the user wait 20 s for every boot.
 			 */
-			soak(20);
+			soak(3);
 			/*
 			 * Two modes, chosen by a file on the FAT partition so no
 			 * rebuild is needed to switch:
