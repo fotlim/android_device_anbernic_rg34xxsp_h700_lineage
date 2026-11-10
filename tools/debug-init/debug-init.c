@@ -1940,6 +1940,58 @@ static void start_kmsg_logger(void)
 			   : "logger: fork failed");
 }
 
+/* DSH-ramoops-marker */
+/*
+ * Did this boot's DRAM survive the reset that killed the last one?
+ *
+ * Our ramoops node reserves 1 MiB at 0x7ff00000 with no-map, and the two
+ * zones only use the first 0xa0000 of it, so the tail is ours to scribble
+ * on. A magic word here is a cheaper and more honest test than pstore:
+ * if it comes back, DRAM survives and the empty pstore means nothing ever
+ * wrote to it (so the crash is not a plain panic path); if it is gone,
+ * the bootloader wiped the RAM and pstore_ram can never work on this board.
+ */
+static void ramoops_marker(FILE *m)
+{
+	const unsigned long pa = 0x7ffc0000UL;	/* tail of the reservation */
+	const size_t len = 0x1000;
+	static const char magic[10] = "DSH-RAMO1";
+	unsigned char *p;
+	unsigned long count = 1;
+	int fd;
+
+	fd = open("/dev/mem", O_RDWR | O_SYNC);
+	if (fd < 0) {
+		fprintf(m, "ramo: no /dev/mem (%s), cannot test RAM survival\n",
+			strerror(errno));
+		return;
+	}
+	p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+		 (off_t)pa);
+	if (p == MAP_FAILED) {
+		fprintf(m, "ramo: mmap 0x%lx failed (%s)\n", pa, strerror(errno));
+		close(fd);
+		return;
+	}
+	if (memcmp(p, magic, sizeof(magic)) == 0) {
+		memcpy(&count, p + 16, sizeof(count));
+		fprintf(m,
+			"ramo: marker SURVIVED the reset, this is reset %lu\n",
+			count + 1);
+		say("ramo: RAM survived\n");
+		count++;
+	} else {
+		fprintf(m, "ramo: marker GONE -- this DRAM did not survive the "
+			   "reset\n");
+		say("ramo: RAM was cleared\n");
+	}
+	memcpy(p, magic, sizeof(magic));
+	memcpy(p + 16, &count, sizeof(count));
+	msync(p, len, MS_SYNC);
+	munmap(p, len);
+	close(fd);
+}
+
 int main(void)
 {
 	const char *bootdev = NULL;
@@ -2022,6 +2074,7 @@ int main(void)
 				data_files,
 				data_files ? " (see DEBUG/prev-*.txt)"
 					   : " (nothing in /data/tombstones)");
+			ramoops_marker(m);
 			report_ramoops(m);
 			fflush(m);
 			fsync(fileno(m));
