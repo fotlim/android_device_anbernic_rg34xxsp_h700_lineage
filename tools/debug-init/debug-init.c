@@ -2313,6 +2313,41 @@ handover:
 	 * The last breadcrumb is already fsync'd to the card, so nothing of
 	 * ours is needed past this point.
 	 */
+	/*
+	 * /mnt/NOSTART: stay in the initramfs and do nothing at all.
+	 *
+	 * The machine has now died at 26-29 s six boots in a row, always in the
+	 * middle of ordinary framework work, with nothing in the kernel log to
+	 * explain it -- the follower is killed by the same event, so its last
+	 * 200 ms are lost. The obvious question is whether the kernel can
+	 * survive on its own, with no Android on top of it. This switch answers
+	 * that in one boot: with it set, PID 1 never execs the Android init and
+	 * simply heartbeats to the card. If the heartbeats keep coming, the
+	 * kernel is fine and something in userspace pulls the trigger; if they
+	 * stop at 28 s, the trigger is in the kernel and userspace is innocent.
+	 */
+	if (access("/mnt/NOSTART", F_OK) == 0) {
+		char line[128];
+		int beat = 0;
+		struct timespec ts;
+		long up;
+
+		hb("stage 9c: NOSTART is set, staying in the initramfs");
+		say("NOSTART: not handing over to Android, heartbeating\n");
+		for (;;) {
+			sleep(1);
+			beat++;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			up = ts.tv_sec;
+			snprintf(line, sizeof(line),
+				 "nostart: t=%ds alive, uptime=%lds (no Android)",
+				 beat, up);
+			hb(line);
+			if (beat % 10 == 0)
+				say("%s\n", line);
+		}
+	}
+
 	hb("stage 9b: unmounting our /dev, /proc, /sys and /mnt");
 	/*
 	 * We got all the way here, so no fault loop is in progress: clear the
