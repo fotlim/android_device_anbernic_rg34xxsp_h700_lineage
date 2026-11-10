@@ -390,7 +390,7 @@ static int harvest_metadata(void)
 static int copy_capped(const char *src, const char *dst, size_t cap)
 {
 	char buf[4096];
-	size_t n, copied = 0;
+	size_t n, copied = 0, size = 0, skip = 0;
 	FILE *in, *o;
 
 	in = fopen(src, "r");
@@ -401,16 +401,37 @@ static int copy_capped(const char *src, const char *dst, size_t cap)
 		fclose(in);
 		return 0;
 	}
-	fprintf(o, "===== %s (from the previous boot, cap %zu) =====\n", src,
-		cap);
+	/*
+	 * Logs are the interesting case now, and for a log the end is the
+	 * part that matters: /data/local/tmp/dsh-android.log runs to
+	 * megabytes and its first 384 KiB is just the boot. Keep the tail.
+	 */
+	if (fseek(in, 0, SEEK_END) == 0) {
+		long end = ftell(in);
+
+		if (end > 0) {
+			size = (size_t)end;
+			if (size > cap) {
+				skip = size - cap;
+				fseek(in, (long)skip, SEEK_SET);
+			} else {
+				fseek(in, 0, SEEK_SET);
+			}
+		} else {
+			fseek(in, 0, SEEK_SET);
+		}
+	}
+	fprintf(o, "===== %s (from the previous boot, size %zu, cap %zu%s) =====\n",
+		src, size, cap, skip ? ", showing the tail" : "");
 	while (copied < cap && (n = fread(buf, 1, sizeof(buf), in)) > 0) {
 		if (copied + n > cap)
 			n = cap - copied;
 		fwrite(buf, 1, n, o);
 		copied += n;
 	}
-	if (copied >= cap)
-		fprintf(o, "\n[truncated at %zu bytes]\n", cap);
+	if (skip)
+		fprintf(o, "\n[skipped the first %zu bytes of a %zu byte file]\n",
+			skip, size);
 	fflush(o);
 	fsync(fileno(o));
 	fclose(o);
@@ -428,8 +449,8 @@ static int copy_capped(const char *src, const char *dst, size_t cap)
 static int harvest_data(void)
 {
 	const char *devs[] = { "/dev/mmcblk0p5", "/dev/block/mmcblk0p5" };
-	const char *dirs[] = { "tombstones", "anr", "system/dropbox",
-			       "misc/logd", "recovery" };
+	const char *dirs[] = { "local/tmp", "tombstones", "anr",
+			       "system/dropbox", "misc/logd", "recovery" };
 	char d[200], src[260], dst[180];
 	int i, k, mounted = 0, copied = 0;
 
@@ -450,7 +471,7 @@ static int harvest_data(void)
 		return 0;
 	}
 
-	for (k = 0; k < 5; k++) {
+	for (k = 0; k < 6; k++) {
 		DIR *dd;
 		struct dirent *e;
 		int per_dir = 0;
@@ -689,19 +710,25 @@ static int wait_for(const char *path, int tries)
  * LOG(FATAL) -> abort -> panic -> reset, and anything still in the page cache
  * at that point is gone.
  */
+static int procdfd = -1;	/* kept so tb() outlives the /proc remount */
+
 static void tb(int rfd)
 {
 	char line[192], up[64] = "?", comm[64] = "?";
 	int fd, r, n;
 	char *p;
 
-	fd = open("/proc/uptime", O_RDONLY);
+	fd = procdfd >= 0 ? openat(procdfd, "uptime", O_RDONLY) : -1;
+	if (fd < 0)
+		fd = open("/proc/uptime", O_RDONLY);
 	if (fd >= 0) {
 		r = (int)read(fd, up, sizeof(up) - 1);
 		close(fd);
 		up[r > 0 ? r : 0] = 0;
 	}
-	fd = open("/proc/1/comm", O_RDONLY);
+	fd = procdfd >= 0 ? openat(procdfd, "1/comm", O_RDONLY) : -1;
+	if (fd < 0)
+		fd = open("/proc/1/comm", O_RDONLY);
 	if (fd >= 0) {
 		r = (int)read(fd, comm, sizeof(comm) - 1);
 		close(fd);
@@ -731,37 +758,30 @@ static void kmsg_logger(int kfd, int lfd, int rfd)
 		n = read(kfd, buf, sizeof(buf));
 		if (n < 0 && errno != EAGAIN && errno != EINTR) {
 			/*
-			 * /dev/kmsg answers EPIPE when the ring buffer
-			 * overwrote records between two of our reads, and
-			 * Android's boot (plus the logcat bridge we install)
-			 * easily outruns a 100 ms poll. Treating that as fatal
-			 * is what ended this follower at 34 s while the
-			 * machine went on living for eight minutes: the whole
-			 * interesting half of the boot was never written.
-			 * Close, reopen at the newest record, carry on.
+			 * /dev/kmsg answers EPIPE when records were dropped
+			 * between two of our reads (Android's boot, with our
+			 * logcat bridge feeding it, easily outruns a 100 ms
+			 * poll). kernel/printk/printk.c:841 resets the reader
+			 * to the oldest surviving record *before* returning
+			 * -EPIPE, so the very next read works -- there is
+			 * nothing to reopen and nothing to recover from.
+			 *
+			 * sd42 did reopen, and by then PID 1 had unmounted
+			 * /dev, so /dev/kmsg was gone and the follower quit at
+			 * 36.7 s: an eight-minute boot with four seconds of
+			 * graphics traffic in the log. Never leave the stream
+			 * for a path that may no longer exist.
 			 */
 			char note[128];
 			int nn;
 
 			nn = snprintf(note, sizeof note,
-				      "tb-note: kmsg read failed (%s), reopening\n",
+				      "tb-note: kmsg dropped records (%s), continuing\n",
 				      strerror(errno));
 			if (nn > 0 && write(rfd, note, (size_t)nn) > 0)
 				fsync(rfd);
-			close(kfd);
-			usleep(200000);
-			kfd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
-			if (kfd < 0) {
-				nn = snprintf(note, sizeof note,
-					      "tb-note: cannot reopen /dev/kmsg (%s), giving up\n",
-					      strerror(errno));
-				if (nn > 0 && write(rfd, note, (size_t)nn) > 0)
-					fsync(rfd);
-				break;
-			}
-			lseek(kfd, 0, SEEK_END);
-			dirty = 0;
 			clock_gettime(CLOCK_MONOTONIC, &last);
+			usleep(20000);
 			continue;
 		}
 		if (n > 0) {
@@ -2041,6 +2061,14 @@ static void start_kmsg_logger(void)
 	 * buried the panic. DEBUG/dmesg.txt already holds the boot log.
 	 */
 	lseek(kfd, 0, SEEK_END);
+	/*
+	 * PID 1 unmounts /proc before the handover, so after that every path
+	 * lookup under /proc fails and the heartbeats turn into "up=? pid1=?".
+	 * A directory fd opened now keeps pointing at the real procfs, and
+	 * openat() through it still works after the mount is detached.
+	 */
+	if (procdfd < 0)
+		procdfd = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	pid = fork();
 	if (pid == 0) {
 		/*
