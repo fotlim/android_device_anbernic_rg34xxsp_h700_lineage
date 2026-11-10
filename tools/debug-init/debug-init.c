@@ -381,6 +381,114 @@ static int harvest_metadata(void)
 	return copied;
 }
 
+/*
+ * Copy a file, but never more than cap bytes of it. The card's boot partition
+ * is 64 MiB and the kernel already eats 35 of them, so an unbounded copy of
+ * whatever a crashing framework left behind can fill it and lose the boot
+ * entirely. Truncation is recorded in the header line.
+ */
+static int copy_capped(const char *src, const char *dst, size_t cap)
+{
+	char buf[4096];
+	size_t n, copied = 0;
+	FILE *in, *o;
+
+	in = fopen(src, "r");
+	if (!in)
+		return 0;
+	o = fopen(dst, "w");
+	if (!o) {
+		fclose(in);
+		return 0;
+	}
+	fprintf(o, "===== %s (from the previous boot, cap %zu) =====\n", src,
+		cap);
+	while (copied < cap && (n = fread(buf, 1, sizeof(buf), in)) > 0) {
+		if (copied + n > cap)
+			n = cap - copied;
+		fwrite(buf, 1, n, o);
+		copied += n;
+	}
+	if (copied >= cap)
+		fprintf(o, "\n[truncated at %zu bytes]\n", cap);
+	fflush(o);
+	fsync(fileno(o));
+	fclose(o);
+	fclose(in);
+	return 1;
+}
+
+/*
+ * Harvest what the framework wrote into /data on the previous boot. This is
+ * how a zygote crash is going to name itself: /data is mounted read-write by
+ * now, so tombstoned has somewhere to put the tombstone -- but only after the
+ * machine has already gone down, which is why it is collected at the *start*
+ * of the next boot.
+ */
+static int harvest_data(void)
+{
+	const char *devs[] = { "/dev/mmcblk0p5", "/dev/block/mmcblk0p5" };
+	const char *dirs[] = { "tombstones", "anr", "system/dropbox",
+			       "misc/logd", "recovery" };
+	char d[200], src[260], dst[180];
+	int i, k, mounted = 0, copied = 0;
+
+	mkdir("/olddata", 0755);
+	for (i = 0; i < 2 && !mounted; i++) {
+		if (access(devs[i], F_OK) != 0)
+			continue;
+		if (mount(devs[i], "/olddata", "ext4", MS_RDONLY, NULL) == 0)
+			mounted = 1;
+	}
+	if (!mounted) {
+		char m[160];
+
+		snprintf(m, sizeof(m),
+			 "data: could not mount /dev/mmcblk0p5 read-only (%s)",
+			 strerror(errno));
+		hb(m);
+		return 0;
+	}
+
+	for (k = 0; k < 5; k++) {
+		DIR *dd;
+		struct dirent *e;
+		int per_dir = 0;
+
+		snprintf(d, sizeof(d), "/olddata/%s", dirs[k]);
+		dd = opendir(d);
+		if (!dd)
+			continue;
+		while ((e = readdir(dd)) && per_dir < 4 && copied < 12) {
+			if (e->d_name[0] == '.')
+				continue;
+			snprintf(src, sizeof(src), "%s/%s", d, e->d_name);
+			snprintf(dst, sizeof(dst),
+				 "/mnt/DEBUG/prev-%s-%s", dirs[k], e->d_name);
+			{
+				/* '/' is not a legal FAT file name character. */
+				char *s = dst;
+
+				while (*s) {
+					if (*s == '/')
+						*s = '_';
+					s++;
+				}
+			}
+			if (!copy_capped(src, dst, 384 * 1024))
+				continue;
+			hb(strcat(strcpy(src, "data: saved "), dst));
+			per_dir++;
+			copied++;
+		}
+		closedir(dd);
+	}
+	umount("/olddata");
+	if (!copied)
+		hb("data: the previous boot left nothing in /data/tombstones etc.");
+	return copied;
+}
+
 static int harvest_pstore(void)
 {
 	DIR *d;
@@ -1836,7 +1944,7 @@ int main(void)
 {
 	const char *bootdev = NULL;
 	char logpath[128];
-	int i, logged = 0, pstore_files = 0, meta_files = 0;
+	int i, logged = 0, pstore_files = 0, meta_files = 0, data_files = 0;
 
 	mkdir("/proc", 0555);
 	mkdir("/sys", 0555);
@@ -1883,6 +1991,7 @@ int main(void)
 	 */
 	pstore_files = harvest_pstore();
 	meta_files = harvest_metadata();
+	data_files = harvest_data();
 
 	/*
 	 * Proof-of-life marker, written and fsync'd before anything else.
@@ -1909,6 +2018,10 @@ int main(void)
 				meta_files,
 				meta_files ? " (see DEBUG/meta-*.txt)"
 					   : " (nothing on /dev/mmcblk0p3)");
+			fprintf(m, "data receipts from the previous boot: %d%s\n",
+				data_files,
+				data_files ? " (see DEBUG/prev-*.txt)"
+					   : " (nothing in /data/tombstones)");
 			report_ramoops(m);
 			fflush(m);
 			fsync(fileno(m));
