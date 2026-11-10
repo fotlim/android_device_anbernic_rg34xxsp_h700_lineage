@@ -729,6 +729,41 @@ static void kmsg_logger(int kfd, int lfd, int rfd)
 	clock_gettime(CLOCK_MONOTONIC, &last);
 	for (;;) {
 		n = read(kfd, buf, sizeof(buf));
+		if (n < 0 && errno != EAGAIN && errno != EINTR) {
+			/*
+			 * /dev/kmsg answers EPIPE when the ring buffer
+			 * overwrote records between two of our reads, and
+			 * Android's boot (plus the logcat bridge we install)
+			 * easily outruns a 100 ms poll. Treating that as fatal
+			 * is what ended this follower at 34 s while the
+			 * machine went on living for eight minutes: the whole
+			 * interesting half of the boot was never written.
+			 * Close, reopen at the newest record, carry on.
+			 */
+			char note[128];
+			int nn;
+
+			nn = snprintf(note, sizeof note,
+				      "tb-note: kmsg read failed (%s), reopening\n",
+				      strerror(errno));
+			if (nn > 0 && write(rfd, note, (size_t)nn) > 0)
+				fsync(rfd);
+			close(kfd);
+			usleep(200000);
+			kfd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
+			if (kfd < 0) {
+				nn = snprintf(note, sizeof note,
+					      "tb-note: cannot reopen /dev/kmsg (%s), giving up\n",
+					      strerror(errno));
+				if (nn > 0 && write(rfd, note, (size_t)nn) > 0)
+					fsync(rfd);
+				break;
+			}
+			lseek(kfd, 0, SEEK_END);
+			dirty = 0;
+			clock_gettime(CLOCK_MONOTONIC, &last);
+			continue;
+		}
 		if (n > 0) {
 			if (write(lfd, buf, (size_t)n) > 0)
 				dirty++;
@@ -2008,12 +2043,78 @@ static void start_kmsg_logger(void)
 	lseek(kfd, 0, SEEK_END);
 	pid = fork();
 	if (pid == 0) {
+		/*
+		 * Leave PID 1's session and process group, and refuse to be
+		 * killed by a stray SIGTERM/SIGHUP. Android's init kills
+		 * service process *groups* as it shuts services down; a
+		 * follower sitting in init's own group is one kill(-9) away
+		 * from silently taking the rest of the boot's log with it.
+		 */
+		setsid();
+		signal(SIGTERM, SIG_IGN);
+		signal(SIGHUP, SIG_IGN);
+		signal(SIGINT, SIG_IGN);
+		signal(SIGPIPE, SIG_IGN);
 		kmsg_logger(kfd, lfd, rfd);
 		_exit(0);
 	}
 	logger_started = (pid > 0);
 	hb(logger_started ? "logger: kmsg follower running from the paint test on"
 			   : "logger: fork failed");
+}
+
+/*
+ * Hand the panel back to the DRM device.
+ *
+ * The framebuffer console stays bound to fb0 for the whole boot, so every
+ * kernel message -- and Android's own logcat, once our 98-framework-logs.rc
+ * bridge is live -- repaints the panel through fbcon. SurfaceFlinger then has
+ * to composite into a scanout buffer that something else writes to several
+ * times a second, and what the user sees is a scrolling console rather than
+ * whatever the composer drew.
+ *
+ * Unbinding the console (vtconsole bind = 0) leaves fb0 and the KMS device to
+ * the next owner. /mnt/KEEPCONSOLE keeps it for debugging.
+ */
+static void release_console(void)
+{
+	char dir[64], path[96], name[96];
+	FILE *f;
+	int i, found = 0, unbound = 0;
+
+	if (access("/mnt/KEEPCONSOLE", F_OK) == 0) {
+		hb("console: KEEPCONSOLE is set, leaving fbcon bound");
+		return;
+	}
+	for (i = 0; i < 4; i++) {
+		snprintf(dir, sizeof dir, "/sys/class/vtconsole/vtcon%d", i);
+		snprintf(path, sizeof path, "%s/name", dir);
+		f = fopen(path, "r");
+		if (!f)
+			continue;
+		name[0] = '\0';
+		if (fgets(name, sizeof name, f) == NULL)
+			name[0] = '\0';
+		fclose(f);
+		if (strstr(name, "frame buffer") == NULL)
+			continue;
+		found = 1;
+		snprintf(path, sizeof path, "%s/bind", dir);
+		f = fopen(path, "w");
+		if (!f) {
+			hb("console: framebuffer console has no writable bind node");
+			return;
+		}
+		fprintf(f, "0");
+		fclose(f);
+		unbound = 1;
+	}
+	if (unbound)
+		hb("console: framebuffer console unbound, the panel is DRM's now");
+	else if (found)
+		hb("console: tried to unbind fbcon and it refused");
+	else
+		hb("console: no framebuffer console entry to unbind");
 }
 
 /* DSH-ramoops-marker */
@@ -2431,6 +2532,7 @@ handover:
 		}
 	}
 
+	release_console();
 	hb("stage 9b: unmounting our /dev, /proc, /sys and /mnt");
 	/*
 	 * We got all the way here, so no fault loop is in progress: clear the
