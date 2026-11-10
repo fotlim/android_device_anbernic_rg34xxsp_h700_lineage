@@ -1,5 +1,5 @@
 diff --git a/init/first_stage_init.cpp b/init/first_stage_init.cpp
-index 0215576..a3ca271 100644
+index 0215576..a396875 100644
 --- a/init/first_stage_init.cpp
 +++ b/init/first_stage_init.cpp
 @@ -19,6 +19,7 @@
@@ -10,7 +10,7 @@ index 0215576..a3ca271 100644
  #include <stdlib.h>
  #include <sys/mount.h>
  #include <sys/stat.h>
-@@ -98,6 +99,207 @@ bool ForceNormalBoot(const std::string& cmdline) {
+@@ -98,6 +99,237 @@ bool ForceNormalBoot(const std::string& cmdline) {
      return cmdline.find("androidboot.force_normal_boot=1") != std::string::npos;
  }
  
@@ -121,6 +121,35 @@ index 0215576..a3ca271 100644
 +    pubnote("rc: wrote %zd/%zu bytes to %s", written, len, path);
 +}
 +
++// zygote starts and then vanishes without a word in the kernel log: services
++// log to logd, and logd keeps its buffers in RAM. A crash takes those buffers
++// with it, but anything written to /dev/kmsg survives -- debug-init already
++// follows /dev/kmsg onto the card every 200 ms. So publish one more rc that
++// pipes the log buffers into kmsg, on the same overlay as the fstab.
++const char kFrameworkLogsRc[] =
++    "# Written by first-stage init (patches/init-first-stage-publish-ramdisk-fstab).\n"
++    "#\n"
++    "# zygote starts at 25.8 s and init kills its process group at 27.5 s with\n"
++    "# nothing from zygote in the kernel log, because services log to logd and\n"
++    "# logd's buffers die with the machine. Rewriting them into /dev/kmsg puts\n"
++    "# them where debug-init can copy them to the card before the panic lands.\n"
++    "on post-fs-data\n"
++    "    exec_background - root root -- /system/bin/logcat -b crash -b main -v brief -f /dev/kmsg\n";
++
++void PublishLogRc() {
++    const char* path = "/vendor/etc/init/98-framework-logs.rc";
++    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++    if (fd < 0) {
++        pubnote("logrc: open %s failed: %d (%s)", path, errno, strerror(errno));
++        return;
++    }
++    size_t len = strlen(kFrameworkLogsRc);
++    ssize_t written = write(fd, kFrameworkLogsRc, len);
++    fsync(fd);
++    close(fd);
++    pubnote("logrc: wrote %zd/%zu bytes to %s", written, len, path);
++}
++
 +void PublishRamdiskFstab(DIR* ramdisk) {
 +    g_publish_receipt.clear();
 +    int dfd = ramdisk ? dirfd(ramdisk) : -1;
@@ -207,6 +236,7 @@ index 0215576..a3ca271 100644
 +                seen == 0 ? "readable" : strerror(errno));
 +    }
 +    if (published) PublishMountRc();
++    if (published) PublishLogRc();
 +    pubnote("done, published=%d", published ? 1 : 0);
 +    pubflush();
 +}
@@ -218,7 +248,7 @@ index 0215576..a3ca271 100644
  }  // namespace
  
  std::string GetModuleLoadList(bool recovery, const std::string& dir_path) {
-@@ -303,6 +505,11 @@ int FirstStageMain(int argc, char** argv) {
+@@ -303,6 +535,11 @@ int FirstStageMain(int argc, char** argv) {
          LOG(FATAL) << "Failed to mount required partitions early ...";
      }
  
