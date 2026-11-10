@@ -314,6 +314,73 @@ static void report_ramoops(FILE *m)
 	closedir(d);
 }
 
+/*
+ * The first stage publishes /vendor/etc/fstab.rg34xxsp so that the second
+ * stage and vold can find it, and writes a receipt into /metadata (the ext4
+ * partition, which survives a reboot). Its LOG() lines are not reliable --
+ * userspace writes to /dev/kmsg are ratelimited by default, and fifteen of
+ * them vanished on the sd32 run -- so the receipt is the only trustworthy
+ * record of what that code decided. Fetch it before anything else touches
+ * /dev/mmcblk0p3.
+ */
+static int harvest_metadata(void)
+{
+	const char *devs[] = { "/dev/mmcblk0p3", "/dev/block/mmcblk0p3" };
+	const char *files[] = { "first-stage-publish.txt", "fstab.rg34xxsp",
+				"fstab.published" };
+	char p[160], dst[160];
+	int i, j, copied = 0, mounted = 0;
+
+	mkdir("/meta", 0755);
+	for (i = 0; i < 2 && !mounted; i++) {
+		if (access(devs[i], F_OK) != 0)
+			continue;
+		if (mount(devs[i], "/meta", "ext4", MS_RDONLY, NULL) == 0)
+			mounted = 1;
+	}
+	if (!mounted) {
+		char m[160];
+
+		snprintf(m, sizeof(m),
+			 "meta: could not mount the metadata partition (%s)",
+			 strerror(errno));
+		hb(m);
+		return 0;
+	}
+
+	for (j = 0; j < 3; j++) {
+		char buf[4096];
+		size_t n;
+		FILE *in, *o;
+
+		snprintf(p, sizeof(p), "/meta/%s", files[j]);
+		if (access(p, F_OK) != 0)
+			continue;
+		snprintf(dst, sizeof(dst), "/mnt/DEBUG/meta-%s", files[j]);
+		in = fopen(p, "r");
+		if (!in)
+			continue;
+		o = fopen(dst, "w");
+		if (!o) {
+			fclose(in);
+			continue;
+		}
+		fprintf(o, "===== %s (left behind by the first stage) =====\n", p);
+		while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+			fwrite(buf, 1, n, o);
+		fflush(o);
+		fsync(fileno(o));
+		fclose(o);
+		fclose(in);
+		hb(strcat(strcpy(buf, "meta: saved "), dst));
+		copied++;
+	}
+	umount("/meta");
+	if (!copied)
+		hb("meta: nothing left behind (the first stage wrote no receipt)");
+	return copied;
+}
+
 static int harvest_pstore(void)
 {
 	DIR *d;
@@ -1769,7 +1836,7 @@ int main(void)
 {
 	const char *bootdev = NULL;
 	char logpath[128];
-	int i, logged = 0, pstore_files = 0;
+	int i, logged = 0, pstore_files = 0, meta_files = 0;
 
 	mkdir("/proc", 0555);
 	mkdir("/sys", 0555);
@@ -1815,6 +1882,7 @@ int main(void)
 	 * behind? Harvested before ran.txt is recreated, and reported in it.
 	 */
 	pstore_files = harvest_pstore();
+	meta_files = harvest_metadata();
 
 	/*
 	 * Proof-of-life marker, written and fsync'd before anything else.
@@ -1837,6 +1905,10 @@ int main(void)
 				pstore_files,
 				pstore_files ? " (see DEBUG/pstore-*.txt)"
 					     : " (no crash was salvaged)");
+			fprintf(m, "metadata receipts from the previous boot: %d%s\n",
+				meta_files,
+				meta_files ? " (see DEBUG/meta-*.txt)"
+					   : " (nothing on /dev/mmcblk0p3)");
 			report_ramoops(m);
 			fflush(m);
 			fsync(fileno(m));
