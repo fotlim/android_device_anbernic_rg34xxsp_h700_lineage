@@ -570,7 +570,9 @@ for want in \
   'CONFIG_IP_NF_IPTABLES_LEGACY=y' \
   'CONFIG_IP_NF_FILTER=y' \
   'CONFIG_IP_NF_NAT=y' \
-  'CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y' ; do
+  'CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y' \
+  'CONFIG_QFMT_V2=y' \
+  'CONFIG_QUOTA_TREE=y' ; do
   grep -qE "^$want" .config || { echo "  缺少 $want（Android 需要它，检查 fragment.config 与该符号的依赖）"; bad=1; }
 done
 [ "$bad" = 0 ] || { echo "错误：配置没收敛，停下。"; exit 1; }
