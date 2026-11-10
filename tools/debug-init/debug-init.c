@@ -824,20 +824,26 @@ static int mount_boot_partition(const char **used)
  */
 
 /*
- * Keep the SoC watchdog fed while we probe.
+ * The SoC watchdog has been the executioner all along.
  *
- * sunxi-wdt programs a 16 second timeout at probe time. Nothing in this
- * initramfs opens /dev/watchdog, so the very first time we spend longer
- * than that poking at the display the SoC hard-resets us mid-sentence --
- * which is exactly what truncated sd13 (18 s of paint test) and sd14
- * (13 s of sleeps plus the register sweep). The log ends without a panic
- * and without a closing line, and the card looks like the probe was
- * never written.
+ * Every boot since sd25 stopped 16.2 s after the last line our initramfs
+ * printed, with no panic, no oops, no init shutdown message, no pstore record
+ * and a stale frame on the panel: an external reset. sd40 took Android out of
+ * the picture entirely (/mnt/NOSTART keeps PID 1 in the initramfs) and the
+ * machine still died:
  *
- * Opening the device starts the timer; a child pings it every 3 s. Before
- * handing PID 1 to Android the child is killed and the magic character is
- * written, which disarms the watchdog again so a real Android hang still
- * reboots the device.
+ *     [12.084645] watchdog: timer re-armed for handover
+ *     hb: [28.25] nostart: t=15s alive, uptime=28s          <- last line
+ *
+ * 12.08 + 16 = 28.08, and 16 s is WDT_MAX_TIMEOUT. The watchdog node asks for
+ * "allwinner,sun50i-h616-wdt" but the driver has no h616 entry, so it binds
+ * the sun6i fallback whose .wdt_key_val is 0 -- and the H616 ignores every
+ * WDT_MODE write that does not carry 0x16AA0000. The driver's stop() was a
+ * no-op all along, and the kernel said so: "watchdog0: watchdog did not stop!"
+ *
+ * So: never re-arm it at handover, and disarm it for real, then prove it by
+ * reading the countdown twice. If the driver's write is still ignored, slam
+ * the key into the register by hand through /dev/mem and read it again.
  */
 static int wdt_fd = -1;
 static pid_t wdt_pid = -1;
@@ -872,23 +878,93 @@ static void wdt_start(void)
 		say("watchdog: timer disabled for the probe\n");
 }
 
+/* Seconds left on the watchdog, or -1 if the driver will not say. */
+static int wdt_timeleft(void)
+{
+	int left = -1;
+
+	if (wdt_fd < 0)
+		return -1;
+	if (ioctl(wdt_fd, WDIOC_GETTIMELEFT, &left) < 0)
+		return -1;
+	return left;
+}
+
+/*
+ * Write the H616 key straight into WDT_MODE.
+ *
+ * The driver cannot do this because its fallback reg entry has no key, and the
+ * SoC drops every write to that register without 0x16AA0000 in the top half.
+ * 0x30090a0 is the node's base, WDT_MODE sits at +0x18, and the page is
+ * ordinary MMIO so /dev/mem will map it (unlike the no-map ramoops window).
+ */
+static void wdt_bang_key(void)
+{
+	int fd = open("/dev/mem", O_RDWR | O_SYNC);
+	unsigned char *page;
+	volatile unsigned int *mode;
+
+	if (fd < 0) {
+		hb("wdt: /dev/mem refused, cannot force the key");
+		return;
+	}
+	page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+		    0x30090000);
+	if (page == MAP_FAILED) {
+		close(fd);
+		hb("wdt: mapping 0x30090000 failed");
+		return;
+	}
+	mode = (volatile unsigned int *)(page + 0xb8);
+	*mode = 0x16aa0000u;	/* key, enable bit clear: stopped */
+	munmap(page, 4096);
+	close(fd);
+	hb("wdt: wrote 0x16aa0000 to 0x30090b8 by hand");
+}
+
 static void wdt_stop(void)
 {
-	int opt = WDIOS_ENABLECARD;
+	int opt = WDIOS_DISABLECARD;
+	int before, after;
+	char line[160];
 
-	if (wdt_fd >= 0) {
-		if (ioctl(wdt_fd, WDIOC_SETOPTIONS, &opt) < 0)
-			say("watchdog: re-arm failed (%s)\n", strerror(errno));
-		else
-			say("watchdog: timer re-armed for handover\n");
-		close(wdt_fd);
-		wdt_fd = -1;
-	}
 	if (wdt_pid > 0) {
 		kill(wdt_pid, SIGKILL);
 		waitpid(wdt_pid, NULL, 0);
 		wdt_pid = -1;
 	}
+	if (wdt_fd < 0) {
+		hb("wdt: no descriptor open, nothing to disarm");
+		return;
+	}
+
+	before = wdt_timeleft();
+	if (ioctl(wdt_fd, WDIOC_SETOPTIONS, &opt) < 0)
+		snprintf(line, sizeof line, "wdt: disable ioctl failed (%s)",
+			 strerror(errno));
+	else
+		snprintf(line, sizeof line, "wdt: disable ioctl accepted");
+	hb(line);
+
+	sleep(4);
+	after = wdt_timeleft();
+	snprintf(line, sizeof line,
+		 "wdt: timeleft %d -> %d over 4 s (%s)", before, after,
+		 (after >= 0 && before >= 0 && after >= before) ? "stopped"
+							       : "STILL COUNTING");
+	hb(line);
+
+	if (!(after >= 0 && before >= 0 && after >= before)) {
+		wdt_bang_key();
+		sleep(4);
+		after = wdt_timeleft();
+		snprintf(line, sizeof line, "wdt: after the key, timeleft %d (%s)",
+			 after, after < 0 ? "cannot read" : "read back");
+		hb(line);
+	}
+
+	close(wdt_fd);
+	wdt_fd = -1;
 }
 
 /*
@@ -2125,20 +2201,21 @@ int main(void)
 			start_kmsg_logger();
 			report_wdt_ioctl("before-arm");
 			/*
-			 * Everything below pokes at hardware and then waits
-			 * for a human to look at the panel, which is far
-			 * longer than the 16 s watchdog. Feed it or lose the
-			 * tail of the log.
+			 * Open the watchdog so its countdown is readable, and
+			 * try to disarm it here. On this SoC the driver's
+			 * disarm is a no-op, so the real one happens at
+			 * handover, where wdt_stop() verifies it. Opening it
+			 * arms a 16 s timer, so the stages below have to reach
+			 * the handover well inside that window.
 			 */
 			wdt_start();
 			report_wdt_ioctl("after-disarm");
 			report_boot_device();
 			/*
-			 * The soak settled the watchdog question: timeleft
-			 * counts 16 -> 0 and the machine keeps running, so the
-			 * timer never fires and nothing here dies of the clock.
-			 * Three seconds is plenty to keep a visible heartbeat
-			 * without making the user wait 20 s for every boot.
+			 * The countdown is the machine's deadline: it reads 16
+			 * at handover and the SoC resets at 16 + 12 s of
+			 * wall clock. Three seconds is enough to see it move
+			 * in the trace without making every boot slower.
 			 */
 			soak(3);
 			/*
@@ -2187,8 +2264,14 @@ int main(void)
 			}
 			stage = 4;
 			hb("stage 4: probe returned");
-			report_wdt_ioctl("before-rearm");
+			report_wdt_ioctl("before-disarm");
+			/*
+			 * Never re-arm: Android has no keeper for it, so a
+			 * running watchdog ends the boot 16 s in, which is
+			 * exactly what every trace since sd25 shows.
+			 */
 			wdt_stop();
+			/* wdt_stop() verified the countdown and closed the fd. */
 			fflush(o);
 			fsync(fileno(o));
 			fclose(o);
