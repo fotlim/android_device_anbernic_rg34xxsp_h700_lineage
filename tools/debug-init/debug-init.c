@@ -1607,6 +1607,15 @@ static void child_probe(void)
 				close(fd);
 		}
 		hb("stage 4d: child about to execl /init.android");
+		/*
+		 * Same courtesy as the real handover: init mounts these itself
+		 * and an EBUSY is fatal. This namespace is the child's own, so
+		 * clearing them cannot touch the parent's view of the card.
+		 */
+		umount2("/dev", MNT_DETACH);
+		umount2("/proc", MNT_DETACH);
+		umount2("/sys", MNT_DETACH);
+		umount2("/mnt", MNT_DETACH);
 		execl("/init.android", "/init", NULL);
 		_exit(127);
 	}
@@ -1987,6 +1996,28 @@ handover:
 	stage = 5;
 	say("handing over to /init.android\n");
 	hb("stage 9: about to execl");
+
+	/*
+	 * Give the root back the way Android's init expects it.
+	 *
+	 * FirstStageMain mounts /dev (tmpfs), /dev/pts, /proc, /sys, and /mnt
+	 * itself, and it treats any CHECKCALL failure as fatal: the console
+	 * said it in as many words -- "Init encountered errors starting first
+	 * stage, aborting". Every one of those mountpoints was still ours, so
+	 * each mount came back EBUSY; devtmpfs also made every
+	 * mknod("/dev/kmsg"/"random"/"urandom"/"ptmx"/"null") an EEXIST.
+	 * selinuxfs was the third failure, and that one is the kernel's job
+	 * (CONFIG_SECURITY_SELINUX, added in sd29).
+	 *
+	 * The last breadcrumb is already fsync'd to the card, so nothing of
+	 * ours is needed past this point.
+	 */
+	hb("stage 9b: unmounting our /dev, /proc, /sys and /mnt");
+	umount2("/dev", MNT_DETACH);
+	umount2("/proc", MNT_DETACH);
+	umount2("/sys", MNT_DETACH);
+	umount2("/mnt", MNT_DETACH);
+	sync();
 
 	execl("/init.android", "/init", NULL);
 
