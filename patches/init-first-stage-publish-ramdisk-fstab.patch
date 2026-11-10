@@ -1,5 +1,5 @@
 diff --git a/init/first_stage_init.cpp b/init/first_stage_init.cpp
-index 0215576..0195882 100644
+index 0215576..ed38f32 100644
 --- a/init/first_stage_init.cpp
 +++ b/init/first_stage_init.cpp
 @@ -19,6 +19,7 @@
@@ -10,7 +10,7 @@ index 0215576..0195882 100644
  #include <stdlib.h>
  #include <sys/mount.h>
  #include <sys/stat.h>
-@@ -98,6 +99,278 @@ bool ForceNormalBoot(const std::string& cmdline) {
+@@ -98,6 +99,367 @@ bool ForceNormalBoot(const std::string& cmdline) {
      return cmdline.find("androidboot.force_normal_boot=1") != std::string::npos;
  }
  
@@ -190,6 +190,94 @@ index 0215576..0195882 100644
 +    pubnote("gfx: wrote %zd/%zu bytes to %s", written, len, path);
 +}
 +
++// zymote -> zygote64 aborting on a missing public libraries list has one
++// more cause worth naming: this product never inherits media_system.mk, the
++// only rule that installs system/etc/public.libraries.txt.  The file is left
++// on /metadata with a script, and the script runs at early-init through one
++// published rc, long before zygote is forked.
++const char kPublicLibraries[] =
++    "# See https://android.googlesource.com/platform/ndk/+/master/docs/PlatformApis.md\n"
++    "libandroid.so\n"
++    "libaaudio.so\n"
++    "libamidi.so\n"
++    "libbinder_ndk.so\n"
++    "libc.so\n"
++    "libcamera2ndk.so\n"
++    "libdl.so\n"
++    "libEGL.so\n"
++    "libGLESv1_CM.so\n"
++    "libGLESv2.so\n"
++    "libGLESv3.so\n"
++    "libicui18n.so\n"
++    "libicuuc.so\n"
++    "libjnigraphics.so\n"
++    "liblog.so\n"
++    "libmediandk.so\n"
++    "libm.so\n"
++    "libnativewindow.so\n"
++    "libneuralnetworks.so nopreload\n"
++    "libOpenMAXAL.so\n"
++    "libOpenSLES.so\n"
++    "libRS.so\n"
++    "libstdc++.so\n"
++    "libsync.so\n"
++    "libvulkan.so\n"
++    "libwebviewchromium_plat_support.so\n"
++    "libz.so\n";
++
++const char kFixPublicLibsSh[] =
++    "#!/system/bin/sh\n"
++    "# Runs from /vendor/etc/init/96-system-fix.rc at early-init.\n"
++    "LIST=/system/etc/public.libraries.txt\n"
++    "SRC=/metadata/dsh/public.libraries.txt\n"
++    "LOG=/metadata/dsh/fix.log\n"
++    "echo \"start\" > $LOG\n"
++    "if cp $SRC $LIST 2>>$LOG; then\n"
++    "    echo \"wrote $LIST directly\" >> $LOG\n"
++    "    exit 0\n"
++    "fi\n"
++    "if mount -o rw,remount /system 2>>$LOG && cp $SRC $LIST 2>>$LOG; then\n"
++    "    echo \"wrote $LIST after remounting /system rw\" >> $LOG\n"
++    "    exit 0\n"
++    "fi\n"
++    "mkdir -p /dev/dsh_upper /dev/dsh_work 2>>$LOG\n"
++    "if mount -t overlay overlay -o lowerdir=/system/etc,upperdir=/dev/dsh_upper,workdir=/dev/dsh_work /system/etc 2>>$LOG         && cp $SRC $LIST 2>>$LOG; then\n"
++    "    echo \"wrote $LIST through an overlay of /system/etc\" >> $LOG\n"
++    "    exit 0\n"
++    "fi\n"
++    "echo \"FAILED, see the messages above\" >> $LOG\n"
++    "exit 0\n";
++
++const char kFixPublicLibsRc[] =
++    "on early-init\n"
++    "    exec - root root -- /system/bin/sh /metadata/dsh/fix-public-libs.sh\n";
++
++bool PublishTextFile(const char* path, const char* content, mode_t mode) {
++    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
++    if (fd < 0) {
++        pubnote("fix: open %s failed: %d (%s)", path, errno, strerror(errno));
++        return false;
++    }
++    size_t len = strlen(content), written = 0;
++    while (written < len) {
++        ssize_t n = write(fd, content + written, len - written);
++        if (n <= 0) break;
++        written += (size_t)n;
++    }
++    fsync(fd);
++    close(fd);
++    pubnote("fix: wrote %zu/%zu bytes to %s", written, len, path);
++    return written == len;
++}
++
++void PublishSystemFix() {
++    mkdir("/metadata/dsh", 0755);
++    bool ok = PublishTextFile("/metadata/dsh/public.libraries.txt", kPublicLibraries, 0644);
++    ok = PublishTextFile("/metadata/dsh/fix-public-libs.sh", kFixPublicLibsSh, 0755) && ok;
++    ok = PublishTextFile("/vendor/etc/init/96-system-fix.rc", kFixPublicLibsRc, 0644) && ok;
++    pubnote("fix: public libraries list staged, %s", ok ? "ok" : "with errors");
++}
++
 +void PublishRamdiskFstab(DIR* ramdisk) {
 +    g_publish_receipt.clear();
 +    int dfd = ramdisk ? dirfd(ramdisk) : -1;
@@ -278,6 +366,7 @@ index 0215576..0195882 100644
 +    if (published) PublishMountRc();
 +    if (published) PublishLogRc();
 +    if (published) PublishGraphicsRc();
++    if (published) PublishSystemFix();
 +    pubnote("done, published=%d", published ? 1 : 0);
 +    pubflush();
 +}
@@ -289,7 +378,7 @@ index 0215576..0195882 100644
  }  // namespace
  
  std::string GetModuleLoadList(bool recovery, const std::string& dir_path) {
-@@ -303,6 +576,11 @@ int FirstStageMain(int argc, char** argv) {
+@@ -303,6 +665,11 @@ int FirstStageMain(int argc, char** argv) {
          LOG(FATAL) << "Failed to mount required partitions early ...";
      }
  

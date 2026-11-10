@@ -327,7 +327,8 @@ static int harvest_metadata(void)
 {
 	const char *devs[] = { "/dev/mmcblk0p3", "/dev/block/mmcblk0p3" };
 	const char *files[] = { "first-stage-publish.txt", "fstab.rg34xxsp",
-				"fstab.published" };
+				"fstab.published", "dsh/fix.log",
+				"dsh/public.libraries.txt" };
 	char p[160], dst[160];
 	int i, j, copied = 0, mounted = 0;
 
@@ -348,7 +349,7 @@ static int harvest_metadata(void)
 		return 0;
 	}
 
-	for (j = 0; j < 3; j++) {
+	for (j = 0; j < 5; j++) {
 		char buf[4096];
 		size_t n;
 		FILE *in, *o;
@@ -357,6 +358,16 @@ static int harvest_metadata(void)
 		if (access(p, F_OK) != 0)
 			continue;
 		snprintf(dst, sizeof(dst), "/mnt/DEBUG/meta-%s", files[j]);
+		{
+			/* '/' is not a legal FAT file name character. */
+			char *s = dst;
+
+			while (*s) {
+				if (*s == '/')
+					*s = '_';
+				s++;
+			}
+		}
 		in = fopen(p, "r");
 		if (!in)
 			continue;
