@@ -1953,43 +1953,34 @@ static void start_kmsg_logger(void)
  */
 static void ramoops_marker(FILE *m)
 {
-	const unsigned long pa = 0x7ffc0000UL;	/* tail of the reservation */
-	const size_t len = 0x1000;
-	static const char magic[10] = "DSH-RAMO1";
-	unsigned char *p;
-	unsigned long count = 1;
-	int fd;
+	FILE *iomem;
+	char line[192];
+	int seen = 0;
 
-	fd = open("/dev/mem", O_RDWR | O_SYNC);
-	if (fd < 0) {
-		fprintf(m, "ramo: no /dev/mem (%s), cannot test RAM survival\n",
-			strerror(errno));
+	/*
+	 * sd38 read this reservation straight out of /dev/mem and PID 1 took
+	 * SIGBUS for it, five boots in a row. The region is reserved with
+	 * no-map, so it is not in the linear map and a userspace access is an
+	 * external abort -- a bus error, not a read of stale bytes. Nothing in
+	 * this program may touch it again.
+	 *
+	 * What is left is the kernel's own view of the reservation.
+	 */
+	fprintf(m, "ramo: 0x7ffc0000 sits inside the no-map ramoops reservation, "
+		   "so userspace cannot read it (sd38 proved that with SIGBUS)\n");
+	iomem = fopen("/proc/iomem", "r");
+	if (!iomem) {
+		fprintf(m, "ramo: no /proc/iomem (%s)\n", strerror(errno));
 		return;
 	}
-	p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
-		 (off_t)pa);
-	if (p == MAP_FAILED) {
-		fprintf(m, "ramo: mmap 0x%lx failed (%s)\n", pa, strerror(errno));
-		close(fd);
-		return;
+	while (fgets(line, sizeof(line), iomem) != NULL) {
+		if (strstr(line, "ramoops") == NULL)
+			continue;
+		fprintf(m, "ramo: iomem %s", line);
+		seen++;
 	}
-	if (memcmp(p, magic, sizeof(magic)) == 0) {
-		memcpy(&count, p + 16, sizeof(count));
-		fprintf(m,
-			"ramo: marker SURVIVED the reset, this is reset %lu\n",
-			count + 1);
-		say("ramo: RAM survived\n");
-		count++;
-	} else {
-		fprintf(m, "ramo: marker GONE -- this DRAM did not survive the "
-			   "reset\n");
-		say("ramo: RAM was cleared\n");
-	}
-	memcpy(p, magic, sizeof(magic));
-	memcpy(p + 16, &count, sizeof(count));
-	msync(p, len, MS_SYNC);
-	munmap(p, len);
-	close(fd);
+	fclose(iomem);
+	fprintf(m, "ramo: %d ramoops region(s) in iomem\n", seen);
 }
 
 int main(void)

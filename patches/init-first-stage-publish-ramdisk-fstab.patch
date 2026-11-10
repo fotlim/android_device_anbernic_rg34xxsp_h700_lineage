@@ -1,5 +1,5 @@
 diff --git a/init/first_stage_init.cpp b/init/first_stage_init.cpp
-index 0215576..a396875 100644
+index 0215576..9040bdb 100644
 --- a/init/first_stage_init.cpp
 +++ b/init/first_stage_init.cpp
 @@ -19,6 +19,7 @@
@@ -10,7 +10,7 @@ index 0215576..a396875 100644
  #include <stdlib.h>
  #include <sys/mount.h>
  #include <sys/stat.h>
-@@ -98,6 +99,237 @@ bool ForceNormalBoot(const std::string& cmdline) {
+@@ -98,6 +99,268 @@ bool ForceNormalBoot(const std::string& cmdline) {
      return cmdline.find("androidboot.force_normal_boot=1") != std::string::npos;
  }
  
@@ -150,6 +150,36 @@ index 0215576..a396875 100644
 +    pubnote("logrc: wrote %zd/%zu bytes to %s", written, len, path);
 +}
 +
++/*
++ * The card the hardware composer opens.
++ *
++ * See external/drm_hwcomposer/drm/resourcemanager.cpp: the path comes from the
++ * hwc.drm.device property and defaults to /dev/dri/card0. Until sd39 card0 was
++ * the GPU's render-only node, where drmSetClientCap() answers -EOPNOTSUPP and
++ * the composer gives up. The kernel now gives card nodes to mode-setting
++ * drivers only; this property keeps the intent readable in the log either way.
++ */
++const char kGraphicsRc[] =
++    "# published by first-stage init (sd39)\n"
++    "# The composer opened panfrost's card and died on DRM_CLIENT_CAP_UNIVERSAL_PLANES.\n"
++    "# The display controller is the only card node on this board now.\n"
++    "on post-fs-data\n"
++    "    setprop hwc.drm.device /dev/dri/card0\n";
++
++void PublishGraphicsRc() {
++    const char* path = "/vendor/etc/init/97-graphics-device.rc";
++    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++    if (fd < 0) {
++        pubnote("gfx: open %s failed: %d (%s)", path, errno, strerror(errno));
++        return;
++    }
++    size_t len = strlen(kGraphicsRc);
++    ssize_t written = write(fd, kGraphicsRc, len);
++    fsync(fd);
++    close(fd);
++    pubnote("gfx: wrote %zd/%zu bytes to %s", written, len, path);
++}
++
 +void PublishRamdiskFstab(DIR* ramdisk) {
 +    g_publish_receipt.clear();
 +    int dfd = ramdisk ? dirfd(ramdisk) : -1;
@@ -237,6 +267,7 @@ index 0215576..a396875 100644
 +    }
 +    if (published) PublishMountRc();
 +    if (published) PublishLogRc();
++    if (published) PublishGraphicsRc();
 +    pubnote("done, published=%d", published ? 1 : 0);
 +    pubflush();
 +}
@@ -248,7 +279,7 @@ index 0215576..a396875 100644
  }  // namespace
  
  std::string GetModuleLoadList(bool recovery, const std::string& dir_path) {
-@@ -303,6 +535,11 @@ int FirstStageMain(int argc, char** argv) {
+@@ -303,6 +566,11 @@ int FirstStageMain(int argc, char** argv) {
          LOG(FATAL) << "Failed to mount required partitions early ...";
      }
  
