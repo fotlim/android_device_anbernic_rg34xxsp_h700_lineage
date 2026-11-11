@@ -1,30 +1,42 @@
 #!/bin/bash
-# Build the static first-stage init (the ramdisk /init) with the fstab-publishing
-# patch, and drop it in place as the initramfs' /init.android.
+# Build the static first-stage init (the ramdisk /init) carrying the publishing
+# patches, and drop it in place as the initramfs' /init.android.
+#
+# The patches live in the repository and are applied with patches/apply.sh, so
+# this script only re-applies them (idempotent) and rebuilds the single module.
 set -e
 
 SRC=/root/android/lineage
+REPO=/mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/03_WSA与安卓/anbernic-rg34xxsp
 TMP=/mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/99_临时与截图/_tmp
 OUT=$SRC/out/target/product/rg34xxsp/obj/EXECUTABLES/init_first_stage_intermediates/init
 DST=/root/initramfs-embed/init.android
+JOBS=${JOBS:-4}
 
-echo "=== applying patch ==="
-python3 "$TMP/patch-init-stage.py"
+echo "=== applying patches (idempotent) ==="
+bash "$REPO/patches/apply.sh" "$SRC"
 echo "=== diff summary ==="
-cd $SRC
-git -C system/core diff --stat -- init/first_stage_init.cpp
+git -C "$SRC/system/core" diff --stat -- init/first_stage_init.cpp
 
-echo "=== building init_first_stage ==="
+echo "=== marker strings expected in the new binary ==="
+for m in "ctx: probe %s: access=" "ctx: overlay /vendor/etc/selinux ok" \
+         "platform lines" "publish: "; do
+  printf '  %-46s %s\n' "$m" "$(grep -Fc "$m" "$SRC/system/core/init/first_stage_init.cpp")"
+done
+
+echo "=== building init_first_stage (jobs=$JOBS) ==="
+cd "$SRC"
 source build/envsetup.sh >/dev/null 2>&1 || true
 lunch lineage_rg34xxsp-userdebug >/dev/null 2>&1 || true
-m init_first_stage -j12 2>&1 | tail -25
+m init_first_stage -j"$JOBS" 2>&1 | tail -25
 
 echo "=== result ==="
 ls -l "$OUT"
 file "$OUT"
-echo "--- marker strings ---"
-grep -c "Published" "$OUT" || true
-strings -a "$OUT" | grep -c "for the second stage" || true
+echo "--- markers in the binary (must all be >= 1) ---"
+for m in "ctx: probe %s: access=" "ctx: overlay /vendor/etc/selinux ok"; do
+  printf '  %-46s %s\n' "$m" "$(strings -a "$OUT" | grep -Fc -- "$m")"
+done
 echo "--- install ---"
 cp -f "$OUT" "$DST"
 chmod 755 "$DST"

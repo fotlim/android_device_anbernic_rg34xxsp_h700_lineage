@@ -10,10 +10,14 @@
 #
 # --embed-initramfs builds a card for a kernel Image that already contains the
 # initramfs (CONFIG_INITRAMFS_SOURCE=<dir> at build time). Such a card has no
-# `initrd` line in extlinux.conf on purpose: an external initrd handed to booti
-# would *replace* the built-in one, putting us right back on the uncertain path
-# this mode exists to avoid. Requires a separate build of the kernel -- see
-# docs/BUILD.md.
+# `initrd` line in extlinux.conf: one less file to get wrong. (Historically this
+# comment claimed an external initrd would *replace* the built-in ramdisk. That
+# is wrong: the kernel unpacks the built-in cpio into the rootfs and then unpacks
+# the external initrd into the *same* rootfs, so only same-named files are
+# overwritten -- see init/initramfs.c do_populate_rootfs() + do_name()'s
+# O_TRUNC. An initrd carrying just /init.android is therefore a supported way to
+# swap one ramdisk file without rebuilding the kernel.) Requires a separate build
+# of the kernel -- see docs/BUILD.md.
 #
 # Then write it to the TF card with Rufus (dd mode) or balenaEtcher on Windows.
 #
@@ -139,9 +143,11 @@ die() { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; exit 1; }
 
 # With --embed-initramfs the kernel Image already carries the initramfs (built
 # with CONFIG_INITRAMFS_SOURCE pointing at a directory that has our debug-init
-# as /init). In that mode we must NOT emit an `initrd` line: U-Boot's booti
-# hands any external initrd to the kernel, which *replaces* the built-in one,
-# and we would be back to depending on the exact thing we are trying to avoid.
+# as /init). In that mode we do not emit an `initrd` line: the boot partition
+# then holds exactly one bootable payload, which is the simplest thing to
+# verify. (An external initrd would not break anything -- the kernel unpacks it
+# into the same rootfs after the built-in one and only overwrites same-named
+# files -- it is just a second thing that can go missing.)
 REQUIRED=("$UBOOT" "$DTB" "$KERNEL" "$SUPER")
 [ "$EMBED_INITRAMFS" -eq 1 ] || REQUIRED+=("$RAMDISK")
 for f in "${REQUIRED[@]}"; do
@@ -577,7 +583,7 @@ say "extlinux kernel line present"
 # Assert the two things that a bad card silently gets wrong.
 if [ "$EMBED_INITRAMFS" -eq 1 ]; then
     if grep -qE '^[[:space:]]*initrd[[:space:]]' /tmp/sdcard-check/extlinux/extlinux.conf; then
-        die "embed mode wrote an initrd line -- it would override the built-in initramfs"
+        die "embed mode wrote an initrd line -- switch to a non-embed card instead"
     fi
     # The built-in cpio is uncompressed inside Image, so the logger's banner
     # string is greppable. If it is missing, the wrong kernel got copied in.

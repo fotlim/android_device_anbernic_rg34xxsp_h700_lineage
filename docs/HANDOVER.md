@@ -12,6 +12,10 @@ LineageOS 18.1 在 RG34XXSP 上已经**跑到 Android 第二阶段 init 的 `pos
 
 根因已定位到：**servicemanager 的 `service_contexts` 查不到 `vold`**（`No match for vold in service_contexts` × 489）。平台表内容与 libselinux 后端都已在主机上验证无误（见 §5），所以问题在「设备上 servicemanager 读表那一刻」。修复补丁（v8）已写好并编译通过，**只差重编内核 Image 落卡实测**——而内核构建树被 WSL 的 `/tmp` 清理掉了，需要先重建（见 §6.1）。
 
+> **2026-11-11 晚补记：不需要重编内核了。** 已证明内核会把 external initrd 解到同一个 rootfs 并
+> 覆盖同名文件，所以把 sd49 的 `init.android` 单独打成 `G:\initrd.img` + 在 `extlinux.conf` 加一行
+> `initrd` 即可，**卡已经铺好，直接上机就能验 v8**（见 §6.0）。重编内核降级为备用路线。
+
 ---
 
 ## 1. 硬件与目标
@@ -149,11 +153,79 @@ ctx: /vendor/etc/selinux/vendor_service_contexts: wrote M bytes (ok)
 - 若 probe 显示 plat 路径 `rc=-1 errno=13`（EACCES）或 `errno=2`（ENOENT）→ 直接知道是**权限/路径**问题，按 errno 修。
 - 若 probe 全部成功、vendor 表也写成功，但 `No match` 依旧 → 说明 servicemanager 读的不是这两个文件，转查它自己的 `selinux_status_open` / `getSehandle()` 缓存重建路径。
 
+### 5.5 【2026-11-11 晚】`system.img` 根上真有一个 `/system` 目录（旧猜想已推翻）
+
+一直有个矛盾：staging 的 `out/target/product/rg34xxsp/system/` 顶层**没有** `system` 条目，可设备上
+`execv("/system/bin/init")` 又确实成功，于是怀疑构建时偷加了 `system -> /` 的 symlink。
+
+**实测推翻**：把 `system.img`（Android sparse v1.0）纯 python 解成 raw ext4
+（`/root/artifacts/system.raw`，744,665,088 B）后用 `debugfs` 看：
+
+```
+inode 53   40755  /system        <- 真实目录，Links 14，不是 symlink
+inode 24  120644  /etc    -> /system/etc
+inode 14  120644  /bin    -> /system/bin
+inode 25  120750  /init   -> /system/bin/init
+inode 22  120600  /default.prop -> system/etc/prop.default
+```
+
+`/system` 里是完整一套（`addon.d apex app bin build.prop etc framework lib lib64 media priv-app usr
+xbin` + `product/vendor/system_ext` 三个 symlink）。→ **chroot 到 system 分区根之后 `/system/bin/init`
+天然存在**，不需要任何 `system -> /` 魔法。
+
+**顺带的推论（对 v8 有利）**：`/etc/selinux/plat_service_contexts`（inode 834）与
+`/system/etc/selinux/plat_service_contexts` 是**同一个 inode**，18,876 B、`-rw-r--r--`、含
+`vold u:object_r:vold_service:s0`（:238）与通配 `* u:object_r:default_android_service:s0`（:251）。
+所以 v8 里 plat 组第一条候选**应该** `access()` 成功。若上机后 probe 显示 `errno=0` 而 `No match`
+依旧，方向就只剩「servicemanager 的 `/` 不是 system 分区根（mount namespace 不同）」或「拿 handle
+的时机早于 publish」，别再回去查表内容和 libselinux 后端（§5.3 已经排除过）。
+
+> 仍未解：sd48 日志里 servicemanager 打开的是 `/selinux/vendor_service_contexts`，这个路径**不在**
+> libselinux 的任何候选里（候选只有 `/vendor/etc/selinux/vendor_service_contexts` 和
+> `/vendor_service_contexts`）。`/selinux` 是 `policy.h:25` 的 `OLDSELINUXMNT`，只由 `load_policy.c`
+> 在找不到 selinuxfs 时挂成 selinuxfs。留到上机看 probe 输出再判。
+
 ---
 
 ## 6. 下一步（按顺序做）
 
-### 6.1 先恢复内核构建树（**这是当前唯一的硬阻塞**）
+### 6.0 【2026-11-11 晚新增】不编内核也能上 sd49：external initrd
+
+**先看这一节，再考虑 6.1/6.2 的重编内核路线。** sd49 的 `init.android` 早就编好了
+（`/root/initramfs-embed/init.android`，2,106,832 B，sha256 `004cffa1d4cf48eb809f282a9bea5bea28c941b6d607fac3443eb086ad253b30`），
+缺的只是「把它送进卡上的 Image」。内核允许这么做，所以**不需要重编 Image**：
+
+- `init/initramfs.c` 的 `do_populate_rootfs()` **先解内建 ramdisk、再把 external initrd 解到同一个
+  rootfs**；`do_name()` 里是 `filp_open(..., O_WRONLY|O_CREAT|O_TRUNC, mode)` → 同名文件被**覆盖**。
+  不是「替换整个 ramdisk」。
+- external initrd 解包失败**只打一条日志、不 panic**，内建 ramdisk 完好 → 坏 initrd 也是安全降级。
+- `.config` 有 `CONFIG_BLK_DEV_INITRD=y` + `CONFIG_RD_GZIP=y`、**没有** `CONFIG_INITRAMFS_FORCE`，
+  所以 U-Boot 交来的 initrd 一定被采用；`wait_for_initramfs()` 在 `run_init_process()` 之前。
+- 时序：`kernel_init_freeable()` → `wait_for_initramfs()`（`init/main.c:1707`）→ `kernel_init` 执行 `/init`。
+
+> ⚠️ **`tools/mk-sdcard.sh` 里「external initrd 会 replace 内建 initrd」的注释（第 11-14、140-146、
+> 578-580 行）是错的**，别被它挡住。`--embed-initramfs` 仍然更省事，但不是唯一可行路。
+
+卡上已经铺好（2026-11-11 22:40 完成，可直接上机）：
+
+```bash
+# 生成（在 Windows 上跑，不碰 WSL）
+python tools/make-initrd.py --out G:\initrd.img --gzip \
+    --add 99_临时与截图/_tmp/sd49/init.android:init.android:0755
+# 结果：926,935 B，sha256 3d863e39aeca1d19e2dd170caa5b86af34c0dff3f43cd0d65aaa1288d04fb349
+```
+
+`G:\extlinux\extlinux.conf` 的 `android` 与 `android-v2` 两个 label 各加一行 `initrd /initrd.img`
+（备份在 `G:\extlinux\extlinux.conf.bak-sd48`）。**`G:\Image` 没换，还是 sd48。** 下次开机就是
+「sd48 内核 + sd49 init」。
+
+判读第一件事：`G:\DEBUG\<新boot>\kmsg-*.txt` 里找 `Unpacking initramfs...`（没有
+`Initramfs unpacking failed` 就是成功），再看 publish 段有没有 `ctx: probe ...` 行（有就证明跑的是
+sd49 的 init）。详细判读表见 `rg34xxsp开发日志/2026-11-11-sd49-initrd通道.md` §4。
+
+**如果 initrd 路线也不通**，再回到 6.1/6.2 重编内核 —— 那条路仍然有效，只是要等 WSL 空出来。
+
+### 6.1 先恢复内核构建树（原「当前唯一的硬阻塞」，现降级为备用路线）
 `/tmp/lk-rocknix` 已被 WSL 清理，现存 `/root/rg34xxsp-kernel/linux` 的 `.config` 是 11-06 的旧版（缺 quota、`INITRAMFS_SOURCE=""`）。做法：
 
 ```bash
@@ -309,6 +381,9 @@ bash patches/apply.sh /root/android/lineage
 - 上午–下午（sd47–sd48）：查明 **minigbm 没有 sun4i 后端**（且 `cros_gralloc` 只扫 `renderD*`，而 sun4i 只有 `card0`），且 **`gralloc.minigbm` 没装进 `hw/`** → HWC 静默回退 AOSP 空壳 `gralloc.default.so`（只操作 `/dev/fb0`）。写 `sun4i.c` + card 回退 + `hw/` 安装 + sepolicy 标签 + 一阶 init overlay 三个模块到 `/vendor`。sd48 实测：**发布链全部成功**，但卡在 `post-fs-data`。
 - 晚上（sd49，未上机）：定位 `vold` 每 5 秒 exit 1 → `No match for vold in service_contexts` ×489 → 主机侧用真实表复现证明**表与 libselinux 后端都没问题**（`lookup("vold") → vold_service`、未知名字走 `*` 兜底）→ 结论：设备上 servicemanager 只拿到 vendor 表。写 v8 补丁（把平台表合并进 vendor 表 + 逐路径记录 `access/stat` errno），**编译通过**（`ramdisk/init` 2,106,832 B，sha256 `004cffa1…253b30`）。
 - 收尾：`patches/apply.sh` 扩成一条命令重放 8 个幂等脚本，并验证「337 行 → 989 行」与 sd49 编译产物**逐字节相同**。
+- **深夜（不占 WSL 的一轮）**：证明内核会把 external initrd 解进同一个 rootfs 并覆盖同名文件（`do_name()` 的 `O_TRUNC` + `do_populate_rootfs()` 两次 unpack）→ 于是**不用重编 Image**：`tools/make-initrd.py` 打了一个只含 `/init.android` 的 gzip initrd（`G:\initrd.img`，926,935 B，sha256 `3d863e39…fb349`），`G:\extlinux\extlinux.conf` 两个 android label 加 `initrd /initrd.img`，刷盘缓存并回读校验完成。**sd49 现在可以直接上机。**
+- 同夜解开两个老疑问：① staging 顶层没有 `system` 不是 bug —— `system.img` 根上真有 `/system` 目录（inode 53），根上的 `/etc` `/bin` `/init` 是指向它的 symlink（见 §5.5）；② 因此 `/etc/selinux/plat_service_contexts`（inode 834，18,876 B，含 `vold` 行与 `*` 兜底）**确实存在且可读**，v8 的探针一上机就能给出答案。
+- 发现 `tools/mk-sdcard.sh` 里「external initrd 会 replace 内建 initrd」的注释是错的（三处），已在 §6.0 标注。
 
 ---
 
