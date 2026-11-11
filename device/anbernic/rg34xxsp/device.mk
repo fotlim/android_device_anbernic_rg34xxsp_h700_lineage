@@ -80,6 +80,7 @@ PRODUCT_PACKAGES += \
     android.hardware.graphics.composer@2.2-service \
     android.hardware.graphics.allocator@4.0-service.minigbm \
     android.hardware.graphics.mapper@4.0-impl.minigbm \
+    gralloc.minigbm \
     libdrm
 
 # EGL/GLES 先用 SwiftShader 顶上，把 M1（出画面）解锁。

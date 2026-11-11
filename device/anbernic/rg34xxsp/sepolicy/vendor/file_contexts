@@ -12,5 +12,17 @@
 # rumble_enable node of the joypad driver
 /sys/devices/platform/rocknix-singleadc-joypad(/.*)?   u:object_r:sysfs_leds:s0
 
+# ---------------------------------------------------------------------------
+# Vendor binaries whose file name carries a suffix the platform rules do not
+# cover.  init labels a service from its executable; with no matching rule the
+# file stays vendor_file and the service runs in u:r:init:s0, which is why the
+# allocator could not register its hwbinder service and gatekeeper could not
+# reach its own domain.
+# ---------------------------------------------------------------------------
+/(vendor|system/vendor)/bin/hw/android\.hardware\.graphics\.allocator@4\.0-service\.minigbm  u:object_r:hal_graphics_allocator_default_exec:s0
+/(vendor|system/vendor)/bin/hw/android\.hardware\.gatekeeper@1\.0-service\.software         u:object_r:hal_gatekeeper_default_exec:s0
+/(vendor|system/vendor)/lib(64)?/hw/gralloc\.minigbm\.so                                    u:object_r:same_process_hal_file:s0
+/(vendor|system/vendor)/lib(64)?/hw/android\.hardware\.graphics\.mapper@4\.0-impl\.minigbm\.so  u:object_r:same_process_hal_file:s0
+
 # Wi-Fi / Bluetooth rfkill state
 /sys/class/rfkill(/.*)?             u:object_r:sysfs_bluetooth_writable:s0

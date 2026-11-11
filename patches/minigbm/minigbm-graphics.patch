@@ -1,0 +1,139 @@
+diff --git a/Android.bp b/Android.bp
+index 02e8e5d..d456ef3 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -19,6 +19,7 @@ cc_defaults {
+         "nouveau.c",
+         "radeon.c",
+         "rockchip.c",
++        "sun4i.c",
+         "tegra.c",
+         "udl.c",
+         "vc4.c",
+@@ -106,6 +107,11 @@ cc_library_shared {
+     name: "gralloc.minigbm",
+     defaults: ["minigbm_cros_gralloc_defaults"],
+     srcs: ["cros_gralloc/gralloc0/gralloc0.cc"],
++    // hw_get_module() only looks in <lib>/hw, so without this the module
++    // lands in /vendor/lib64 and the loader silently falls back to the
++    // AOSP gralloc.default stub, which hands out /dev/fb0 memory instead
++    // of dma-bufs the display engine can scan.
++    relative_install_path: "hw",
+ }
+ 
+ cc_library_shared {
+diff --git a/cros_gralloc/cros_gralloc_driver.cc b/cros_gralloc/cros_gralloc_driver.cc
+index e324bce..cc2cd8a 100644
+--- a/cros_gralloc/cros_gralloc_driver.cc
++++ b/cros_gralloc/cros_gralloc_driver.cc
+@@ -35,56 +35,71 @@ cros_gralloc_driver::~cros_gralloc_driver()
+ int32_t cros_gralloc_driver::init()
+ {
+ 	/*
+-	 * Create a driver from rendernode while filtering out
+-	 * the specified undesired driver.
++	 * Pick a DRM node minigbm has a backend for.
+ 	 *
+-	 * TODO(gsingh): Enable render nodes on udl/evdi.
++	 * The usual answer is a render node, and that is tried first so behaviour
++	 * on every other device is unchanged.  But a display controller that is
++	 * also the only allocator (sun4i-drm on sunxi) has no render node at all:
++	 * it advertises DRIVER_MODESET only, so /dev/dri has a card node and
++	 * nothing else.  For those, a card node is exactly the right thing to
++	 * allocate from, because the buffers it hands out are the ones the
++	 * display engine can scan out.
+ 	 */
+ 
+-	int fd;
+-	drmVersionPtr version;
+-	char const *str = "%s/renderD%d";
++	static const char *node_patterns[] = { "%s/renderD%d", "%s/card%d" };
+ 	const char *undesired[2] = { "vgem", nullptr };
+ 	uint32_t num_nodes = 63;
+ 	uint32_t min_node = 128;
+ 	uint32_t max_node = (min_node + num_nodes);
+ 
+-	for (uint32_t i = 0; i < ARRAY_SIZE(undesired); i++) {
+-		for (uint32_t j = min_node; j < max_node; j++) {
++	for (size_t pattern = 0; pattern < ARRAY_SIZE(node_patterns); pattern++) {
++		uint32_t first = pattern == 0 ? min_node : 0;
++		uint32_t last = pattern == 0 ? max_node : num_nodes;
++
++		for (uint32_t j = first; j < last; j++) {
+ 			char *node;
+-			if (asprintf(&node, str, DRM_DIR_NAME, j) < 0)
++			if (asprintf(&node, node_patterns[pattern], DRM_DIR_NAME, j) < 0)
+ 				continue;
+ 
+-			fd = open(node, O_RDWR, 0);
+-			free(node);
+-
+-			if (fd < 0)
++			int fd = open(node, O_RDWR, 0);
++			if (fd < 0) {
++				free(node);
+ 				continue;
++			}
+ 
+-			version = drmGetVersion(fd);
++			drmVersionPtr version = drmGetVersion(fd);
+ 			if (!version) {
+ 				close(fd);
++				free(node);
+ 				continue;
+ 			}
+ 
+-			if (undesired[i] && !strcmp(version->name, undesired[i])) {
++			bool skip = false;
++			for (size_t i = 0; i < ARRAY_SIZE(undesired); i++) {
++				if (undesired[i] && !strcmp(version->name, undesired[i]))
++					skip = true;
++			}
++			drmFreeVersion(version);
++			if (skip) {
+ 				close(fd);
+-				drmFreeVersion(version);
++				free(node);
+ 				continue;
+ 			}
+ 
+-			drmFreeVersion(version);
+ 			drv_ = drv_create(fd);
+-			if (drv_)
++			if (drv_) {
++				drv_log("render_node_scan: using %s\n", node);
++				free(node);
+ 				return 0;
++			}
+ 
+ 			close(fd);
++			free(node);
+ 		}
+ 	}
+ 
+ 	return -ENODEV;
+ }
+-
+ bool cros_gralloc_driver::is_supported(const struct cros_gralloc_buffer_descriptor *descriptor)
+ {
+ 	struct combination *combo;
+diff --git a/drv.c b/drv.c
+index 636cd07..f0adca1 100644
+--- a/drv.c
++++ b/drv.c
+@@ -60,6 +60,7 @@ extern const struct backend backend_synaptics;
+ #ifdef DRV_TEGRA
+ extern const struct backend backend_tegra;
+ #endif
++extern const struct backend backend_sun4i;
+ extern const struct backend backend_udl;
+ #ifdef DRV_VC4
+ extern const struct backend backend_vc4;
+@@ -114,6 +115,7 @@ static const struct backend *drv_get_backend(int fd)
+ 		&backend_tegra,
+ #endif
+ 		&backend_udl,
++		&backend_sun4i,
+ #ifdef DRV_VC4
+ 		&backend_vc4,
+ #endif
