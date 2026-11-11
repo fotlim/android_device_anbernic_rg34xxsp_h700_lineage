@@ -1,5 +1,5 @@
 diff --git a/init/first_stage_init.cpp b/init/first_stage_init.cpp
-index 0215576..ed38f32 100644
+index 0215576..8dd7b00 100644
 --- a/init/first_stage_init.cpp
 +++ b/init/first_stage_init.cpp
 @@ -19,6 +19,7 @@
@@ -10,7 +10,7 @@ index 0215576..ed38f32 100644
  #include <stdlib.h>
  #include <sys/mount.h>
  #include <sys/stat.h>
-@@ -98,6 +99,367 @@ bool ForceNormalBoot(const std::string& cmdline) {
+@@ -98,6 +99,482 @@ bool ForceNormalBoot(const std::string& cmdline) {
      return cmdline.find("androidboot.force_normal_boot=1") != std::string::npos;
  }
  
@@ -222,7 +222,6 @@ index 0215576..ed38f32 100644
 +    "libstdc++.so\n"
 +    "libsync.so\n"
 +    "libvulkan.so\n"
-+    "libwebviewchromium_plat_support.so\n"
 +    "libz.so\n";
 +
 +const char kFixPublicLibsSh[] =
@@ -230,18 +229,32 @@ index 0215576..ed38f32 100644
 +    "# Runs from /vendor/etc/init/96-system-fix.rc at early-init.\n"
 +    "LIST=/system/etc/public.libraries.txt\n"
 +    "SRC=/metadata/dsh/public.libraries.txt\n"
++    "FILT=/metadata/dsh/list.txt\n"
 +    "LOG=/metadata/dsh/fix.log\n"
 +    "echo \"start\" > $LOG\n"
-+    "if cp $SRC $LIST 2>>$LOG; then\n"
++    ": > $FILT\n"
++    "while read -r lin; do\n"
++    "    case \"$lin\" in\n"
++    "        ''|'#'*) continue ;;\n"
++    "    esac\n"
++    "    name=${lin%% *}\n"
++    "    if [ -e /system/lib64/$name ] || [ -e /system/lib/$name ] || [ -e /vendor/lib64/$name ] || [ -e /vendor/lib/$name ]; then\n"
++    "        echo \"$lin\" >> $FILT\n"
++    "    else\n"
++    "        echo \"skipping $name: not in this build\" >> $LOG\n"
++    "    fi\n"
++    "done < $SRC\n"
++    "echo \"kept $(wc -l < $FILT) entries\" >> $LOG\n"
++    "if cp $FILT $LIST 2>>$LOG; then\n"
 +    "    echo \"wrote $LIST directly\" >> $LOG\n"
 +    "    exit 0\n"
 +    "fi\n"
-+    "if mount -o rw,remount /system 2>>$LOG && cp $SRC $LIST 2>>$LOG; then\n"
++    "if mount -o rw,remount /system 2>>$LOG && cp $FILT $LIST 2>>$LOG; then\n"
 +    "    echo \"wrote $LIST after remounting /system rw\" >> $LOG\n"
 +    "    exit 0\n"
 +    "fi\n"
 +    "mkdir -p /dev/dsh_upper /dev/dsh_work 2>>$LOG\n"
-+    "if mount -t overlay overlay -o lowerdir=/system/etc,upperdir=/dev/dsh_upper,workdir=/dev/dsh_work /system/etc 2>>$LOG         && cp $SRC $LIST 2>>$LOG; then\n"
++    "if mount -t overlay overlay -o lowerdir=/system/etc,upperdir=/dev/dsh_upper,workdir=/dev/dsh_work /system/etc 2>>$LOG && cp $FILT $LIST 2>>$LOG; then\n"
 +    "    echo \"wrote $LIST through an overlay of /system/etc\" >> $LOG\n"
 +    "    exit 0\n"
 +    "fi\n"
@@ -276,6 +289,107 @@ index 0215576..ed38f32 100644
 +    ok = PublishTextFile("/metadata/dsh/fix-public-libs.sh", kFixPublicLibsSh, 0755) && ok;
 +    ok = PublishTextFile("/vendor/etc/init/96-system-fix.rc", kFixPublicLibsRc, 0644) && ok;
 +    pubnote("fix: public libraries list staged, %s", ok ? "ok" : "with errors");
++}
++
++// Graphics modules are the one thing a ramdisk publish cannot write as text:
++// they are hundreds of kilobytes of code, and they live in vendor.img, inside
++// the 4 GiB super partition where every change costs a whole-card rewrite.
++// Carrying them in the initramfs and overlaying /vendor/lib64/hw and
++// /vendor/bin/hw keeps the loop at three files on the boot partition. The upper
++// layer sits on /dev's tmpfs, like the fstab overlay; overlayfs holds its own
++// reference to that tmpfs, so the files stay reachable even after the second
++// stage puts a new filesystem on /dev.
++struct VendorGraphicsFile {
++    const char* ramdisk_path;
++    const char* install_path;
++    bool executable;
++};
++
++const VendorGraphicsFile kVendorGraphicsFiles[] = {
++    {"vendor-overlay/lib64/hw/gralloc.minigbm.so",
++     "/vendor/lib64/hw/gralloc.minigbm.so", false},
++    {"vendor-overlay/lib64/hw/android.hardware.graphics.mapper@4.0-impl.minigbm.so",
++     "/vendor/lib64/hw/android.hardware.graphics.mapper@4.0-impl.minigbm.so", false},
++    {"vendor-overlay/bin/hw/android.hardware.graphics.allocator@4.0-service.minigbm",
++     "/vendor/bin/hw/android.hardware.graphics.allocator@4.0-service.minigbm", true},
++};
++
++bool OverlayDir(const char* target, const char* upper, const char* work) {
++    mkdir(upper, 0755);
++    mkdir(work, 0755);
++    std::string opts = std::string("lowerdir=") + target + ",upperdir=" + upper +
++                       ",workdir=" + work;
++    int rc = mount("overlay", target, "overlay", 0, opts.c_str());
++    pubnote("gfx: overlay %s rc=%d errno=%d (%s)", target, rc, rc ? errno : 0,
++            rc ? strerror(errno) : "ok");
++    return rc == 0;
++}
++
++bool CopyFromRamdisk(int dfd, const char* src_rel, const char* dst, mode_t mode) {
++    int in = openat(dfd, src_rel, O_RDONLY | O_CLOEXEC);
++    if (in < 0) {
++        pubnote("gfx: %s is not on the ramdisk: %d (%s)", src_rel, errno, strerror(errno));
++        return false;
++    }
++    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
++    if (out < 0) {
++        pubnote("gfx: open %s failed: %d (%s)", dst, errno, strerror(errno));
++        close(in);
++        return false;
++    }
++    char buf[65536];
++    ssize_t n;
++    size_t total = 0;
++    bool ok = true;
++    while ((n = read(in, buf, sizeof(buf))) > 0) {
++        ssize_t off = 0;
++        while (off < n) {
++            ssize_t w = write(out, buf + off, static_cast<size_t>(n - off));
++            if (w <= 0) {
++                ok = false;
++                break;
++            }
++            off += w;
++            total += static_cast<size_t>(w);
++        }
++        if (!ok) break;
++    }
++    fsync(out);
++    close(out);
++    close(in);
++    if (ok && chmod(dst, mode) != 0) {
++        pubnote("gfx: chmod %s failed: %d (%s)", dst, errno, strerror(errno));
++    }
++    if (ok && access(dst, R_OK) != 0) {
++        pubnote("gfx: %s is not readable after the copy: %d (%s)", dst, errno,
++                strerror(errno));
++        ok = false;
++    }
++    pubnote("gfx: copied %s -> %s (%zu bytes, %s)", src_rel, dst, total,
++            ok ? "ok" : "failed");
++    return ok && total > 0;
++}
++
++void PublishVendorGraphics(int dfd) {
++    if (dfd < 0) {
++        pubnote("gfx: no ramdisk handle, skipping the vendor overlay");
++        return;
++    }
++    const bool lib_ok = OverlayDir("/vendor/lib64/hw", "/dev/vg_lib_upper", "/dev/vg_lib_work");
++    const bool bin_ok = OverlayDir("/vendor/bin/hw", "/dev/vg_bin_upper", "/dev/vg_bin_work");
++    int copied = 0;
++    for (const auto& file : kVendorGraphicsFiles) {
++        const bool is_bin = strncmp(file.install_path, "/vendor/bin/", 12) == 0;
++        if (is_bin ? !bin_ok : !lib_ok) {
++            pubnote("gfx: skipping %s, its overlay is not mounted", file.install_path);
++            continue;
++        }
++        if (CopyFromRamdisk(dfd, file.ramdisk_path, file.install_path,
++                            file.executable ? 0755 : 0644)) {
++            copied++;
++        }
++    }
++    pubnote("gfx: vendor graphics files published: %d", copied);
 +}
 +
 +void PublishRamdiskFstab(DIR* ramdisk) {
@@ -367,6 +481,7 @@ index 0215576..ed38f32 100644
 +    if (published) PublishLogRc();
 +    if (published) PublishGraphicsRc();
 +    if (published) PublishSystemFix();
++    PublishVendorGraphics(dfd);
 +    pubnote("done, published=%d", published ? 1 : 0);
 +    pubflush();
 +}
@@ -378,7 +493,7 @@ index 0215576..ed38f32 100644
  }  // namespace
  
  std::string GetModuleLoadList(bool recovery, const std::string& dir_path) {
-@@ -303,6 +665,11 @@ int FirstStageMain(int argc, char** argv) {
+@@ -303,6 +780,11 @@ int FirstStageMain(int argc, char** argv) {
          LOG(FATAL) << "Failed to mount required partitions early ...";
      }
  
