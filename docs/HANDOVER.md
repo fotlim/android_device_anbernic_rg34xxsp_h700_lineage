@@ -170,11 +170,29 @@ cd /root/rg34xxsp-kernel/linux
 rm -f usr/initramfs_data.cpio usr/initramfs_data.o usr/built-in.a arch/arm64/boot/Image
 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j4 Image
 ```
+
 仓库里的 `tools/build-kernel.sh` 是这条流程的脚本化版本（含 3d/3e/3f 三节处理孤儿文件 + 断言），优先用它。
 
+> ⚠️ **`build-kernel.sh` 第 509 行会 `--set-str INITRAMFS_SOURCE ''`**（它的设计是「内核 + DTB 从头编」，initramfs 交给别处）。**我们的启动镜像不是这样**：sd31 之后的 Image 全部内建 `/root/initramfs-embed`（`init`=debug-init、`init.android`=真 init、`vendor-overlay/`=图形模块）。照原样跑 `build-kernel.sh` 会编出一个**没有 initramfs** 的 Image，卡上一启动就是黑的。跑完必须补：
+> ```bash
+> ./scripts/config --file .config --set-str INITRAMFS_SOURCE "/root/initramfs-embed"
+> make ARCH=arm64 olddefconfig
+> rm -f usr/initramfs_data.cpio usr/initramfs_data.o usr/built-in.a arch/arm64/boot/Image
+> make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j4 Image
+> ```
+> 验证：`ls -l arch/arm64/boot/Image` 应 ≈ 35.5 MB（35,551,240 B = sd48）；只有 32 MB 左右说明 initramfs 没进（sd46 及以前是 35,158,024 B，加图形模块后变大）。
+
 ### 6.2 编 sd49 Image
-`/root/initramfs-embed/init.android` **已经换成 sd49 的 init**（2,106,832 B，sha256 `004cffa1d4cf48eb809f282a9bea5bea28c941b6d607fac3443eb086ad253b30`，含 v8 的 5 个标记串）。所以只要内核树恢复，跑 `_tmp/build-sd49.sh` 即可（8 步，断言已修好）。
-产物应是 `/root/artifacts/Image.sd49`，再拷到 `G:\Image`（**Windows 侧 Copy-Item + Write-VolumeCache + sha256 核对**，别用 WSL `/mnt/g` 直写）。
+`/root/initramfs-embed/init.android` **已经换成 sd49 的 init**（2,106,832 B，sha256 `004cffa1d4cf48eb809f282a9bea5bea28c941b6d607fac3443eb086ad253b30`，含 v8 的 5 个标记串）。所以内核树一恢复，跑：
+
+```bash
+VERSION=sd49 tools/build-image.sh
+```
+
+它做四件事：断言 `.config`（`INITRAMFS_SOURCE` + quota 四项 + panfrost/sun4i + SELinux + binderfs）、清掉旧 initramfs 产物强制重打、编 `Image`、**断言 6 个标记串**（`stage 9: about to execl`、`wdt: wrote 0x16aa0000`、`console: framebuffer console unbound`、`pmap.txt`、`publish: `、`sun4i-drm`），最后落到 `/root/artifacts/Image.sd49` 与 `C:\Users\LinOcean\Downloads\Image.sd49`。
+它还会拦一个坑：**Image 小于 34 MB 就报错**（说明 initramfs 没打进去——`tools/build-kernel.sh` 第 509 行会清空 `INITRAMFS_SOURCE`）。
+
+然后写卡：`G:\Image` 用**Windows 侧** `Copy-Item` + `Write-VolumeCache` + sha256 核对（别用 WSL `/mnt/g` 直写）。
 
 ### 6.3 上机判读
 | 观察 | 结论 | 下一步 |
@@ -235,7 +253,8 @@ bash patches/apply.sh /root/android/lineage
 | 路径 | 作用 |
 |---|---|
 | `tools/mk-sdcard.sh` | 出 TF 卡镜像（hybrid MBR + GPT + super + boot 分区 + boot.scr + extlinux.conf） |
-| `tools/build-kernel.sh` | 打补丁 + 配置断言 + 编 Image |
+| `tools/build-kernel.sh` | 打补丁 + 配置断言 + 编 Image（**注意它会清空 `INITRAMFS_SOURCE`**） |
+| `tools/build-image.sh` | 把 `initramfs-embed` 打进 Image：断言 `.config` → 重打 initramfs → 编 → 断言标记串 → 落地 |
 | `tools/debug-init/debug-init.c` | 包装真 init：心跳 / MMIO / 显示探针 / 看门狗控制 / 采集 `/metadata` 与 `/data` 证据 / `execl("/init.android")` |
 | `tools/audit-patches.py` | 检查补丁新增行是否真进了树（`git apply --reject` 会静默丢 hunk） |
 | `patches/apply.sh` | 一条命令重放全部 init / minigbm 改动（幂等） |
@@ -266,7 +285,7 @@ bash patches/apply.sh /root/android/lineage
 
 1. 读 §5，理解「vold 起不来 → vdc 等 50 秒 → post-fs-data 卡死」这条链。
 2. 按 §6.1 恢复内核树（**注意 quota 四项和 `INITRAMFS_SOURCE`**）。
-3. 跑 `_tmp/build-sd49.sh` 出 `Image.sd49`，写 `G:\Image`。
+3. 跑 `VERSION=sd49 tools/build-image.sh` 出 `Image.sd49`，写 `G:\Image`。
 4. 上机，读 `G:\DEBUG\meta-first-stage-publish.txt` 里的 8 条 `ctx: probe` 结果，按 §6.3 的判读表分流。
 5. contexts 通了之后，重点看 `render_node_scan: using /dev/dri/card0`、`Gralloc4`、`drm_atomic_commit` 三个标记——那是 sd48 已经铺好、但还没机会跑到的一段路。
 
