@@ -1,12 +1,16 @@
-# 交接文档（2026-11-09 20:30）
+# 交接文档（2026-11-11 20:30）
 
-给接手的同事。这份文档的目标是：**读完就知道现在卡在哪、已经排除过什么、下一步该动哪一行**，不用重走弯路。
+给接手的同事。目标：**读完就知道现在卡在哪、已经排除过什么、下一步该动哪一行**，不用重走弯路。
+
+上一份 `docs/HANDOVER.md`（2026-11-09）描述的是「只剩显示」的阶段，那部分已经全部解决。**以本文为准。**
 
 ---
 
 ## 0. 一句话现状
 
-LineageOS 18.1（Android 11）已经**在这台机器上完整启动**（内核、eMMC、WiFi、蓝牙、GPU、手柄、RTC、音频全部工作，`debug-init` 能落日志），**只剩显示**：屏幕有背光、无图像。显示管线的寄存器已经逐项读回来核对过，**全部符合预期**，但面板不出画面。当前候选收敛到「面板固件变体」与「BLEND_ROUTE 语义」两条，sd21 镜像已备好待上机验证。
+LineageOS 18.1 在 RG34XXSP 上已经**跑到 Android 第二阶段 init 的 `post-fs-data`**：SELinux 策略加载、`/data` 挂载、`/metadata` 挂载、apexd、ueventd、logd、servicemanager、hwservicemanager 全部正常，**卡在 `vold` 起不来**（`Unable to start VoldNativeService`，exit 1）→ `vdc checkpoint` 等 50 秒超时 → `post-fs-data` 永远走不完 → **到不了 `class_start hal`，SurfaceFlinger 和 zygote 从未启动**。
+
+根因已定位到：**servicemanager 的 `service_contexts` 查不到 `vold`**（`No match for vold in service_contexts` × 489）。平台表内容与 libselinux 后端都已在主机上验证无误（见 §5），所以问题在「设备上 servicemanager 读表那一刻」。修复补丁（v8）已写好并编译通过，**只差重编内核 Image 落卡实测**——而内核构建树被 WSL 的 `/tmp` 清理掉了，需要先重建（见 §6.1）。
 
 ---
 
@@ -16,296 +20,300 @@ LineageOS 18.1（Android 11）已经**在这台机器上完整启动**（内核�
 |---|---|
 | 设备 | Anbernic RG34XXSP |
 | SoC | Allwinner H700（`sun50i-h616` 系，4×A53） |
-| GPU | Mali-G31 MP2（Bifrost，panfrost 驱动，日志 `mali-g31 id 0x7093`） |
-| 内存 | **1 GiB LPDDR3**（用户选 Android 11 的原因） |
-| 屏幕 | 720×480 3:2，SPI 初始化 + RGB 并行（PD0–PD27） |
-| 手柄 | 单 ADC（`rocknix-singleadc-joypad`，树外模块，已收编） |
-| PMIC | AXP2202（日志里是 AXP717/AXP20x 驱动） |
-| WiFi | RTL8821CS（SDIO，`mmc@4021000`） |
+| GPU | Mali-G31 MP2（panfrost，`renderD128`；**只有 render 节点，没有 modeset**） |
+| 显示控制器 | sun4i-drm（`card0`，`DRM_GEM_DMA`，dumb buffer 是 CMA 连续内存） |
+| 内存 | 1 GiB LPDDR3（选 Android 11 的原因） |
+| 屏幕 | 720×480 3:2，SPI 初始化 + RGB 并行（PD0–PD27），**v2 面板** |
 | 存储 | 系统在 TF 卡（`mmc0` = `/dev/mmcblk0`）；eMMC 是 `mmc1` |
-
-目标产物：`lunch lineage_rg34xxsp-userdebug`，设备树在 `device/anbernic/rg34xxsp`。
+| 目标 | `lunch lineage_rg34xxsp-userdebug`，设备树在 `device/anbernic/rg34xxsp` |
 
 ---
 
-## 2. 仓库与目录
+## 2. 仓库与工作树（注意：路径已变）
 
 ```
-仓库      C:\Users\LinOcean\Documents\deepseek-harness\default-workspace\anbernic-rg34xxsp
-内核树    WSL /tmp/lk-rocknix           （Linux 7.1.2 + ROCKNIX 补丁）
-Android   WSL /root/android/lineage     （repo sync 完成，74 GB，已 mka droid 通过）
-initramfs WSL /root/initramfs-embed     （init = debug-init，init.android = 真 init）
-产物      WSL /root/artifacts           （各版本 Image 与 debug-init 二进制）
-镜像      F:\dsh-dl\                    （sd*.img + rufus-4.10p.exe + dmesg-*.txt）
-旧镜像    F:\dsh-dl\old-images\
+仓库      C:\Users\LinOcean\Documents\deepseek-harness\default-workspace\03_WSA与安卓\anbernic-rg34xxsp
+Android   WSL /root/android/lineage            （AOSP 树，super.img 就在这里出）
+内核树    WSL /root/rg34xxsp-kernel/linux      （Linux 7.1.2 + ROCKNIX 补丁；**/tmp/lk-rocknix 已不存在**）
+initramfs WSL /root/initramfs-embed            （init = debug-init，init.android = 真 init，vendor-overlay/ = 图形模块）
+产物      WSL /root/artifacts                  （Image.sdNN 与 debug-init.sdNN）
+卡        G:\  （FAT，盘符会漂；Image / boot.scr / extlinux/ / DEBUG/）
 ```
 
-**git 状态**：
-
-- 仓库 HEAD **`3483a5d`**（`docs: handover notes for the display work`），工作区干净。
-- 内核树在分支 **`rg34xxsp-display`**，HEAD **`0ab7af527`**（route 回滚，见 §5 候选 A）。原来是 detached HEAD，已顺手建了分支。`master` 指向 `f66469d99`（上游 7.4-rc2），**不要切过去**。
+- 仓库 HEAD **`19c5ad1`**（`init: carry the rebuilt graphics modules in and overlay them onto /vendor`），工作区干净。
+- 内核树 `/root/rg34xxsp-kernel/linux` 是 **Linux 7.1.2，单 commit `03e2778d1`**，`.config` 是 **11-06 20:37 的旧版**（`# CONFIG_QFMT_V2 is not set`、`CONFIG_INITRAMFS_SOURCE=""`）——**不能直接拿来编**，见 §6.1。
 
 ---
 
-## 3. 已经彻底解决、不要重做的部分
+## 3. 版本演进（sd31 → sd49，每一版解决什么）
 
-### 3.1 卡必须用 hybrid MBR（这是「黑屏 + 指示灯亮」的根因）
-
-我们的 U-Boot（`kernel/uboot/H700-DDR3-u-boot-sunxi-with-spl.bin`，661,504 B）与 ROCKNIX 镜像里那份**逐字节完全相同**，但 ROCKNIX 用 `label: dos`，我们最初用 GPT。
-
-- **U-Boot 侧**：只注册了 `part_dos`，没有 `part_efi`。纯 GPT 的保护性 MBR 里只有一个 `type=0xEE` 整盘项 → `part list mmc 0 -bootable` 失败 → `fstype mmc 0:1` 失败 → `scan_dev_for_boot` 从不执行 → extlinux 与 boot.scr 都不会被扫描 → 黑屏 + 指示灯亮 + 卡上没有任何面包屑文件。
-- **内核侧**：不能退回纯 MBR。`block/partitions/msdos.c:115` 把 `info->volname[0] = 0`，MBR 永远没有 `PARTNAME` → 没有 `/dev/block/by-name/*` → `fstab.rg34xxsp` 全失效。
-
-**解法：hybrid MBR**（`tools/mk-sdcard.sh` 第 2b 节，python 直接改 sector 0）：
-`[1] 0x0C bootable @2048 +131072`（U-Boot 用，**必须是第一项**，这样 boot 分区编号为 1）
-`[2] 0xEE @1`（内核 `is_pmbr_valid()` 判为 `GPT_MBR_HYBRID` 后继续解析 GPT，分区名保住）
-双解析器已用 python 复现两份 C 代码验证（header/entries CRC 都 match）。**这一步之后内核就起来了。**
-
-### 3.2 `androidboot.boot_devices` 必须是 `4020000.mmc`
-
-不是 `mmcblk0`。依据 `system/core/init/devices.cpp:186-212` 的 `FindPlatformDevice()`（`soc` 是 simple-bus 不是 platform bus，返回值去掉 sysfs 前缀 = `4020000.mmc`），以及 `devices.cpp:321-368`（只有 `is_boot_device` 才建 `/dev/block/by-name/*`）。写错会导致 `first_stage_init.cpp:302` 挂载失败 = `LOG(FATAL)` = init abort = 重启。
-
-### 3.3 `linux` vs `kernel` 关键字：**已推翻，别再想**
-
-`web_fetch` 拿到 U-Boot v2026.01 `boot/pxe_utils.c`：`keywords[]` 里 `{"kernel", T_KERNEL}` 和 `{"linux", T_LINUX}` 都有，`parse_label()` 里 `case T_KERNEL: case T_LINUX:` 共用同一分支。二进制里搜不到独立 `linux` token 是因为编译器合并了重复短串——**字符串表法对短 token 不可靠**。现在 `mk-sdcard.sh` 写 `kernel /Image`，两种都合法。
-
-### 3.4 「满屏横向亮线」的一个已修根因：DE33 planes 驱动没编进去
-
-`sun50i_planes.c` / `.h` 是 ROCKNIX `0002-rg35xx-enable-HDMI-LCD.patch` 里 `[PATCH 03/21]` 新增的文件。`build-kernel.sh` 原来用 `git apply --reject`，**子补丁 01/02/03/04 的 hunk 全被拒**（上下文漂移），只留下新建文件。
-
-后果：mixer 照样 probe（compatible 在 `sun8i_mixer_of_table` 里），屏幕能亮，但 DE33 的 plane→通道映射寄存器（CCU `0x24`/`0x28`）从未被写过 → 出未配置的原始扫描线。
-
-**修法**：`build-kernel.sh` 有 `3d/6`（02/03/04）与 `3e/6`（01/05/06/07/16 + 0003）两节，用 python 按 `^From [0-9a-f]{40} ` 从 0002 里切子补丁，逐个幂等应用（`apply_if` 按判据跳过），末尾九条源码断言 + 编完 Image 后七条 compatible 断言，缺一即 `exit 1`。另有 `3f/6` 补 `pwm-sun8i.c` 的 Kconfig/Makefile（同类孤儿文件，不补则背光永远不亮）。
-
-### 3.5 裸写 `\\.\PhysicalDriveN` 彻底不可用
-
-写进去 **+1 扇区位移**、每 64 KiB **首扇区丢失**，而且**一律返回成功**。dd / C# P/Invoke / 对齐缓冲 / `LOCK_VOLUME` / `DISMOUNT` / 补偿写全试过，无一可行。→ 写卡只能走 **Rufus 整盘写（DD 模式）**，或已挂载 FAT 的 `G:\` 文件级 `Copy-Item`。
-
-### 3.6 其它已验证正确、不用再查的
-
-- 内建 initramfs 本身是好的：`usr/initramfs_data.cpio` 2,768,896 B、`init`=debug-init、`init.android`=真 init，`.config` 与内建前只差 5 个符号。
-- `allwinner,sun50i-h616-tcon-top` 在 Image 里 count=0 **是正常的**：DTS 首串是它，但驱动表里只有 `sun50i-h6-tcon-top`，靠第二串兜住。
-- `allwinner,sun50i-h616-tcon-lcd` **不是** of_match 表项（只有 `0161` 用它做 `of_device_is_compatible` 判断），两边都靠 DTS 第二串 `allwinner,sun8i-r40-tcon-lcd` 匹配 `sun8i_r40_lcd_quirks`。
-- pinctrl 的 `io_disabled` 缺失（56 条 `unsupported function io_disabled` 报错）**不影响功能**：`pinctrl-sunxi.c:484-491` 对不支持函数是 `continue` 不是失败，只是 sleep state 空。
-- `possible_crtcs=0` 不是 bug：`drm_crtc.c:307-310` 给 primary 补、`sun4i_crtc.c:246-253` 给 overlay 补。
-- 面板 SPI 三线 9-bit 通路软件层完全成立（`spi-gpio` 报 `SPI_BPW_RANGE_MASK(1,32)`，`mipi_dbi_typec1_command` 走硬件 9-bit 路径）。
-- 背光默认就是亮的：`pwm_bl.c:212` 无 `brightness-levels` 时 `dft_brightness = max_brightness / 2`，**不是 0**。
-- `smem_start=0x0` 是 `drm_leak_fbdev_smem` 未开导致的（`drm_fb_helper.c:363` 置 `FBINFO_HIDE_SMEM_START`，`drm_fbdev_dma.c:219` 跳过赋值），**不是故障**。
-- 与 ROCKNIX 的差异已逐项排除：`.config`（只差 5 项且全 `=n`）、dtb 文件（v1 与 ROCKNIX 的 sha256 完全相同）、面板固件（逐字节相同）、`disp_regs`（ROCKNIX 也没有）、`tcon_top` 新旧版（两边都旧版）、blender base（两边都 `DE2_BLD_BASE 0x1000`）。
+| 版本 | 解决 / 发现 |
+|---|---|
+| sd21–sd31 | 显示（v2 面板 DTB + DE blender `route=layer->index`）；Android 一阶 init；内核编入 SELinux；`androidboot.boot_devices=soc/4020000.mmc` |
+| sd32–sd33 | 一阶 init 在 SwitchRoot 后把 ramdisk 上的 `fstab.rg34xxsp` 发布到 `/vendor/etc/`（`/vendor` remount 被 EACCES 拒 → 改用 overlayfs，成功）；用 `/metadata/first-stage-publish.txt` 做「不会丢的收据」 |
+| sd34–sd35 | 设备 rc 里**根本没有 `mount_all`** → 一阶 init 发布 `/vendor/etc/init/99-mount-data.rc`；`mount_all` 仍 EINVAL，因为内核缺 `CONFIG_QFMT_V2`/`CONFIG_QUOTA_TREE` → 补内核配置，**`/data` 挂上了**（`Quota mode: journalled`） |
+| sd36–sd41 | debug-init 采集 `/data` 证据；**看门狗**：H616 走 sun6i-a31 fallback、缺 `0x16aa0000` 钥匙，驱动「停止」实际仍在倒数 → 补 match/key 并手写钥匙，设备从 28 秒复位变成能活 500 秒以上 |
+| sd39–sd42 | DRM 把 panfrost 这个 render-only GPU 分到 `card0`，HWC 打开它 `SET_CLIENT_CAP` 返回 `-95` → 内核改成只有 `DRIVER_MODESET` 才拿 PRIMARY；另解绑 fbcon（`/sys/class/vtconsole/*/bind=0`） |
+| sd43–sd44 | kmsg 跟随进程遇 `EPIPE` 后无法重开 `/dev/kmsg`（`/dev` 已卸）→ 用同一 fd 重试；logcat 落 `/data/local/tmp/dsh-android.log`，下次启动拷成 `p01…p12.txt` + `pmap.txt` |
+| sd44–sd45 | zygote 崩溃真因 #1：**`/system/etc/public.libraries.txt` 在镜像里不存在** → 一阶 init 发布清单 + `/metadata/dsh/fix-public-libs.sh` 在 `on early-init` 装进 `/system/etc` |
+| sd45–sd46 | 崩溃真因 #2：清单里有本产品没有的 `libwebviewchromium_plat_support.so` → nativeloader 视为致命 → 安装前按 `/system/lib[64]`、`/vendor/lib[64]` 过滤（sd46 后 zygote 的 WebView 崩溃归零） |
+| sd47–sd48 | 图形栈真因：**minigbm 没有 sun4i 后端**（`grep panfrost external/minigbm` = 0，`cros_gralloc` 只扫 `renderD*` 而 sun4i 只有 `card0`），且 **`gralloc.minigbm` 没装进 `hw/`**（`Android.bp` 缺 `relative_install_path`、`device.mk` 没列）→ HWC 静默回退到 AOSP 空壳 `gralloc.default.so`（只操作 `/dev/fb0`）→ 写 `sun4i.c` 后端 + card 回退 + 装 `hw/` + sepolicy 标签 + 一阶 init 把三个模块 overlay 到 `/vendor` |
+| sd48 实测 | 发布链**全部成功**（`gfx: copied … 3`、`/data` 挂上），但**卡在 `post-fs-data`**：`vold` 每 5 秒起一次、立刻 exit 1 |
+| sd49（待上机） | 定位 `vold` 死因 → servicemanager `No match for vold` → 主机复现证明表与后端没问题 → v8 补丁把平台表镜像进 vendor 表并逐路径记录 `access/stat` 结果 |
 
 ---
 
-## 4. 显示链路：现在到底哪一步是好的
+## 4. 已经彻底解决、**不要重做**的部分
 
-**全部 bind 成功**（sd13 之后每次启动都一样）：
-`sun50i-planes→1100000.planes`、`sun8i-mixer→1280000.mixer + 12a0000.mixer`、`sun8i-tcon-top→6510000.tcon-top`、`sun4i-tcon→6511000.lcd-controller + 6515000.lcd-controller`、`sun4i-drm→display-engine`、`sun8i-pwm→300a000.pwm`、`pwm-backlight→backlight`、`panel-mipi→spi0.0`。`/sys/kernel/debug/devices_deferred` 为空。
+### 4.1 卡必须用 hybrid MBR（「黑屏 + 指示灯亮」的根因）
+U-Boot 只注册了 `part_dos`（无 `part_efi`），纯 GPT 的保护性 MBR 让 `part list mmc 0 -bootable` 失败 → extlinux / boot.scr 从不被扫描。而纯 MBR 又会让内核没有 `PARTNAME` → 没有 `/dev/block/by-name/*` → fstab 全失效。
+解法在 `tools/mk-sdcard.sh` 第 2b 节：`[1] 0x0C bootable @2048`（U-Boot 用，**必须第一项**）+ `[2] 0xEE @1`（内核识别为 hybrid 后继续解析 GPT）。
 
-**寄存器实测（sd21 之前那版 sd18 的 dump，逐项核对全部正确）**：
+### 4.2 `androidboot.boot_devices` 必须是 `soc/4020000.mmc,4020000.mmc`
+不是 `mmcblk0`。依据 `system/core/init/devices.cpp` 的 `FindPlatformDevice()`（`soc` 是 simple-bus，返回值去掉 sysfs 前缀 = `4020000.mmc`），且只有 `is_boot_device` 才建 `/dev/block/by-name/*`。写错 → `first_stage_init` 挂载失败 = `LOG(FATAL)` = 重启。
 
-| 位置 | 实测 | 期望 | 判定 |
-|---|---|---|---|
-| CCU `0x24` CHN2CORE | `0x00100014` | 手算一致 | ✅ |
-| CCU `0x28` PORT02CHN | `0x00000980` | 手算一致 | ✅ |
-| CCU `0x2c` PORT12CHN | `0x00000a21` | 手算一致 | ✅ |
-| mixer0 top `0x1008100` | CTL=1, STATUS=0x11, SIZE=0x01df02cf, CLK=1 | 720×480 | ✅ |
-| mixer0 blend `+0x80` ROUTE | 0x1（sd14）/ 0x6（sd15–sd18） | ? | ⚠️ 见 §5 |
-| blend `+0x90` MODE ×5 | `0x03010301` | `BLEND_MODE_DEF` | ✅ |
-| blend BKCOLOR/OUTSIZE | `0xff000000` / `0x01df02cf` | 黑 / 720×480 | ✅ |
-| ui ch6 `+0x00` ATTR | `0xff000401` | alpha=0xff, FBFMT=4=XRGB8888, EN=1 | ✅ |
-| ui ch6 `+0x04` SIZE | `0x01df02cf` | 720×480 | ✅ |
-| ui ch6 `+0x0c` PITCH | `0xb40` | 2880 = 720×4 | ✅ |
-| ui ch6 `+0x10` LADDR | `0x7de00000` | CMA `0x7dc00000..` 内 | ✅ |
-| tcon-top `+0x1c` PORT_SEL | `0x20` | 0003 hack 值 | ✅ |
-| tcon0 GCTL | `0x80000000` | `TCON_ENABLE` | ✅ |
-| tcon0 TCON0_CTL | `0x800001e0` | 使能 + CLK_DELAY=30 | ✅ |
-| tcon0 DCLK | `0x80000003` | gate on, div=3 | ✅ |
-| tcon0 BASIC0..3 | `02cf01df` / `032c002d` / `042a0013` / `00030003` | 720×480, H_TOTAL=813, V_TOTAL=1066 | ✅ |
-| tcon0 IO_POL | `0x04000000` | 只有 `DCLK_DRIVE_NEGEDGE`（固件 `bus_flags=0xa` = DE_HIGH\|DRIVE_NEGEDGE，代码只对 `DE_LOW` 动作） | ✅ |
-| tcon0 IO_TRI | `0` | 所有输出打开 | ✅ |
-| pinctrl PD | `22222222 ×3, 00022222` | PD0–PD27 = `0x2` = `lcd0` | ✅ |
-| pwm `0x300a000` | `+004=1`, `+020/+024=0x10` | 已使能 | ✅ |
+### 4.3 显示（全部解决）
+- **面板是 v2**：`android-v2` DTB + `panels/anbernic,rg34xx-sp-v2-panel.panel`；v1 固件 = 黑屏/亮线。
+- **`BLEND_ROUTE` 要的是层号（`layer->index`），不是通道号**。sd14（index，`0x1`）出密集亮线、sd15（channel，`0x6`）纯黑 → 反转定论。
+- `boot.scr` 与 `extlinux.conf` 必须都用 v2；`extlinux.conf` **必须 LF**（CRLF 会让 U-Boot sysboot 失败而退回 boot.scr）。
+- DE33 planes 驱动必须真编进去（`sun50i_planes.c` 是 ROCKNIX 子补丁新增文件，`git apply --reject` 会静默丢 hunk → 用 `tools/audit-patches.py` 查）。
 
-**面板命令确实发出去了**：`panel_mipi_prepare()` 期间 2 ms 内发完 49 条 `mipi_dbi_typec1_command`（`ff,30` / `ff,52` / `ff,01` / `e3,01` / `0a,fd` / … / `b8,26` + 第二轮 `ff,02` / `b0,05` … / `b8,0f`），计数 `cmd=11`(EXIT_SLEEP)=2、`cmd=29`(DISPLAY_ON)=2、`cmd=04`(GET_ID)=2、`cmd=10`(ENTER_SLEEP)=0。`MIPI Display ID: 000000` 是三线无 MISO 的正常结果（`spi-gpio.c:76` `if (spi->mode & SPI_3WIRE) return 0;`）。
+### 4.4 看门狗（曾经坑了很多轮）
+H616 匹配到 sun6i-a31 fallback，**缺 `0x16aa0000` 钥匙**，所以 `WDIOC_SETOPTIONS/DISABLECARD` 看起来成功、实际计数仍在降。修法：内核加 H616 的 match/key，并且 debug-init 启动时直接手写钥匙到 `0x16aa0000`、**不再 re-arm**。实测设备从 uptime≈28 s 复位变成能活 694–697 s。
 
-**`fbcon` 早在 4.03 秒就把启动文字画进 fb0**（`Console: switching to colour frame buffer device 90x30`）——用户看不到文字，所以断点确实在 fb0 内存与面板之间，不是「没人往 fb0 写」。
+### 4.5 `/data` 挂载链（sd35 起稳定）
+三处缺一不可：
+1. 一阶 init 在 `SwitchRoot` 之前把 ramdisk 上的 `fstab.rg34xxsp` 写到 `/vendor/etc/fstab.rg34xxsp`（`/vendor` 是 ro，`MS_REMOUNT` 被拒 EACCES(13)，**改用 overlayfs 挂 `/vendor/etc`** 后写入成功）；
+2. 设备 rc（`init.rg34xxsp.rc`）里**从来没有 `mount_all`** → 一阶 init 额外发布 `/vendor/etc/init/99-mount-data.rc`（`on fs` + `mount_all /vendor/etc/fstab.rg34xxsp`）；
+3. 内核必须有 `CONFIG_QUOTA=y`、`CONFIG_QUOTA_TREE=y`、`CONFIG_QFMT_V2=y`、`CONFIG_QUOTACTL=y`（fs_mgr 会 `tune2fs -Oquota` 永久打开 quota 特性，内核读不了就 EINVAL）。
 
-**唯一还没被解释的矛盾**：以上全部正确，面板依然「有背光、无图像」。
+### 4.6 `public.libraries.txt`（zygote 崩溃 #1）
+镜像里**不存在** `/system/etc/public.libraries.txt`（这条产品继承链没有 `media_system.mk`）。一阶 init 发布清单到 `/metadata/dsh/`，`/vendor/etc/init/96-system-fix.rc` 的 `on early-init` 执行 `fix-public-libs.sh` 装进 `/system/etc`（直接 cp → remount rw → overlay `/system/etc` 三级兜底）。
 
----
-
-## 5. 当前两条候选（这是接手后要盯的）
-
-### 候选 A：`BLEND_ROUTE` 要的是层号还是物理通道
-
-sd14 与 sd15 恰好构成对照：
-
-| 版本 | 内核 | `BLEND_ROUTE` | 屏幕 |
-|---|---|---|---|
-| sd14 | 原版（`layer->index`） | `0x1` | **密集亮线** |
-| sd15 | 改成 `layer->channel` | `0x6` | **纯黑** |
-
-**亮线 = 扫描链路在工作、数据用错格式/时序画了出来；纯黑 = 什么都没合成。** 所以结论是：`BLEND_ROUTE` 要的是**层号（index）**，`PORT02CHN` 那个 CCU mux 才是「层 → 物理通道」的映射。`layer->channel` 那个改动是**错误方向**。
-
-> 这一条是本鱼自己改错又改回来的。`sun8i_mixer.c:315` 现在是 `route |= layer->index << ...`，已提交为内核树 `0ab7af527`（在分支 `rg34xxsp-display` 上），**sd21 用的 Image 就是这一版**。
-
-### 候选 B：面板是 v2 变体，v1 固件点不亮它
-
-`panel_mipi.c:447` 用 dtb 里 panel 节点的**第一个 compatible 字符串**拼固件名：`panels/<compatible>.panel`。
-
-| dtb | panel 首串 | 固件 | 命令风格 |
-|---|---|---|---|
-| `...-rg34xx-sp.dtb`（v1） | `anbernic,rg34xx-sp-panel` | 562 B | `ff(30) ff(52) ff(01) e3(01) 0a(fd) …`（ILI9341/ST7789 系厂商寄存器序列） |
-| `...-rg34xx-sp-v2-panel.dtb`（v2） | `anbernic,rg34xx-sp-v2-panel` | 826 B | `d7(61 74 97) d0(10) 60(ff) 61(ff) …`（ILI9881 系 gamma/GIP 表） |
-
-**如果这台机器装的是另一颗 IC，v1 序列会让它「有背光但黑屏」——正是我们一直看到的现象。** sd21 的 extlinux `default` 已改成 `android-v2`，就是为了一次性判掉这一条。
-
-（附带线索：ROCKNIX 通用镜像在这台机器上跑起来时，U-Boot 用的是内嵌的 rg35xx-2024 dtb，`panel@0` 首串是 `anbernic,rg35xx-plus-panel`（640×480）——**它连面板固件都不是 rg34xx-sp 那份**，所以「ROCKNIX 能亮」这件事不能作为「我们的 v1 固件是对的」的证据。）
+### 4.7 图形栈（sd47–sd48 的四处修复）
+- `external/minigbm/sun4i.c`：新增 `backend_sun4i`（`.name="sun4i-drm"`，`bo_create=drv_dumb_bo_create`、`bo_map=drv_dumb_bo_map`、`bo_import=drv_prime_bo_import`、`bo_destroy=drv_dumb_bo_destroy`），格式组合 `ARGB8888/XRGB8888/ABGR8888/XBGR8888/RGB565/BGR565` + `BO_USE_RENDER_MASK|BO_USE_SCANOUT`，纹理组 `R8/NV12/NV21/YVU420`。
+- `cros_gralloc_driver::init()`：`node_patterns[] = {"%s/renderD%d", "%s/card%d"}` 两轮扫描（sun4i 没有 `DRIVER_RENDER`，`/dev/dri` 里只有 `card0`）。
+- `Android.bp` 给 `gralloc.minigbm` 加 `relative_install_path: "hw"`；`device.mk` 加 `gralloc.minigbm`。
+- `sepolicy/vendor/file_contexts` 补 `.minigbm`/`.software` 后缀四条规则。
+- **为什么不写 panfrost 后端**：panfrost 是 render-only + shmem，`drm_gem_dma_prime_import_sg_table` 要求单段连续（`drm_prime_get_contiguous_size(sgt) < size` 就 EINVAL）；而 EGL 是 SwiftShader，渲染在 CPU，GPU 不在分配路径上。
+- 三个模块（`gralloc.minigbm.so` 80,632 B、`mapper@4.0-impl.minigbm.so` 199,656 B、`allocator@4.0-service.minigbm` 77,608 B）随 initramfs 携带，一阶 init overlay 到 `/vendor/{lib64,bin}/hw`。**HWC 的 `.so` 不用换**（它只 include 头文件、运行时 `hw_get_module` 取 gralloc 模块）。
 
 ---
 
-## 6. 待上机的 sd21（已备好）
+## 5. 当前阻塞：`vold` 起不来 → `post-fs-data` 卡死
+
+### 5.1 现象（sd48 实测，`kmsg-107acea1.txt`）
+```
+14,1055 init: Userdata mounted using /vendor/etc/fstab.rg34xxsp result : 0
+14,1056 Command 'mount_all /vendor/etc/fstab.rg34xxsp' action=fs took 445ms and succeeded
+14,1061 starting service 'exec 3 (/system/bin/vdc checkpoint markBootAttempt)'
+14,1166 Service 'exec 3' (pid 188) exited with status 22 waiting took 51.215000 seconds
+14,1214 exec 5 (/system/bin/vdc checkpoint prepareCheckpoint)  → 同样 51.285 s 后 exit 22
+14,2509 exec 7 (/system/bin/vdc --wait cryptfs init_user0)     → 一直挂着
+```
+- `ServiceManager: Waiting for service 'vold' on '/dev/binder'...` 共 **47 次**；`vold` 启动 **33 次**，每次 `exited with status 1`。
+- `vdc` 的退出码 22 = `EINVAL`，正是 `system/vold/vdc.cpp` 的 `getServiceAggressive()` 等满 50 秒（5000×10 ms）拿不到 `vold` 后 `exit(EINVAL)`。
+- 服务启动全集里**没有 surfaceflinger、没有 zygote**（只 Parsing 了 rc）→ 因为 `class_start hal` 在 `on boot`，而 `post-fs-data` 从未完成。
+
+### 5.2 死因链
+1. `vold` 起来后走 `VolumeManager::start()`（会 `unmountAll()` + `Devmapper::destroyAll()`，但只删 `vold:` 前缀的设备，**不会拆 system/vendor**）→ 返回 0 → 走到 `VoldNativeService::start()` → `BinderService<VoldNativeService>::publish()` 失败 → `main.cpp:117` 打 `Unable to start VoldNativeService` 并 `exit(1)`。
+2. `publish()` 失败是因为 servicemanager 的 `canAdd` 拒绝了它：`frameworks/native/cmds/servicemanager/Access.cpp:141` 打 `SELinux: No match for vold in service_contexts.`（p01.txt 里 **489 次**；其它名字只有 1–5 次）。
+3. `No match` 只可能来自 `selabel_lookup(handle, &tctx, name, SELABEL_CTX_ANDROID_SERVICE) != 0`。而 `plat_service_contexts` 最后一行是通配 `*  u:object_r:default_android_service:s0`，`service_lookup()` 对 `*` 也匹配 → **只要平台表被加载，任何名字都不可能 No match**。
+4. → **servicemanager 拿到的只有 vendor 表**（`vendor_service_contexts` 379 B，只有 `vendor.lineage.power.IPower`，没有通配、没有 vold），说明 `access("/system/etc/selinux/plat_service_contexts", R_OK)` 在设备上失败了。
+
+### 5.3 已经排除的（别再查）
+| 假设 | 结论 |
+|---|---|
+| 平台表内容坏了 | **否**。system.img 里 18,876 B / 251 行，`238:vold  u:object_r:vold_service:s0`，LF、无 CR、xattr `u:object_r:service_contexts_file:s0` |
+| libselinux 没编 android backend | **否**。`Android.bp` 的 `common_CFLAGS` 无 `-DNO_ANDROID_BACKEND`、srcs 含 `label_backends_android.c`；`.so` 导出 `selinux_android_service_context_handle`、静态库有 `label_backends_android.o` |
+| 表 + 后端组合有问题 | **否**。主机侧把 `libselinux/src/*.c` 全编 + 真实表喂进去：`selabel_open` 非 NULL，`lookup("vold") → u:object_r:vold_service:s0`、`lookup("任意不存在名字") → default_android_service`（通配兜底） |
+| `selabel_fini` / `selinux_raw_to_trans_context` 失败 | **否**。`-DDISABLE_SETRANS` 下是 `strdup` stub |
+| servicemanager 链的是 vendor 版 handle | **否**。`readelf -sW` 的 UND 只有 `selinux_android_service_context_handle`；`vndservicemanager` 根本没装 |
+| 表加载报错 | **否**。logcat 里 `Error getting service context handle`、`line N error`、`missing fields`、`Multiple different specifications` 全为 0 |
+| `/selinux` 是真实目录 | **否**。镜像根目录没有 `selinux` 条目；它是 `load_policy.c:288` 在 `verify_selinuxmnt` 失败时 `mount(selinuxfs, "/selinux")` 出来的，avc 里的路径只是字符串 |
+| vold 的域转换有问题 | **否**。avc 里 `comm="vold" … scontext=u:r:vold:s0`，域是对的 |
+| 缺 `/system/bin/vold` | **否**。system.img 里有（1,034,248 B）；后期的 `cannot execv … ENOENT` 是 init 反复重启后的次生现象 |
+
+### 5.4 待验证的（sd49 的 v8 补丁就是为此写的）
+v8 会把**平台表合并进 vendor 表**（vendor 路径整段启动期可达），并在收据里逐个记录 8 条候选路径的 `access()` + `stat()` 结果：
 
 ```
-F:\dsh-dl\rg34xxsp-sd21.img
-8,589,934,592 B
-sha256 490975A9DE21A34B58982CA0E00F99A84E5D0AB2DB82F095C0E97C5F60F81C84
-内核    /root/artifacts/Image.sd21 = 34,043,912 B, sha256 c1c0d1defe167e7a9f0672216ce7d8d3366b16e184be8eb03d0663b4d72cb844
-debug-init /root/artifacts/debug-init.sd21 = 671,768 B, sha256 d200beaeeabbc42801de33fdbbd6eb91cd5fb77834d09079a29b565a6e87b7fd
+ctx: probe /system/etc/selinux/plat_service_contexts: rc=… errno=… size=… mode=…
+ctx: probe /vendor/etc/selinux/vendor_service_contexts: …
+ctx: overlay /vendor/etc/selinux ok
+ctx: /vendor/etc/selinux/vendor_service_contexts: keeping N platform lines
+ctx: /vendor/etc/selinux/vendor_service_contexts: wrote M bytes (ok)
 ```
+收据落在 `/metadata/first-stage-publish.txt`，下次启动被 debug-init 拷成 `G:\DEBUG\meta-first-stage-publish.txt`。
 
-三个改动：
-
-1. **内核 route 回滚**为 `layer->index`（见 §5 候选 A）。
-2. **`extlinux.conf` 的 `default` 改成 `android-v2`**，且所有 append 行加了 **`drm_leak_fbdev_smem=1`**（让 `FBIOGET_FSCREENINFO` 能给出 fb0 物理地址）。
-3. **`display_probe()` 砍成单阶段**：涂不透明红 → 把 route 强制设为 `0x1` → **等 8 秒**。之前的八阶段各睡 3 秒，每次都被掐断（sd16/sd18 都在中途没了），**被掐断的测试什么都不能证明**。
-
-`display_probe()` 同时会打印 `S0:`（fb0 `smem_start` / pagemap / ch6 LADDR 三者对比）、`S0b:`（若地址不同则把 LADDR 改成 fb0 真实物理地址再涂红 6 秒）、`D1:`（route 强制前后的值）。
-
-**上电后按这三种结果分流**：
-
-| 观察 | 结论 | 下一步 |
-|---|---|---|
-| 出红 8 秒 | route 定论 | 只剩格式/时序：查 `FBFMT`（当前 `4`=XRGB8888）与面板总线位宽 |
-| 又出亮线 | 我们涂的缓冲不是通道扫的缓冲 | 看 `S0:` 的地址比较结果 |
-| 仍全黑 | 断点在 blender 之后 | 查 `GLOBAL_DBUFF`（DE33 从不 latch，见下）/ `OUTCTL` / tcon 输出极性 |
-
-读 `G:\DEBUG\dmesg.txt`，重点 `S0:` / `S0b:` / `D1:` 三行 + `handing over` 是否出现（这次应该能跑到底）。
+- 若 probe 显示 plat 路径 `rc=-1 errno=13`（EACCES）或 `errno=2`（ENOENT）→ 直接知道是**权限/路径**问题，按 errno 修。
+- 若 probe 全部成功、vendor 表也写成功，但 `No match` 依旧 → 说明 servicemanager 读的不是这两个文件，转查它自己的 `selinux_status_open` / `getSehandle()` 缓存重建路径。
 
 ---
 
-## 7. 还没验证过的候选（sd21 之后如果还不行）
+## 6. 下一步（按顺序做）
 
-- **`GLOBAL_DBUFF` 从不 latch**：`sun8i_mixer.c:331` 的 `regmap_write(engine->regs, SUN8I_MIXER_GLOBAL_DBUFF, ENABLE)` 被 `if (de_type != SUN8I_MIXER_DE33)` 包住。DE2/DE3 用 shadow bank 需要这个 latch 才把新配置推到前台。**但 ROCKNIX 内核同样跳过、ROCKNIX 也点不亮这块屏** → 更像上游共享 bug 而非我们的移植问题。sd20 曾想测它，被砍掉了；`debug-init` 里手写 `*(mixer+0x08) = 1` 即可验证。
-- **`SUN4I_TCON0_HV_IF_REG 0x58`** 全树只有定义、**无人写**，保持复位值 0。若面板是 HV 模式（不是 DE 模式），这个寄存器可能要配。
-- **`mixer0 top GLOBAL_STATUS = 0x11`** 语义未知（`sun8i_mixer.h` 没定义任何 STATUS 位宏）。若它含 underflow/error 位，可能是线索。
-- **`tcon0 GINT0 = 0xc8000003`**：两次 dump 时机不同（sd13 是 `0x00008003`），说明 `drm_crtc_vblank_on()` 确实开了中断。不是故障，但比较寄存器时要注意时序。
-
----
-
-## 8. 工作流与坑（照做能省几小时）
-
-### 8.1 改 debug-init → 出镜像
+### 6.1 先恢复内核构建树（**这是当前唯一的硬阻塞**）
+`/tmp/lk-rocknix` 已被 WSL 清理，现存 `/root/rg34xxsp-kernel/linux` 的 `.config` 是 11-06 的旧版（缺 quota、`INITRAMFS_SOURCE=""`）。做法：
 
 ```bash
-# 1. 编译（-static 必须；产物要 readelf -d 确认无 NEEDED）
-aarch64-linux-gnu-gcc -static -O2 -Wall -Wextra -o /root/artifacts/debug-init.X /path/debug-init.c
-
-# 2. 装进 initramfs（注意必须 chmod 755）
-cp /root/artifacts/debug-init.X /root/initramfs-embed/init && chmod 755 /root/initramfs-embed/init
-
-# 3. 重编内核（改了 .config 里的 INITRAMFS_SOURCE 才会重新打包）
-cd /tmp/lk-rocknix
+cd /root/rg34xxsp-kernel/linux
+# 1) 打 ROCKNIX 补丁（/root/rg34xxsp-kernel/patches/*，0002 需要按 ^From [0-9a-f]{40} 切子补丁）
+# 2) 配置：base.config + 仓库 kernel/fragment.config（后者已含 quota 四项）
+#    cat base.config fragment.config > .config && make ARCH=arm64 olddefconfig
+# 3) 打开内建 initramfs
+#    scripts/config --file .config --set-str INITRAMFS_SOURCE "/root/initramfs-embed"
+# 4) 断言（缺一即停）
+#    CONFIG_QFMT_V2=y  CONFIG_QUOTA_TREE=y  CONFIG_QUOTACTL=y  CONFIG_QUOTA=y
+#    CONFIG_DRM_PANFROST=y  CONFIG_DRM_SUN4I=y  CONFIG_INITRAMFS_SOURCE="/root/initramfs-embed"
+# 5) 编
 rm -f usr/initramfs_data.cpio usr/initramfs_data.o usr/built-in.a arch/arm64/boot/Image
-make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j12 Image
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j4 Image
+```
+仓库里的 `tools/build-kernel.sh` 是这条流程的脚本化版本（含 3d/3e/3f 三节处理孤儿文件 + 断言），优先用它。
 
-# 4. 出镜像
-cd /mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/anbernic-rg34xxsp
-bash tools/mk-sdcard.sh --out /root/rg34xxsp-sdNN.img \
-  --kernel /root/artifacts/Image.X \
-  --super /root/android/lineage/out/target/product/rg34xxsp/super.img \
-  --embed-initramfs --force
+### 6.2 编 sd49 Image
+`/root/initramfs-embed/init.android` **已经换成 sd49 的 init**（2,106,832 B，sha256 `004cffa1d4cf48eb809f282a9bea5bea28c941b6d607fac3443eb086ad253b30`，含 v8 的 5 个标记串）。所以只要内核树恢复，跑 `_tmp/build-sd49.sh` 即可（8 步，断言已修好）。
+产物应是 `/root/artifacts/Image.sd49`，再拷到 `G:\Image`（**Windows 侧 Copy-Item + Write-VolumeCache + sha256 核对**，别用 WSL `/mnt/g` 直写）。
 
-# 5. 拷到 F 盘（必须从 WSL 侧 cp，Windows 访问 \\wsl.localhost\...\root 会 Access denied）
-cp /root/rg34xxsp-sdNN.img /mnt/f/dsh-dl/
+### 6.3 上机判读
+| 观察 | 结论 | 下一步 |
+|---|---|---|
+| 出现 `ServiceManager: Waiting for service 'vold'` 之后 vold 不再 exit 1 | contexts 修好了 | 看 `class_start hal` → `render_node_scan: using /dev/dri/card0` → `Gralloc4` → `drm_atomic_commit` |
+| vold 仍 exit 1，`No match for vold` 仍在 | v8 没覆盖到 | 看 `meta-first-stage-publish.txt` 里 8 条 probe 的 errno |
+| 出现 `ctx: probe … errno=13` | `/system` 的 SELinux/DAC 拒绝 | 改走「一阶 init 直接 chmod/chcon」或换表路径 |
+| 出现 `class_start hal` 且 `render_node_scan: using /dev/dri/card0` | 图形链打通了 | 看 SurfaceFlinger 是否 abort、`drm_atomic_commit` 是否 >0 |
+
+---
+
+## 7. 工作流与坑（照做能省几小时）
+
+### 7.1 编译（**注意并发**）
+- **用户在另一个会话里编类原生时会明确说「不要过分使用 wsl」**，此时不要跑 `m`/`make`；只读源码 + 单文件 `gcc -fsyntax-only`。
+- 必须编时用 `-j2`/`-j4`，别用 `-j12`（会抢满 12 核）。
+- `source build/envsetup.sh` **不能配 `set -u`**（`envsetup.sh:375 ZSH_VERSION: unbound variable`）。
+- **PowerShell 里不要内联带引号/管道的 bash**，一律写成 `_tmp/*.sh` 再 `wsl -u root -e bash /mnt/c/.../x.sh`。嵌套引号会被 PowerShell 拆坏（`unexpected EOF while looking for matching '`）。
+
+### 7.2 一阶 init 的补丁怎么重放
+`system/core/init/first_stage_init.cpp` 现在 **989 行**，全部改动用一条命令重放：
+
+```bash
+bash patches/apply.sh /root/android/lineage
 ```
 
-### 8.2 读卡上日志
+它先 `git apply patches/init-first-stage-publish-ramdisk-fstab.patch`（基础版），再按顺序跑 8 个**幂等**脚本：
+`patch-mount-data-rc.py`、`patch-framework-logs-rc.py`、`patch-graphics-device-rc.py`、`patch-logcat-to-file.py`、
+`patch-public-libraries.py`、`patch-public-libs-filter.py`、`patch-vendor-graphics.py`、`patch-selinux-contexts.py`。
 
-- 卡挂成 `G:`（不是 `Z:`，盘符会漂）。`Get-Volume G` 常报 `Full Repair Needed`。
-- **文件读不出来（`The file or directory is corrupted and unreadable`，err 1392）先跑 `cmd /c "chkdsk G: /F"`** —— FAT 目录项大小坏了，数据通常没丢。sd13 的 166,273 B 变成 164,352 B 后可正常读。
-- **PowerShell 5.1 的 `[System.Text.Encoding]::Latin1` 不可用**（报 `不能对 Null 值表达式调用方法`）→ 读日志统一走 WSL 的 `grep -a` / `tail -c` / `xxd`。
-- 日志里有 `\x0a` 之类的转义序列，**必须 `grep -a`**。
+**已验证**：从 `git checkout -- init/first_stage_init.cpp`（337 行）开始跑 `apply.sh`，产出与 sd49 编译所用的文件**逐字节相同**（989 行）。改任何补丁后请重跑这条验证。
 
-### 8.3 脚本执行
+**坑**：patch 脚本若用 `re.sub()` 拼 C 字面量，替换串会吃掉反斜杠 → 生成带真换行的字符串字面量 → `-Winvalid-pp-token` 编译失败。改用字符串切片重建整段 literal。
 
-- **WSL 跑脚本必须 `wsl -u root -e bash <LF 文件>`**。`wsl -e bash -c "..."` 会被 PowerShell 引号解析搞坏（`TerminatorExpectedAtEndOfString`）。
-- 多行脚本写成独立 `.sh` 文件：`[System.IO.File]::WriteAllText("$env:TEMP\x.sh", ($sh -replace "`r`n","`n"))`，再 `wsl -u root -e bash /mnt/c/.../Temp/x.sh`。**不要用 `Out-File -Encoding utf8`**（带 BOM 导致 `set: command not found`）。
-- 写卡上文本文件用 `New-Object System.Text.UTF8Encoding($false)` 避免 BOM。
-- 本机**没有 `pwsh`**，只有 Windows PowerShell 5.1；测试脚本要存 `.ps1` 用 `powershell -NoProfile -ExecutionPolicy Bypass -File` 跑（`Add-Type` 定义的类型只在同一进程内有效）。
+### 7.3 写卡
+- 裸写 `\\.\PhysicalDriveN` **彻底不可用**（+1 扇区位移、每 64 KiB 首扇区丢失、且一律返回成功）。整盘写只能 Rufus（DD 模式）。
+- 日常换内核只走**已挂载 FAT 的文件级** `Copy-Item` + `Write-VolumeCache` + sha256 核对。WSL 的 `/mnt/g` 与 Windows 的 `G:` 会不同步，写完必须从 Windows 侧核。
+- 卡上文本用 UTF-8 **无 BOM**；`extlinux.conf` 必须 **LF**（CRLF 会让 U-Boot sysboot 失败）。
 
-### 8.4 git 提交
+### 7.4 读卡上日志
+- 卡挂成 `G:`（盘符会漂）。读不出来先 `cmd /c "chkdsk G: /F"`。
+- 日志里有转义序列，**必须 `grep -a`**。
+- 每次启动的文件名带 boot_id：`ran-<id>.txt`、`kmsg-<id>.txt`、`dmesg-<id>.txt`；`pmap.txt` 说明 `p01…p12.txt` 分别来自哪个源文件。
 
-- 仓库无 `user.name`/`user.email`，历史作者是 `dsh <dsh@local>` → 必须 `git -c user.name='dsh' -c user.email='dsh@local' commit`。
-- **PowerShell here-string 当 commit message 会被当成多个 pathspec**（`error: pathspec 'every' did not match any file(s)`）→ 把 message 写进文件再 `git commit -F <file>`。
+### 7.5 git 提交
+- 仓库无 local config → `git -c user.name=dsh -c user.email=dsh@local commit`。
+- **commit message 写进文件再 `git commit -F`**（PowerShell here-string 会被拆成 pathspec）。
 
-### 8.5 看门狗（曾经坑了三次）
-
-`sunxi-wdt` 默认 **16 秒**到期硬复位（`WDT_MAX_TIMEOUT 16`，`nowayout=0`）。**任何超过 16 秒的探测都会被掐断**，而掐断的日志看起来像「跑完了」。sd13（涂色 18 s）、sd14（13 s sleep）、sd16（9 s + dump）全被这个坑过。
-
-`debug-init` 的 `wdt_start()` 现在用 **`ioctl(fd, WDIOC_SETOPTIONS, WDIOS_DISABLECARD)` 直接把定时器关掉**，`wdt_stop()` 在交棒前用 `WDIOS_ENABLECARD` 重新武装（这样 Android 真挂死仍会重启）。日志里应看到 `watchdog: timer disabled for the probe` 与 `watchdog: timer re-armed for handover`。
-
-> 之前试过 fork 子进程喂狗，**不可靠**：父子共享同一 `wd_data`，`watchdog_release()` 的 magic 位也是共享的，子进程任何异常都会静默丢掉整轮。
-
----
-
-## 9. 其它待办（与显示无关，排在显示之后）
-
-1. `panel_mipi_get_modes()` 每次都调 `drm_connector_set_panel_orientation()` → 每次 probe 新建属性 → 属性泄漏 + `drm_mode_object.c:46` / `:246` 双 WARN（日志里能看到两次）。
-2. 补打 `0155`（`sun4i_rgb.c:225` `DRM_MODE_CONNECTOR_Unknown` → `DRM_MODE_CONNECTOR_DSI`，现在日志里显示 `Unknown-1`）。
-3. 补打 `0162` 的 `pinctrl-sun50i-h616.c` 部分（PD0–PD27 加 `SUNXI_FUNCTION(0x7, "io_disabled")`，消 56 条报错；已知不影响功能）。
-4. panfork-mesa 接 18.1（需 libdrm ≥ 2.4.109 + Bifrost 分支；本机是 G31 MP2 不是 G78）。
-5. `kernel/dts` 收回自维护（见 `kernel/dtb/README.md` 的两条路线）。
-6. 低内存优化（1 GiB 内存）：`PRODUCT_DISABLE_SCUDO` / `TARGET_VNDK_USE_CORE_VARIANT` / `PRODUCT_MINIMIZE_JAVA_DEBUG_INFO`。
-7. 8 GiB 镜像写到 32 GB 卡上会触发 `GPT: Primary header thinks Alt. header is not at the end of the disk` / `GPT:16777215 != 62333951` 警告（**不影响启动**）。可让 `mk-sdcard.sh` 把 altLBA 留 0 或按卡实际大小生成。
+### 7.6 诊断证据要「不会丢」
+- `printk.devkmsg=on` 已写进 bootargs（否则 init 的日志会被 printk ratelimit 吞掉——sd32 就这样白丢过一轮）。
+- 关键结论走 `/metadata/<file>` + `fsync` + `sync()`（**只 fsync 不刷目录项**，sd46 曾因此丢掉整批 `meta-*`）。
+- `pstore`/ramoops 虽然 bind 成功，但**从未抢救到过 panic 文本**，不要指望它。
 
 ---
 
-## 10. 显示链路完整清单（Image 内 compatible 已验证 count=1）
-
-| compatible | 驱动 | ROCKNIX 子补丁 |
-|---|---|---|
-| `allwinner,sun50i-h616-de33-planes` | `sun50i_planes.c` | 03 |
-| `allwinner,plane-mapping`（属性） | `sun50i_planes.c` | 03 |
-| `allwinner,sun50i-h616-de33-mixer-0` | `sun8i_mixer.c` | 04 |
-| `allwinner,sun50i-h616-display-engine` | `sun4i_drv.c` | 07 |
-| `allwinner,sun50i-h616-tcon-tv` | `sun4i_tcon.c` | 05 |
-| `allwinner,sun8i-r40-tcon-lcd` | `sun4i_tcon.c` | 16 |
-| `allwinner,sun50i-h616-hdmi-phy` | `sun8i_hdmi_phy.c` | 06 |
-| `allwinner,sun50i-h616-pwm` | `pwm-sun8i.c` | 0008 |
-
-外加 0003 的 tcon-top 首行 hack（`writel(0x20, regs + TCON_TOP_PORT_SEL_REG)`）。
-
----
-
-## 11. 关键文件索引
+## 8. 文件索引
 
 | 路径 | 作用 |
 |---|---|
-| `tools/mk-sdcard.sh` | 出 TF 卡镜像（hybrid MBR + GPT + super + boot 分区 + boot.scr 面包屑 + extlinux.conf） |
-| `tools/build-kernel.sh` | 打补丁 + 配置断言 + 编 Image（3d/3e/3f 三节处理孤儿文件） |
-| `tools/debug-init/debug-init.c` | 包装真 init：快照 / MMIO dump / 显示探针 / 看门狗控制，最后 `execl("/init.android")` |
-| `tools/audit-patches.py` | 逐条检查补丁的**新增行**是否真进了树（`git apply --reject` 与 `patch -F3` 都会静默丢 hunk） |
-| `tools/expect-regs.py` | 打印 720×480 正确状态下每个寄存器的期望值 |
-| `docs/DISPLAY-THEORY.md` | 已排除嫌疑表 + 候选 + DE33 地址换算表 + 一次上机切分候选的判定表 |
-| `docs/HARDWARE.md` | 真机硬件事实 |
-| `docs/STATUS.md` / `docs/BUILD.md` / `docs/PORTING.md` | 早期构建与移植记录 |
+| `tools/mk-sdcard.sh` | 出 TF 卡镜像（hybrid MBR + GPT + super + boot 分区 + boot.scr + extlinux.conf） |
+| `tools/build-kernel.sh` | 打补丁 + 配置断言 + 编 Image |
+| `tools/debug-init/debug-init.c` | 包装真 init：心跳 / MMIO / 显示探针 / 看门狗控制 / 采集 `/metadata` 与 `/data` 证据 / `execl("/init.android")` |
+| `tools/audit-patches.py` | 检查补丁新增行是否真进了树（`git apply --reject` 会静默丢 hunk） |
+| `patches/apply.sh` | 一条命令重放全部 init / minigbm 改动（幂等） |
+| `patches/minigbm/` | `sun4i.c`、`minigbm-graphics.patch`、`README.md`（为什么是 sun4i 不是 panfrost） |
+| `patches/patch-*.py` | 一阶 init 的各项发布能力（fstab / mount_all / 日志 / 图形 / 公共库 / vendor 图形模块 / **selinux contexts**） |
+| `kernel/fragment.config` | 内核配置增量（含 quota 四项；**必须以它为准**） |
+| `device/anbernic/rg34xxsp/` | 设备树、`device.mk`、`BoardConfig.mk`、`vendor.prop`、`sepolicy/vendor/file_contexts`、`manifest.xml` |
+| `docs/DISPLAY-THEORY.md` | 显示链路的已排除嫌疑表（历史资料，已解决） |
 
 ---
 
-## 12. 建议的接手顺序
+## 9. 还没做的（排在当前阻塞之后）
 
-1. 读 §5 与 §6，理解「route 要 index 不要 channel」这个反转。
-2. 让用户刷 `sd21`（sha256 `490975A9...81C84`），按 §6 的三种结果分流。
-3. 若出红 → 转查格式/位宽（`FBFMT`、面板总线位宽、`TCON0_HV_IF`）。
-4. 若还全黑 → 测 `GLOBAL_DBUFF` 手写 latch（§7 第一条）。
-5. 内核树已经在 `rg34xxsp-display` 分支上，route 回滚也已提交（`0ab7af527`），不用再动 git。
+1. ~~v8 补丁收进 `patches/`~~ → **已完成**：`patches/patch-selinux-contexts.py`，并接进 `patches/apply.sh`（幂等，已用「从 337 行重放到 989 行逐字节相同」验证）。
+2. `allocator@4.0-service.minigbm` / `gatekeeper@1.0-service.software` 的标签目前靠运行时 overlay，标签仍是 `vendor_file`、进程留在 `u:r:init:s0`（permissive 下不致命）。**要真正干净必须重编 vendor.img**（file_contexts 编进 `precompiled_sepolicy`，不能运行时改）。
+3. `system_suspend`（`Unable to register suspend_control service: -1`）、`vendor.keymaster-4-0`（`Could not register service (-2147483648)`）同样在等 contexts 修复。
+4. `health 2.1` HAL：`Cannot find passthrough implementation of health 2.1 HAL`（服务反复 abort，不阻塞框架）。
+5. `logd: Cannot read /system/etc/event-log-tags`。
+6. 1 GiB 内存优化：`PRODUCT_DISABLE_SCUDO` / `TARGET_VNDK_USE_CORE_VARIANT` / `PRODUCT_MINIMIZE_JAVA_DEBUG_INFO`。
+7. 8 GiB 镜像写到 32 GB 卡会触发 GPT 警告（**不影响启动**）。
+8. `panel_mipi_get_modes()` 每次都调 `drm_connector_set_panel_orientation()` → 属性泄漏 + 双 WARN。
+9. 补打 `0155`（RGB connector 改 DSI）、`0162` 的 `pinctrl-sun50i-h616.c` 部分（消 56 条 `io_disabled` 报错，不影响功能）。
+10. panfork-mesa 接 18.1（需 libdrm ≥ 2.4.109 + Bifrost；本机是 G31 MP2）——**当前用 SwiftShader，不急**。
+
+---
+
+## 10. 建议的接手顺序
+
+1. 读 §5，理解「vold 起不来 → vdc 等 50 秒 → post-fs-data 卡死」这条链。
+2. 按 §6.1 恢复内核树（**注意 quota 四项和 `INITRAMFS_SOURCE`**）。
+3. 跑 `_tmp/build-sd49.sh` 出 `Image.sd49`，写 `G:\Image`。
+4. 上机，读 `G:\DEBUG\meta-first-stage-publish.txt` 里的 8 条 `ctx: probe` 结果，按 §6.3 的判读表分流。
+5. contexts 通了之后，重点看 `render_node_scan: using /dev/dri/card0`、`Gralloc4`、`drm_atomic_commit` 三个标记——那是 sd48 已经铺好、但还没机会跑到的一段路。
+
+---
+
+## 11. 工作日志（按天）
+
+### 11-09：显示 + Android 一阶 init
+- 定死面板是 **v2**（`android-v2` DTB + v2 固件），`BLEND_ROUTE` 要**层号**不要通道号（sd14 亮线 / sd15 纯黑构成对照）。
+- 卡改用 **hybrid MBR**（U-Boot 只认 dos，内核要 GPT 的 PARTNAME）。
+- `androidboot.boot_devices=soc/4020000.mmc,4020000.mmc` 修好 `/dev/block/by-name/*`。
+- 内核编入 SELinux、一阶 init 交棒前 `umount2(MNT_DETACH)` 四处 → 第一次看到 `init first stage started!`。
+- 踩坑：`/dev/mem` 读 no-map ramoops → SIGBUS；`realpath()` 诊断让 PID 1 abort 并循环重启 → 改 readlink + FAULTCOUNT 限三次。
+
+### 11-10：`/data`、看门狗、zygote、图形栈
+- 上午（sd32–sd35）：一阶 init 发布 `fstab`（`/vendor` remount 被 EACCES 拒 → 改 overlayfs）；发现设备 rc 里**没有 `mount_all`** → 发布 `99-mount-data.rc`；`mount_all` 仍 EINVAL → 内核补 `QUOTA/QUOTA_TREE/QFMT_V2/QUOTACTL` → **`/data` 挂上**。
+- 下午（sd36–sd41）：debug-init 采集 `/data` 证据；查明 **H616 看门狗缺 `0x16aa0000` 钥匙**（28 秒必复位）→ 补 match/key + 手写钥匙；DRM 把 panfrost 分到 `card0` 导致 HWC `SET_CLIENT_CAP` 返回 `-95` → 内核改成只有 `DRIVER_MODESET` 拿 PRIMARY。
+- 晚上（sd42–sd46）：解绑 fbcon；kmsg 跟随进程 `EPIPE` 后无法重开 → 用同一 fd 重试；logcat 落 `/data/local/tmp`；**zygote 崩溃真因 #1 = 镜像里没有 `/system/etc/public.libraries.txt`** → 一阶 init 发布 + `early-init` 安装；**真因 #2 = 清单含本产品没有的 `libwebviewchromium_plat_support.so`** → 安装前过滤。sd46 后 WebView 崩溃归零。
+
+### 11-11：图形栈真因 + contexts
+- 上午–下午（sd47–sd48）：查明 **minigbm 没有 sun4i 后端**（且 `cros_gralloc` 只扫 `renderD*`，而 sun4i 只有 `card0`），且 **`gralloc.minigbm` 没装进 `hw/`** → HWC 静默回退 AOSP 空壳 `gralloc.default.so`（只操作 `/dev/fb0`）。写 `sun4i.c` + card 回退 + `hw/` 安装 + sepolicy 标签 + 一阶 init overlay 三个模块到 `/vendor`。sd48 实测：**发布链全部成功**，但卡在 `post-fs-data`。
+- 晚上（sd49，未上机）：定位 `vold` 每 5 秒 exit 1 → `No match for vold in service_contexts` ×489 → 主机侧用真实表复现证明**表与 libselinux 后端都没问题**（`lookup("vold") → vold_service`、未知名字走 `*` 兜底）→ 结论：设备上 servicemanager 只拿到 vendor 表。写 v8 补丁（把平台表合并进 vendor 表 + 逐路径记录 `access/stat` errno），**编译通过**（`ramdisk/init` 2,106,832 B，sha256 `004cffa1…253b30`）。
+- 收尾：`patches/apply.sh` 扩成一条命令重放 8 个幂等脚本，并验证「337 行 → 989 行」与 sd49 编译产物**逐字节相同**。
+
+---
+
+## 12. 提交索引（最近 20 条，新→旧）
+
+| commit | 内容 |
+|---|---|
+| `19c5ad1` | 一阶 init 携带重编的图形模块并 overlay 到 `/vendor`（sd48） |
+| `4ff95bd` | minigbm 加 sun4i-drm 后端 + card 节点回退 + `hw/` 安装 + sepolicy 标签（sd47） |
+| `3c039f6` | 只把本 build 真有的库交给 nativeloader（sd46） |
+| `0087bff` | 补回镜像里从来没有的 `public.libraries.txt`（sd45） |
+| `2f13542` | 问清 zygote 为什么 abort，并停止淹没日志（sd44） |
+| `0ca3c8f` | 跟随进程存活 + 给 Android 日志一个文件（sd43） |
+| `876859b` | 跟随进程存活 + 把面板交给 composer（sd43） |
+| `dd70956` | 看门狗彻底停掉而不是 re-arm（sd41） |
+| `093afc5` | 无 Android 的启动开关，用来观察谁先死（sd40） |
+| `cf3b7f7` | composer 之前打开的是 GPU 的 card，所以没人能画（sd39） |
+| `b5d215a` | 问 DRAM 是否熬过复位（sd38） |
+| `cb4b4cd` | 给框架自己的日志一条离开机器的路（sd37） |
+| `28ad5af` | 采集框架留在 `/data` 的东西（sd36） |
+| `1ba917b` | 能读 fs_mgr 打开的 quota 的内核（sd35） |
+| `9ad96ee` | 发布设备 rc 从来没有的 `mount_all`（sd34） |
+| `eeb7be2` | 把收据留在日志行丢不掉的地方（sd33） |
+| `624d56a` | 把 ramdisk 的 fstab 发布到第二阶段会找的地方（sd32） |
+| `bbe3fd5` | 不让一次坏探针把机器无限重启（sd31） |
+| `6605916` | 告诉 init 它真正在找的设备名（sd30） |
+| `fbddeed` | 给 init 一个干净的 root 和 selinuxfs（sd29） |

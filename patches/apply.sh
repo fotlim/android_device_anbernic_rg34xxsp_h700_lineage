@@ -18,8 +18,20 @@ if grep -q 'PublishVendorGraphics' init/first_stage_init.cpp; then
 	echo "system/core/init: already applied"
 else
 	git apply "$HERE/init-first-stage-publish-ramdisk-fstab.patch"
-	echo "system/core/init: applied"
+	echo "system/core/init: base applied"
 fi
+
+# The per-capability scripts layer on top of the base patch.  Each one is
+# idempotent: it checks for its own marker first, so re-running apply.sh is safe
+# and a tree that already has (say) the graphics block only gets the new one.
+for p in patch-mount-data-rc.py patch-framework-logs-rc.py \
+         patch-graphics-device-rc.py patch-logcat-to-file.py \
+         patch-public-libraries.py patch-public-libs-filter.py \
+         patch-vendor-graphics.py patch-selinux-contexts.py; do
+	if [ -f "$HERE/$p" ]; then
+		python3 "$HERE/$p" || { echo "$p: FAILED"; exit 1; }
+	fi
+done
 
 cd "$TREE/external/minigbm"
 if grep -q 'backend_sun4i' drv.c; then
