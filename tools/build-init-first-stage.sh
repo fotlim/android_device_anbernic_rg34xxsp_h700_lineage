@@ -7,9 +7,12 @@
 set -e
 
 SRC=/root/android/lineage
-REPO=/mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/03_WSA与安卓/anbernic-rg34xxsp
-TMP=/mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/99_临时与截图/_tmp
-OUT=$SRC/out/target/product/rg34xxsp/obj/EXECUTABLES/init_first_stage_intermediates/init
+REPO=/mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/03_WSA与安�?anbernic-rg34xxsp
+TMP=/mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/99_临时与截�?_tmp
+# Do not call this variable OUT: `lunch` exports OUT=<product dir> and would
+# clobber it, which is how an earlier run ended up copying the whole product
+# directory instead of the binary.
+BIN=$SRC/out/target/product/rg34xxsp/obj/EXECUTABLES/init_first_stage_intermediates/init
 DST=/root/initramfs-embed/init.android
 JOBS=${JOBS:-4}
 
@@ -31,14 +34,14 @@ lunch lineage_rg34xxsp-userdebug >/dev/null 2>&1 || true
 m init_first_stage -j"$JOBS" 2>&1 | tail -25
 
 echo "=== result ==="
-ls -l "$OUT"
-file "$OUT"
+ls -l "$BIN"
+file "$BIN"
 echo "--- markers in the binary (must all be >= 1) ---"
 for m in "ctx: probe %s: access=" "ctx: overlay /vendor/etc/selinux ok"; do
-  printf '  %-46s %s\n' "$m" "$(strings -a "$OUT" | grep -Fc -- "$m")"
+  printf '  %-46s %s\n' "$m" "$(strings -a "$BIN" | grep -Fc -- "$m")"
 done
 echo "--- install ---"
-cp -f "$OUT" "$DST"
+cp -f "$BIN" "$DST"
 chmod 755 "$DST"
 ls -l "$DST"
 sha256sum "$DST"

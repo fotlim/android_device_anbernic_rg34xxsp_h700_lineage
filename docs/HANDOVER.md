@@ -44,6 +44,30 @@
 > hwservicemanager 读 VINTF 清单 `EACCES`）见
 > [2026-11-12 开发日志 §7](../../../../../rg34xxsp开发日志/2026-11-12-sd49上机与cpio-mode根因.md)。
 >
+> ### 【2026-11-12 18:5x】sd50：先让设备自己回答，不再猜
+>
+> 这一版**不加功能、不改任何现有行为**，只加一个只读探针。新增 `patches/patch-devprobe.py`
+> （已加进 `patches/apply.sh` 的循环），在 init 里发布
+> `/metadata/dsh/devprobe.sh` + `/vendor/etc/init/95-devprobe.rc`，在 **post-fs-data**
+> （即 `enter_default_mount_ns` 之后）和 **boot** 两个点各跑一次，全部输出进 `/dev/kmsg`
+> （tag `devprobe[...]`），两个触发点都用 `exec_background`，卡住也不会堵 boot。探针只读：
+>
+> * `/dev/{binder,hwbinder,vndbinder}` 此刻是符号链接还是设备节点、指向哪、目标在不在；
+> * `/dev/binderfs` 里有什么；`/dev` 在本进程与 pid 1 各自由哪个 mount 支撑；
+> * 本进程 `: < /dev/binder` 能否打开；
+> * `pidof servicemanager` 的 `State/Threads/SigBlk` 和它的 fd 表里有没有 binder
+>   （即它到底是不是 context manager）；`boot` 那一轮再跑 `timeout 5 service list`。
+>
+> 顺手修掉两个坑：`tools/build-init-first-stage.sh` 的变量 `OUT` 会被 `lunch` 覆盖（导致
+> `cp` 拷的是整个产品目录），已改名 `BIN`；`/mnt/g` 在 WSL 晚启动时**不是挂载点**（只是根目录下的
+> 普通目录），新增的 `tools/install-initrd.sh` 会硬校验 `$CARD/extlinux/extlinux.conf`，
+> 没有就拒绝写入并提示 `mount -t drvfs G: /mnt/g`。
+>
+> 已上卡：`init.android` 2,106,632 B（sha256 `1994966…`，devprobe marker ×19）、
+> `G:\initrd.img` 927,354 B（sha256 `7401e42c…`）、`G:` 空闲 29.4 MB、`DEBUG\` 已清空。
+> **判读表见开发日志 §8.4**；这一次同时会拷出 4afef271 那轮的 logcat（p01–p03），
+> 里面有 libbinder 自己打印的 `E binder:` 原文。
+>
 > 下面 §0 的原文是 **11-11 20:30 的历史记录**（当时卡在 vold，现已解决），保留以便追溯。
 
 LineageOS 18.1 在 RG34XXSP 上已经**跑到 Android 第二阶段 init 的 `post-fs-data`**：SELinux 策略加载、`/data` 挂载、`/metadata` 挂载、apexd、ueventd、logd、servicemanager、hwservicemanager 全部正常，**卡在 `vold` 起不来**（`Unable to start VoldNativeService`，exit 1）→ `vdc checkpoint` 等 50 秒超时 → `post-fs-data` 永远走不完 → **到不了 `class_start hal`，SurfaceFlinger 和 zygote 从未启动**。
