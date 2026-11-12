@@ -65,8 +65,18 @@
 >
 > 已上卡：`init.android` 2,106,632 B（sha256 `1994966…`，devprobe marker ×19）、
 > `G:\initrd.img` 927,354 B（sha256 `7401e42c…`）、`G:` 空闲 29.4 MB、`DEBUG\` 已清空。
-> **判读表见开发日志 §8.4**；这一次同时会拷出 4afef271 那轮的 logcat（p01–p03），
-> 里面有 libbinder 自己打印的 `E binder:` 原文。
+> **判读表见开发日志 §8.4**，四条分支的处置和“假设指纹”见 **§9**；这一次同时会拷出
+> 4afef271 那轮的 logcat（p01–p03），里面有 libbinder 自己打印的 `E binder:` 原文。
+>
+> **预案补丁（条件性，未启用）**：`patches/patch-binderfs-early.py` —— 只有当探针显示
+> “default ns 里 `/dev/binderfs` 是空的 / `/dev/binder` 悬空 / `open /dev/binder` FAILED”
+> （即假设 H1）时才用。它把 binderfs 的 mount 提前到一阶段、`SetupMountNamespaces()` 克隆挂载树
+> **之前**，使所有 namespace 都继承；`init.rc` 那次 mount 会 EBUSY（无害）。**故意没有列进
+> `patches/apply.sh`**，而且写的时候 WSL 被别的任务占着，**尚未编译验证**。
+>
+> 另：2026-11-12 18:58 本任务误把另一个项目的 WSL 当成僵尸 VM（跑了 `wsl --shutdown`、kill 了
+> `vmwp`），之后 `ext4.vhdx` 一直被残留的 `vmmemWSL` 独占。**WSL 恢复前不要再动它**；
+> 这不影响上机验证——sd50 的 initrd 已经在卡上。
 >
 > 下面 §0 的原文是 **11-11 20:30 的历史记录**（当时卡在 vold，现已解决），保留以便追溯。
 
