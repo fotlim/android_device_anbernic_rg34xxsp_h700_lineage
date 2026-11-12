@@ -8,7 +8,48 @@
 
 ## 0. 一句话现状
 
-> ### 【2026-11-12 17:5x 更新，以此为准】boot `4afef271`
+> # ★ 2026-11-12 22:5x：根因已确认，修复已写好但**未编译**
+>
+> **`/system/etc` 被我们自己的 overlay 兜底改成了 `drwx------`（0700 root:root）。**
+> sd51 探针在 boot `888a17de` 上直接量到：
+>
+> ```
+> drwxr-xr-x 14 root root 4096 2026-11-07 /system
+> drwx------  1 root root   60 2026-11-12 14:34 /system/etc      ← 0700，mtime=本次开机
+> -rw-r--r--  1 root root 2960 /system/etc/vintf/manifest.xml    ← 文件本身正常
+> root read /system/etc/vintf/manifest.xml = yes ; root open … OK
+> ```
+>
+> 非 root 进程**连目录都进不去**（缺 `o+x`），于是 hwservicemanager 读不到框架 VINTF 清单、
+> media.codec 读不到 seccomp 策略、zygote 读不到字体配置；空清单再让每个 HIDL
+> `getTransport()` 返回 EMPTY → `getService()` 得 null（keystore 的 CHECK）、
+> `registerAsService()` 得 `UNKNOWN_ERROR`(-2147483648)（system-suspend / allocator / wificond）。
+> **一个权限位解释了全部六类崩溃。** binder / namespace / 节点权限已全部排除
+> （节点 `crw-rw-rw-`、binderfs 两个 ns 都挂着、`service list rc=0` 且 vold 已注册）。
+>
+> 凶手是 `patches/patch-public-libs-filter.py` 里 `fix-public-libs.sh` 的
+> **最后兜底**：它把 overlay 挂在 `/system/etc` 自身上，而 overlay 挂载点的属性取自
+> **upperdir**，那个 upperdir 是 `mkdir -p` 按 shell umask 建出来的，不是 0755。
+>
+> **已改（`3ce11ff`，未编译）**：`mkdir -m 0755` + 挂载后立刻 `chmod 0755 /system/etc`。
+>
+> **下次接手第一件事**（顺序别错）：
+> 1. `ln -sfn '<checkout>' /root/repo`
+> 2. 确认 `patch-public-libs-filter.py` 是**替换**已有块而不是「已打就跳过」；
+>    若跳过，手工把新片段补进 `system/core/init/first_stage_init.cpp` 的 `kFixPublicLibsSh`
+> 3. `REPO=/root/repo JOBS=8 bash /root/repo/tools/build-init-first-stage.sh`
+> 4. **清 `G:\DEBUG\`**（必须，两次栽在这：上次 28 MB 把 boot 分区写满，卡上留了截断文件）
+> 5. `REPO=/root/repo bash /root/repo/tools/install-initrd.sh /mnt/g`
+> 6. 上机；只要 `/system/etc` 回到 `0755`，六类 HIDL 崩溃应一起消失
+>
+> 待办：uid 探针的输出通道（`/metadata/dsh` 对 keystore/system 不可写，它们 exit 1 无输出）；
+> `fonts.xml` 在本 build 里根本不存在，权限修好后重查 zygote 真正缺的字体配置；
+> 以及彻底不 overlay `/system/etc` 自身的替代方案。
+>
+> 完整证据与判读见
+> [2026-11-12 开发日志 §12](../../../../../rg34xxsp开发日志/2026-11-12-sd49上机与cpio-mode根因.md)。
+
+> ### 【2026-11-12 17:5x 更新】boot `4afef271`
 >
 > **整条启动链第一次全通了**：内核 → external initrd（`stage 8: size=2106832`，`c_mode` 修复连续三轮成立）
 > → 一阶段 → SELinux → 二阶段 → `post-fs-data` 走完 → `class_start hal/core/main/late_start` **四个全部
