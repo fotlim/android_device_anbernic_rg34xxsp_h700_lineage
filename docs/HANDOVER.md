@@ -8,6 +8,44 @@
 
 ## 0. 一句话现状
 
+> ### 【2026-11-12 17:5x 更新，以此为准】boot `4afef271`
+>
+> **整条启动链第一次全通了**：内核 → external initrd（`stage 8: size=2106832`，`c_mode` 修复连续三轮成立）
+> → 一阶段 → SELinux → 二阶段 → `post-fs-data` 走完 → `class_start hal/core/main/late_start` **四个全部
+> `succeeded`** → SurfaceFlinger 起来了（`Using HWComposer service: 'default'`）→ `zygote` + `zygote_secondary`
+> 起来并 `Accepting command socket connections`。**`vold` 也修好了**（v8 表合并生效：`keeping 249 platform
+> lines` / `keeping 86 platform lines`，`No match for … in service_contexts` 整份 4.7 MB kmsg 里 **0 次**，
+> `start vold … took 271ms and succeeded`）。全程 `up=396s`（6 分 36 秒）**无 panic、无重启**。
+>
+> **新的、也是唯一剩下的卡点：两个 service manager 都不可达。** 227 条 abort 去重只有 6 种，
+> 归成两类：`Failed to get ServiceManager`（keystore ×37、audioserver ×32，`defaultServiceManager()` 返 null）
+> 和 `-2147483648`（= `0x80000000` = `status_t UNKNOWN_ERROR`；system-suspend ×41、allocator ×39、
+> wificond ×34，HIDL 注册事务失败）。于是 `class main` 的服务起来就死、被 init 反复重启，
+> **`boot completed` 永远到不了**。
+>
+> **根因已查到内核源码层**：当前内核 `CONFIG_ANDROID_BINDERFS=y`，而
+> `drivers/android/binder.c:7119` 是
+> `if (!IS_ENABLED(CONFIG_ANDROID_BINDERFS) && strcmp(binder_devices_param, "") != 0) { … init_binder_device(…) }`
+> —— **开了 BINDERFS，`CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"` 就整块被跳过**，
+> 三个 misc 设备一个都不会注册（实测：`/proc/devices` 里是动态主设备号 `238 binder` 而不是 misc `10:58`，
+> devtmpfs 的 `ls /dev` 里没有任何 binder 节点，`/proc/filesystems` 里有 `nodev binder`）。
+> 而 `system/core/rootdir/init.rc:175-189` 是 **binderfs 版**（`mount binder binder /dev/binderfs` +
+> 三条 `symlink`），命令没报失败、`/dev/binderfs` 确实挂上了（composer 打开过 `/dev/binderfs/vndbinder`），
+> 但 `enter_default_mount_ns`（post-fs-data，26.5 s）之后的服务就拿不到它们了 ——
+> servicemanager 24.39 s 启动（namespace 切换**之前**）活着，keystore 41 s 启动（**之后**）就 null。
+>
+> **两条修法（都要动 WSL，目前 WSL 被别的任务占着，先别跑）：**
+> **A（推荐，最对味 A11）** 内核 `# CONFIG_ANDROID_BINDERFS is not set`，保留 `BINDER_DEVICES` → 重编 Image，
+> 三个 misc 设备出现，`ueventd.rc:37-39` 的规则生效；
+> **B（改动小）** 保留 binderfs，在 `first_stage_init.cpp` 的 patch 里改到 `on late-init` 之后
+> 再 `mount` + `symlink` 一次，并把 `ls -l /dev /dev/binderfs` 打进 `/dev/kmsg` 当探针。
+>
+> 详细证据、判读表、以及两个待解疑点（`media.codec` 的 `mediacodec.policy` 明明存在却报读不到；
+> hwservicemanager 读 VINTF 清单 `EACCES`）见
+> [2026-11-12 开发日志 §7](../../../../../rg34xxsp开发日志/2026-11-12-sd49上机与cpio-mode根因.md)。
+>
+> 下面 §0 的原文是 **11-11 20:30 的历史记录**（当时卡在 vold，现已解决），保留以便追溯。
+
 LineageOS 18.1 在 RG34XXSP 上已经**跑到 Android 第二阶段 init 的 `post-fs-data`**：SELinux 策略加载、`/data` 挂载、`/metadata` 挂载、apexd、ueventd、logd、servicemanager、hwservicemanager 全部正常，**卡在 `vold` 起不来**（`Unable to start VoldNativeService`，exit 1）→ `vdc checkpoint` 等 50 秒超时 → `post-fs-data` 永远走不完 → **到不了 `class_start hal`，SurfaceFlinger 和 zygote 从未启动**。
 
 根因已定位到：**servicemanager 的 `service_contexts` 查不到 `vold`**（`No match for vold in service_contexts` × 489）。平台表内容与 libselinux 后端都已在主机上验证无误（见 §5），所以问题在「设备上 servicemanager 读表那一刻」。修复补丁（v8）已写好并编译通过，**只差重编内核 Image 落卡实测**——而内核构建树被 WSL 的 `/tmp` 清理掉了，需要先重建（见 §6.1）。
