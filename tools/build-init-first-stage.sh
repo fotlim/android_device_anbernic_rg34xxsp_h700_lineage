@@ -4,17 +4,31 @@
 #
 # The patches live in the repository and are applied with patches/apply.sh, so
 # this script only re-applies them (idempotent) and rebuilds the single module.
+#
+# REPO defaults to /root/repo, a symlink to the Windows-side checkout.  This
+# file is deliberately pure ASCII: the checkout directory name contains
+# non-ASCII characters, and passing or embedding that path has repeatedly
+# produced "No such file or directory" from a mangled byte sequence.  Create
+# the symlink from a shell that can spell the path, then run this script:
+#
+#     ln -sfn '<checkout>' /root/repo
+#     bash /root/repo/tools/build-init-first-stage.sh
 set -e
 
 SRC=/root/android/lineage
-REPO=/mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/03_WSA与安�?anbernic-rg34xxsp
-TMP=/mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/99_临时与截�?_tmp
+REPO=${REPO:-/root/repo}
 # Do not call this variable OUT: `lunch` exports OUT=<product dir> and would
 # clobber it, which is how an earlier run ended up copying the whole product
 # directory instead of the binary.
 BIN=$SRC/out/target/product/rg34xxsp/obj/EXECUTABLES/init_first_stage_intermediates/init
 DST=/root/initramfs-embed/init.android
 JOBS=${JOBS:-4}
+
+if [ ! -f "$REPO/patches/apply.sh" ]; then
+	echo "!! $REPO does not look like the repository (no patches/apply.sh)." >&2
+	echo "   create the symlink first: ln -sfn '<checkout>' /root/repo" >&2
+	exit 1
+fi
 
 echo "=== applying patches (idempotent) ==="
 bash "$REPO/patches/apply.sh" "$SRC"
@@ -23,8 +37,8 @@ git -C "$SRC/system/core" diff --stat -- init/first_stage_init.cpp
 
 echo "=== marker strings expected in the new binary ==="
 for m in "ctx: probe %s: access=" "ctx: overlay /vendor/etc/selinux ok" \
-         "platform lines" "publish: "; do
-  printf '  %-46s %s\n' "$m" "$(grep -Fc "$m" "$SRC/system/core/init/first_stage_init.cpp")"
+         "platform lines" "devprobe"; do
+	printf '  %-46s %s\n' "$m" "$(grep -Fc "$m" "$SRC/system/core/init/first_stage_init.cpp")"
 done
 
 echo "=== building init_first_stage (jobs=$JOBS) ==="
@@ -37,8 +51,8 @@ echo "=== result ==="
 ls -l "$BIN"
 file "$BIN"
 echo "--- markers in the binary (must all be >= 1) ---"
-for m in "ctx: probe %s: access=" "ctx: overlay /vendor/etc/selinux ok"; do
-  printf '  %-46s %s\n' "$m" "$(strings -a "$BIN" | grep -Fc -- "$m")"
+for m in "ctx: probe %s: access=" "devprobe"; do
+	printf '  %-46s %s\n' "$m" "$(strings -a "$BIN" | grep -Fc -- "$m")"
 done
 echo "--- install ---"
 cp -f "$BIN" "$DST"

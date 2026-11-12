@@ -78,6 +78,29 @@
 > `vmwp`），之后 `ext4.vhdx` 一直被残留的 `vmmemWSL` 独占。**WSL 恢复前不要再动它**；
 > 这不影响上机验证——sd50 的 initrd 已经在卡上。
 >
+> ### 【2026-11-12 20:4x】源码级纠正：不是"service manager 坏了"，是两件事
+>
+> 上面「两个 service manager 都不可达」的说法**已被源码推翻**，以后面的为准：
+>
+> * `frameworks/native/.../IServiceManager.cpp:91` 的 `defaultServiceManager()` 是
+>   `while (sm == nullptr) { ALOGE; sleep(1); }` **死循环，永不返回 null**；
+>   `ProcessState.cpp:411` 则是 `LOG_ALWAYS_FATAL_IF(mDriverFD < 0, "Binder driver ... could not
+>   be opened.  Terminating.")` —— 这条 abort **从未出现**，所以系统 binder 一直是好的。
+> * keystore 的 `Failed to get ServiceManager` 用的是 **HIDL** 的
+>   `::android::hidl::manager::V1_2::IServiceManager::getService()`
+>   （`keystore_main.cpp:48,105`）。而 `system/libhidl/transport/ServiceManagement.cpp:174` 里
+>   `defaultServiceManager1_2()` **只有** `access("/dev/hwbinder", F_OK|R_OK|W_OK)` 失败才返回
+>   null（且不打日志）。**⇒ P1 = `/dev/hwbinder` 对 keystore(1017)/audioserver(1041) 不可读写。**
+> * `registerAsServiceInternal`（同文件 826 行）：`sm == nullptr` 返回 `INVALID_OPERATION`(-38)，
+>   而 `-2147483648`(UNKNOWN_ERROR) 来自 **VINTF 清单检查**或 `addWithChain` 失败。
+>   那三个服务拿到的是 `-2147483648` ⇒ 它们**已经能和 hwservicemanager 通信**。
+>   **⇒ P2 = VINTF 清单**（`system.suspend`、`hidl.allocator` 的声明其实在
+>   `/system/etc/vintf/manifest/` 的碎片里，主清单 `manifest.xml` 2960 B 只有 framework HAL）。
+>
+> sd50 v3 探针已上卡（`G:\initrd.img` 927,712 B，sha256 `496e9a83…`）：post-fs-data 留**原状快照**，
+> `on boot` 先 `chmod 0666` 三个 binderfs 节点、再以 root / **keystore** / **system** 三种身份
+> 各测一遍 access 与 VINTF 文件可读性。判读表见开发日志 §10.5。
+>
 > 下面 §0 的原文是 **11-11 20:30 的历史记录**（当时卡在 vold，现已解决），保留以便追溯。
 
 LineageOS 18.1 在 RG34XXSP 上已经**跑到 Android 第二阶段 init 的 `post-fs-data`**：SELinux 策略加载、`/data` 挂载、`/metadata` 挂载、apexd、ueventd、logd、servicemanager、hwservicemanager 全部正常，**卡在 `vold` 起不来**（`Unable to start VoldNativeService`，exit 1）→ `vdc checkpoint` 等 50 秒超时 → `post-fs-data` 永远走不完 → **到不了 `class_start hal`，SurfaceFlinger 和 zygote 从未启动**。
