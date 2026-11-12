@@ -16,11 +16,18 @@ kernel would reject (bad name length, non-4-byte padding, missing TRAILER!!!).
 import argparse
 import gzip
 import os
+import stat
 import sys
 
 
 def newc_entry(ino, name, data, mode, mtime=0, uid=0, gid=0):
     name_b = name.encode() + b"\0"
+    # c_mode must carry the file-type bits (S_IFREG), not just the permission
+    # bits: init/initramfs.c's do_name() dispatches on S_ISREG()/S_ISDIR() and
+    # silently drops an entry whose mode has no type bits. Writing "0755"
+    # instead of "0100755" makes the archive unpack without a single error
+    # message and without a single byte reaching the rootfs.
+    mode = mode if name == "TRAILER!!!" else (mode | stat.S_IFREG)
     fields = [
         ino,            # ino
         mode,           # mode
@@ -75,21 +82,30 @@ def parse_spec(spec):
         raise SystemExit(f"bad --add value {spec!r}, want local:archive[:mode]")
     with open(local, "rb") as f:
         data = f.read()
-    return archive.lstrip("/"), data, int(mode, 8)
+    return archive.lstrip("/"), data, int(mode, 8) | stat.S_IFREG
 
 
 def verify(blob):
-    """Re-read our own archive the way the kernel does, and report."""
+    """Re-read our own archive the way the kernel does, and report.
+
+    The mode check is the one that matters: do_name() silently ignores any
+    entry whose c_mode carries no file-type bits, so an archive can unpack
+    "successfully" and still change nothing on the rootfs.
+    """
     pos = 0
     entries = 0
     while True:
         if blob[pos:pos + 6] != b"070701":
             raise SystemExit(f"bad magic at {pos}")
         f = [int(blob[pos + 6 + i * 8:pos + 14 + i * 8], 16) for i in range(13)]
-        filesize, namesize = f[6], f[11]
+        mode, filesize, namesize = f[1], f[6], f[11]
         name = blob[pos + 110:pos + 110 + namesize - 1].decode()
         if name == "TRAILER!!!":
             return entries, (pos + 110 + namesize + 3) & ~3
+        if not (mode & 0o170000):
+            raise SystemExit(
+                f"entry {'/' + name} has no file-type bits (c_mode=0{mode:o}); "
+                "the kernel would drop it without an error")
         body = (pos + 110 + namesize + 3) & ~3
         pos = (body + filesize + 3) & ~3
         entries += 1

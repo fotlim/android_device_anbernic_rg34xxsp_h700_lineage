@@ -189,7 +189,16 @@ xbin` + `product/vendor/system_ext` 三个 symlink）。→ **chroot 到 system 
 
 ## 6. 下一步（按顺序做）
 
-### 6.0 【2026-11-11 晚新增】不编内核也能上 sd49：external initrd
+### 6.0 【2026-11-11 晚新增 / 11-12 修好】不编内核也能上 sd49：external initrd
+
+> ⚠️ **11-12 教训（先读这段）**：这条路第一次上机时「看起来成功」——`dmesg` 有
+> `Unpacking initramfs...` 和 `Freeing initrd memory: 904K`、没有 `Initramfs unpacking failed`，
+> 但 `/init.android` 的 size 仍是 sd48 的 2,098,312。原因是 `make-initrd.py` 把 cpio 头的
+> `c_mode` 写成了 `000755` 而**漏了类型位 `S_IFREG`**；`init/initramfs.c` 的 `do_name()` 只按
+> `S_ISREG/S_ISDIR/S_ISBLK/S_ISCHR/S_ISFIFO/S_ISSOCK` 分派，四条分支全不匹配就静默
+> `return 0`——archive 解包「成功」，一个字节也没落盘。**标准 cpio 的 c_mode 必须是
+> `0100755` 这种带类型位的形式**（对比内建 ramdisk：`init` 条目就是 `mode=100755`）。
+> `make-initrd.py` 现在会强制补 `S_IFREG`，并且 `verify()` 会对无类型位的条目直接报错退出。
 
 **先看这一节，再考虑 6.1/6.2 的重编内核路线。** sd49 的 `init.android` 早就编好了
 （`/root/initramfs-embed/init.android`，2,106,832 B，sha256 `004cffa1d4cf48eb809f282a9bea5bea28c941b6d607fac3443eb086ad253b30`），
@@ -206,22 +215,26 @@ xbin` + `product/vendor/system_ext` 三个 symlink）。→ **chroot 到 system 
 > ⚠️ **`tools/mk-sdcard.sh` 里「external initrd 会 replace 内建 initrd」的注释（第 11-14、140-146、
 > 578-580 行）是错的**，别被它挡住。`--embed-initramfs` 仍然更省事，但不是唯一可行路。
 
-卡上已经铺好（2026-11-11 22:40 完成，可直接上机）：
+卡上已经铺好（2026-11-12 中午重打，可直接上机）：
 
 ```bash
 # 生成（在 Windows 上跑，不碰 WSL）
 python tools/make-initrd.py --out G:\initrd.img --gzip \
     --add 99_临时与截图/_tmp/sd49/init.android:init.android:0755
-# 结果：926,935 B，sha256 3d863e39aeca1d19e2dd170caa5b86af34c0dff3f43cd0d65aaa1288d04fb349
+# 结果：926,934 B，sha256 15bee539c016234fd506202428da96390d1f3e77de13438adca6ac113409f891
+# 条目 /init.android c_mode=100755 size=2,106,832（sha256 004cffa1…253b30）
+# 旧版（11-11 夜）926,935 B / sha256 3d863e39…fb349 的 c_mode 是 000755，**已作废**
 ```
 
 `G:\extlinux\extlinux.conf` 的 `android` 与 `android-v2` 两个 label 各加一行 `initrd /initrd.img`
 （备份在 `G:\extlinux\extlinux.conf.bak-sd48`）。**`G:\Image` 没换，还是 sd48。** 下次开机就是
 「sd48 内核 + sd49 init」。
 
-判读第一件事：`G:\DEBUG\<新boot>\kmsg-*.txt` 里找 `Unpacking initramfs...`（没有
-`Initramfs unpacking failed` 就是成功），再看 publish 段有没有 `ctx: probe ...` 行（有就证明跑的是
-sd49 的 init）。详细判读表见 `rg34xxsp开发日志/2026-11-11-sd49-initrd通道.md` §4。
+判读第一件事：`G:\DEBUG\ran-<新boot>.txt` 里 `stage 8: init.android ... size=` 必须从
+`2098312` 变成 **`2106832`** —— 这一步才算证明 initrd 真的落盘（只看 dmesg 的
+`Unpacking initramfs...` / `Freeing initrd memory` 会被上面那个 mode 坑骗过去）。第二步看 publish 段
+有没有 `ctx: probe ...` 行。详细判读表见
+`rg34xxsp开发日志/2026-11-12-sd49上机与cpio-mode根因.md` §4。
 
 **如果 initrd 路线也不通**，再回到 6.1/6.2 重编内核 —— 那条路仍然有效，只是要等 WSL 空出来。
 
@@ -384,6 +397,21 @@ bash patches/apply.sh /root/android/lineage
 - **深夜（不占 WSL 的一轮）**：证明内核会把 external initrd 解进同一个 rootfs 并覆盖同名文件（`do_name()` 的 `O_TRUNC` + `do_populate_rootfs()` 两次 unpack）→ 于是**不用重编 Image**：`tools/make-initrd.py` 打了一个只含 `/init.android` 的 gzip initrd（`G:\initrd.img`，926,935 B，sha256 `3d863e39…fb349`），`G:\extlinux\extlinux.conf` 两个 android label 加 `initrd /initrd.img`，刷盘缓存并回读校验完成。**sd49 现在可以直接上机。**
 - 同夜解开两个老疑问：① staging 顶层没有 `system` 不是 bug —— `system.img` 根上真有 `/system` 目录（inode 53），根上的 `/etc` `/bin` `/init` 是指向它的 symlink（见 §5.5）；② 因此 `/etc/selinux/plat_service_contexts`（inode 834，18,876 B，含 `vold` 行与 `*` 兜底）**确实存在且可读**，v8 的探针一上机就能给出答案。
 - 发现 `tools/mk-sdcard.sh` 里「external initrd 会 replace 内建 initrd」的注释是错的（三处），已在 §6.0 标注。
+
+### 11-12：sd49 首次上机 → 根因是 cpio 的 `c_mode`
+- 两次启动（boot id `05638543` @4:10:02、`490c4f0b` @4:10:30）：`dmesg` 都有 `Unpacking initramfs...` +
+  `Freeing initrd memory: 904K`（926,935 B 向下页对齐，正好对上），**但** `ran-*.txt` 的
+  `stage 8: init.android xok=1 size=2098312` 两次都是 sd48 的大小，且 publish 段没有任何 `ctx: ...` 行。
+- 定案：`make-initrd.py` 写出的 `c_mode=000755` 少了 `S_IFREG`；`do_name()` 的
+  `S_ISREG/S_ISDIR/S_ISBLK/S_ISCHR/S_ISFIFO/S_ISSOCK` 全不匹配 → 静默 `return 0`。解包「成功」、零字节落盘。
+  对比内建条目 `mode=100755` 一眼可见。
+- 修：`parse_spec()` 补 `| stat.S_IFREG`，`verify()` 对无类型位条目直接 `SystemExit`。重打 initrd
+  926,934 B / sha256 `15bee539…f891`，`/init.android` c_mode=100755、size=2,106,832，刷卡并回读校验。
+- 顺带确认：`p01`–`p08` 与 `pmap.txt` 都是 `/olddata/...` 的**上一轮**数据（`pmap.txt` 自己写着映射表），
+  `p01/p02` 里的 489/477 条 `No match for vold` 属于 11-11；今天这轮 logcat 要等下次启动才会被拷出。
+- 顺带看到：`post-fs-data` 里 `vdc checkpoint` 超时 50 s 后 init **继续往下走**，`class_start hal` 之后
+  `vendor.keymaster-4-0`(pid 379) 与 `system_suspend`(pid 373) 都以 signal 6 崩，
+  `updatable process '...' exited 4 times before boot completed` —— 这些是 vold 修好之后才该碰的欠账。
 
 ---
 
