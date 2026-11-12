@@ -52,10 +52,26 @@ if mount -o rw,remount /system 2>>$LOG && cp $FILT $LIST 2>>$LOG; then
     echo "wrote $LIST after remounting /system rw" >> $LOG
     exit 0
 fi
-mkdir -p /dev/dsh_upper /dev/dsh_work 2>>$LOG
-if mount -t overlay overlay -o lowerdir=/system/etc,upperdir=/dev/dsh_upper,workdir=/dev/dsh_work /system/etc 2>>$LOG && cp $FILT $LIST 2>>$LOG; then
-    echo "wrote $LIST through an overlay of /system/etc" >> $LOG
-    exit 0
+# The overlay fallback is a last resort and it must not change the mode of
+# /system/etc. Boot 888a17de proved what happens when it does: the directory
+# came out drwx------ (0700 root root), because an overlay takes the mode of its
+# mountpoint from the UPPERDIR, and `mkdir -p` created that upperdir with the
+# shell's umask instead of 0755. From then on no non-root process could even
+# enter /system/etc, so hwservicemanager could not read the framework VINTF
+# manifest, media.codec could not read its seccomp policy and zygote could not
+# read its font config -- which is one cause for every HIDL abort in the log
+# (getTransport() returns EMPTY on an empty manifest, so getService() yields
+# null and registerAsService() yields UNKNOWN_ERROR). Hence: create the upperdir
+# with an explicit mode, and chmod the mountpoint back to 0755 immediately after
+# the mount succeeds, before anything else runs.
+mkdir -m 0755 /dev/dsh_upper /dev/dsh_work 2>>$LOG
+if mount -t overlay overlay -o lowerdir=/system/etc,upperdir=/dev/dsh_upper,workdir=/dev/dsh_work /system/etc 2>>$LOG; then
+    chmod 0755 /system/etc 2>>$LOG
+    chmod 0755 /dev/dsh_upper /dev/dsh_work 2>>$LOG
+    if cp $FILT $LIST 2>>$LOG; then
+        echo "wrote $LIST through an overlay of /system/etc" >> $LOG
+        exit 0
+    fi
 fi
 echo "FAILED, see the messages above" >> $LOG
 exit 0
