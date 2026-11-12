@@ -328,7 +328,7 @@ static int harvest_metadata(void)
 	const char *devs[] = { "/dev/mmcblk0p3", "/dev/block/mmcblk0p3" };
 	const char *files[] = { "first-stage-publish.txt", "fstab.rg34xxsp",
 				"fstab.published", "dsh/fix.log",
-				"dsh/public.libraries.txt" };
+				"dsh/public.libraries.txt", "dsh/probe.log" };
 	char p[160], dst[160];
 	int i, j, copied = 0, mounted = 0;
 
@@ -349,7 +349,7 @@ static int harvest_metadata(void)
 		return 0;
 	}
 
-	for (j = 0; j < 5; j++) {
+	for (j = 0; j < (int)ARRAY_SIZE(files); j++) {
 		char buf[4096];
 		size_t n;
 		FILE *in, *o;

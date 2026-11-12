@@ -101,6 +101,53 @@
 > `on boot` 先 `chmod 0666` 三个 binderfs 节点、再以 root / **keystore** / **system** 三种身份
 > 各测一遍 access 与 VINTF 文件可读性。判读表见开发日志 §10.5。
 >
+> ### 【2026-11-12 22:0x】boot `8f4589fb`：binder 全线无罪，真凶是 `/system/etc` 不可读
+>
+> sd50 v3 的探针结果把整套 binder 假设**全部排除**：
+>
+> * 三个节点 `crw-rw-rw- 1 root root 238,{1,2,3}`（0666 已生效）；
+> * `/dev/binderfs` 的 mount 同时出现在探针自己的和 pid 1 的 mountinfo 里（`shared:24`）；
+> * root 下 `open /dev/binder|hwbinder|vndbinder` 全部 OK；
+> * **`service list` 返回 rc=0，列出 6 个服务，包括 `vold`** —— AIDL servicemanager 完全健康；
+> * hwservicemanager（uid 1000）自己也 `fd 6 -> /dev/binderfs/hwbinder`。
+>
+> 真正的原因在日志里被点名了（`p03`，这轮 logcat 终于不是旧数据）：
+>
+> ```
+> E HidlServiceManagement: Service … must be in VINTF manifest in order to register/get.
+> W hwservicemanager: Cannot fetch /system/etc/vintf/manifest.xml:
+>                     Cannot read /system/etc/vintf/manifest.xml: Permission denied
+> ```
+>
+> **非 root 进程读不到 `/system/etc` 下的文件**：VINTF 清单（hwservicemanager）、
+> `seccomp_policy/mediacodec.policy`（media.codec）、`fonts.xml`（zygote）。而 **root 读同一个
+> 子树完全正常**（`ctx: probe /system/etc/selinux/…: access=0(ok)`）。
+> 一个 EACCES 解释全部六种崩溃：框架清单读不到 → `getTransport()` 全返回 EMPTY →
+> `getService()` null（keystore 的 CHECK 就是这个）、`registerAsService()` 返回
+> `UNKNOWN_ERROR`(-2147483648)（system-suspend / allocator / wificond）。
+>
+> `system.raw` 里这些文件是 `0644 root:root`、父目录 `0755`，按 DAC 不该被拒 ——
+> 所以要么设备启动的 `super.img` 里 system 逻辑分区与 `system.img` 内容不同，要么是挂载/标签层，
+> **只有设备能量**。sd51 因此改成：
+>
+> * 探针输出写 **`/metadata/dsh/probe.log`**（ext4，重启不丢），不再只依赖会丢行的 `/dev/kmsg`
+>   （上一轮 35.5–36.0 s 因 audit 洪峰丢了 433 行，uid 探针整段消失）；
+> * `debug-init.c` 的回传清单加 `dsh/probe.log` → 下次开机自动拷成 `DEBUG/meta-dsh_probe.log`；
+> * **root / keystore(1017) / system(1000) 三种身份**，全部在 `post-fs-data` 触发（早于崩溃），
+>   量 `ls -lL`/`readlink`/`[ -r ]`/实际 open，对象含三个 binder 节点、`/system`、`/system/etc`、
+>   `/system/etc/vintf`、`manifest.xml`、碎片目录、`mediacodec.policy`、`fonts.xml`，
+>   外加**完整 mountinfo**（上一版只过滤 `/dev`，覆盖层会被漏掉）与 SELinux 标签。
+>
+> **`/init` 也走 external initrd 了**：改 debug-init 不必重建内核内建 cpio，
+> `tools/install-initrd.sh` 同时打包 `/init`(699,136 B) + `/init.android`(2,106,696 B)，
+> 代价只有卡上 650 KiB。当前卡上 `initrd.img` = 1,243,232 B，sha256 `4a0274c4…`。
+>
+> ⚠️ **每次上机前必须清 `G:\DEBUG\`**：本轮它塞到 28.08 MB，boot 分区只剩 10,240 B，
+> `cp initrd.img` 报 `Input/output error`，卡上留下 917,504 B 的截断文件。这是第二次栽在同一处。
+>
+> 下次读法：先看 `DEBUG/meta-dsh_probe.log` 是否存在；`ran-*.txt` 里
+> `metadata receipts from the previous boot` 从 5 变 6 即说明新清单生效。详见开发日志 §11.7。
+>
 > 下面 §0 的原文是 **11-11 20:30 的历史记录**（当时卡在 vold，现已解决），保留以便追溯。
 
 LineageOS 18.1 在 RG34XXSP 上已经**跑到 Android 第二阶段 init 的 `post-fs-data`**：SELinux 策略加载、`/data` 挂载、`/metadata` 挂载、apexd、ueventd、logd、servicemanager、hwservicemanager 全部正常，**卡在 `vold` 起不来**（`Unable to start VoldNativeService`，exit 1）→ `vdc checkpoint` 等 50 秒超时 → `post-fs-data` 永远走不完 → **到不了 `class_start hal`，SurfaceFlinger 和 zygote 从未启动**。

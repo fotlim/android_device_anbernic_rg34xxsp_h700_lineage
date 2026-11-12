@@ -1,50 +1,57 @@
 #!/usr/bin/env python3
-"""sd50 (v2): ask the device, in the caller's own uid, whether /dev/hwbinder works.
+"""sd51: /system/etc is readable by root and by nobody else.  Confirm it on device.
 
-Why this version exists
------------------------
-v1 of this probe ran as root and tested `: < /dev/binder`.  That cannot see the
-failure mode that is now the prime suspect, because root bypasses the permission
-bits: a node that is 0600 root and a node that is 0666 both open fine for pid 1.
+What boot 8f4589fb proved (sd50 v3 probe)
+-----------------------------------------
+  * /dev/binder, /dev/hwbinder, /dev/vndbinder are `crw-rw-rw- 1 root root`,
+    major 238, and `/dev/binderfs` is mounted with shared:24 in BOTH the probe's
+    and pid 1's mountinfo  -> the nodes and the mount are fine.
+  * `: < /dev/hwbinder` succeeds as root, and `service list` answers with
+    "Found 6 services: ... vold" -> the AIDL servicemanager is healthy and even
+    vold registered.  So the system binder path is not the problem.
+  * hwservicemanager (pid 180, user system) holds fd 6 -> /dev/binderfs/hwbinder,
+    so it can open its own node too.
+  * Nevertheless 217 keystore aborts still say "Failed to get ServiceManager",
+    and p03 names the HIDL side out loud:
+        E HidlServiceManagement: Service ... must be in VINTF manifest in order
+        to register/get.
+    while hwservicemanager says, every single time:
+        W hwservicemanager: Cannot fetch /system/etc/vintf/manifest.xml:
+          Cannot read /system/etc/vintf/manifest.xml: Permission denied
 
-What the source says (all read, not guessed):
+The pattern that matters
+------------------------
+Three unrelated non-root processes fail to read files under /system/etc, and
+only under /system/etc:
 
-  system/libhidl/transport/ServiceManagement.cpp:174  defaultServiceManager1_2()
-      if (access("/dev/hwbinder", F_OK|R_OK|W_OK) != 0) {
-          // HwBinder not available on this device or not accessible to this
-          // process.
-          return nullptr;                       <-- no log, no crash
-      }
-      waitForHwServiceManager();
-      while (gDefaultServiceManager == nullptr) { ... sleep(1); }   <-- never returns null
+    /system/etc/vintf/manifest.xml              hwservicemanager (uid 1000)
+    /system/etc/seccomp_policy/mediacodec.policy media.codec
+    /system/etc/fonts.xml                        zygote
 
-    So HIDL's service manager object is null *only* when that access() fails.
-    Every other outcome either blocks or succeeds.
+while root reads /system/etc/selinux/plat_service_contexts with access=0 and
+init parses /system/etc/init/*.rc without complaint.  One unreadable subtree
+explains all six abort classes (four VINTF/HIDL, media.codec, zygote preload),
+because with an empty framework manifest every HIDL getTransport() returns
+EMPTY: getService() returns null and registerAsService() returns UNKNOWN_ERROR.
 
-  system/security/keystore/keystore_main.cpp:105
-      auto serviceManager = IServiceManager::getService();
-      CHECK(serviceManager.get()) << "Failed to get ServiceManager";
+So the question this probe settles is exactly: on the DEVICE (not in system.img),
+what are the modes, owners, symlink targets and labels of those files, and can
+uid 1017 / uid 1000 actually read them?
 
-    IServiceManager here is the HIDL one, so keystore's abort message is that
-    access() failing for uid 1017 (the keystore user).
+Note the earlier mistake that made this invisible: the sd50 probe grepped
+mountinfo for " /dev" only, so a /system/etc overlay would not have shown up.
+This version dumps the whole mountinfo and stats /system and /system/etc.
 
-  drivers/android/binderfs.c:158      init_special_inode(inode, S_IFCHR | 0600, ...)
-    binderfs creates its nodes 0600 root.  init.rc:187-189 chmods all three to
-    0666 afterwards, and none of those chmods reported a failure, so in theory
-    access() should pass -- which is exactly the contradiction this version is
-    built to resolve.
+Why the output goes to a file
+-----------------------------
+The sd50 v3 "on boot" block fell inside a 35.5 s - 36.0 s window where the ring
+buffer lost 433 lines ("kauditd_printk_skb: 627 callbacks suppressed"), and with
+it every uid-probe line.  /dev/kmsg is ratelimited and lossy; /metadata is ext4
+and survives the next reboot, where debug-init copies dsh/probe.log back to the
+card as DEBUG/meta-dsh_probe.log.  Both channels are written, the file is the
+authoritative one.
 
-  system/hwservicemanager/hwservicemanager.rc    user system, disabled, critical
-    It runs as uid 1000 and did not crash, so the node is openable O_RDWR by
-    system.  That is compatible with 0666 and with 0660 root:system, but not with
-    0600 root.
-
-So v2 adds a second probe that init starts as **uid of keystore** (1017), because
-`[ -r ]` / `[ -w ]` / the shell's redirect go through access() exactly like
-HIDL's check does.  Both probes still run through exec_background, so nothing can
-stall the boot.
-
-The script is idempotent: it replaces its own block when the markers are present.
+Idempotent: replaces its own block when the markers are present.
 """
 import sys
 
@@ -54,87 +61,81 @@ BEGIN = "// ---- sd50: does the default mount namespace see /dev/binder --------
 END = "// ---- end sd50 ---------------------------------------------------------------"
 
 NEW = r'''// ---- sd50: does the default mount namespace see /dev/binder ---------------
-// HIDL's defaultServiceManager1_2() returns nullptr only when
-// access("/dev/hwbinder", F_OK|R_OK|W_OK) fails; every other outcome blocks or
-// succeeds.  keystore's "Failed to get ServiceManager" is that nullptr, so the
-// question is whether /dev/hwbinder is rw for uid 1017 -- not for root.  Hence
-// two probes: one as root (existence, symlink target, mount layout) and one as
-// the keystore user (the access() test HIDL actually performs).
+// The nodes, their mode and the binderfs mount are all fine (sd50 v3).  What is
+// left is that no non-root process can read anything under /system/etc, which
+// empties the framework VINTF manifest and takes every HIDL user down with it.
+// Record the device-side truth to /metadata/dsh/probe.log: modes, owners,
+// readlink targets and actual read tests as root, as keystore and as system.
 static const char kDevProbeSh[] =
     "#!/system/bin/sh\n"
     "T=\"$1\"\n"
     "K=/dev/kmsg\n"
-    "echo \"devprobe[$T]: begin pid=$$ id=$(id) ctx=$(cat /proc/self/attr/current)\" > $K\n"
-    "echo \"devprobe[$T]: names=$(ls /dev | grep -ic bind)\" > $K\n"
-    "ls -l /dev/binder /dev/hwbinder /dev/vndbinder > $K 2>&1\n"
-    "ls -lL /dev/binder /dev/hwbinder /dev/vndbinder > $K 2>&1\n"
-    "readlink /dev/binder /dev/hwbinder /dev/vndbinder > $K 2>&1\n"
-    "echo \"devprobe[$T]: binderfs=[$(ls /dev/binderfs 2>&1)]\" > $K\n"
-    "ls -ll /dev/binderfs > $K 2>&1\n"
-    "echo \"devprobe[$T]: self mounts:\" > $K\n"
-    "grep -E \" /dev(/| )\" /proc/self/mountinfo > $K 2>&1\n"
-    "echo \"devprobe[$T]: init mounts:\" > $K\n"
-    "grep -E \" /dev(/| )\" /proc/1/mountinfo > $K 2>&1\n"
-    "SM=$(pidof servicemanager)\n"
-    "HM=$(pidof hwservicemanager)\n"
-    "echo \"devprobe[$T]: servicemanager=$SM hwservicemanager=$HM\" > $K\n"
-    "if [ -n \"$HM\" ]; then\n"
-    "    grep -E \"^State|^Threads|^Uid\" /proc/$HM/status > $K 2>&1\n"
-    "    ls -l /proc/$HM/fd > $K 2>&1\n"
-    "fi\n"
+    "L=/metadata/dsh/probe.log\n"
+    "echo \"===== devprobe[$T] pid=$$ id=$(id) ct=$(cat /proc/self/attr/current) =====\" >> $L\n"
+    "note() { echo \"$*\" >> $L; echo \"devprobe[$T]: $*\" > $K; }\n"
+    "note \"root sees: $(id -u)\"\n"
+    "note \"--- the three binder nodes ---\"\n"
     "for p in /dev/binder /dev/hwbinder /dev/vndbinder; do\n"
-    "    if ( : < $p ) 2>/dev/null; then echo \"devprobe[$T]: open $p OK (as root)\" > $K; else echo \"devprobe[$T]: open $p FAILED (as root)\" > $K; fi\n"
+    "    note \"$(ls -lL $p 2>&1 | tr -s ' ')\"\n"
+    "    note \"readlink: $(readlink $p 2>&1)\"\n"
     "done\n"
-    "if [ \"$T\" = boot ]; then\n"
-    "    echo \"devprobe[$T]: service list:\" > $K\n"
-    "    timeout 5 /system/bin/service list > $K 2>&1\n"
-    "    echo \"devprobe[$T]: service list rc=$?\" > $K\n"
-    "fi\n"
-    "echo \"devprobe[$T]: end\" > $K\n";
+    "note \"--- /system and /system/etc themselves ---\"\n"
+    "note \"$(ls -ld /system /system/etc /system/etc/vintf /system/etc/seccomp_policy 2>&1 | tr -s ' ')\"\n"
+    "note \"--- the four files that EACCES ---\"\n"
+    "for p in /system/etc/vintf/manifest.xml /system/etc/vintf/manifest /system/etc/seccomp_policy/mediacodec.policy /system/etc/fonts.xml; do\n"
+    "    note \"$(ls -lL $p 2>&1 | tr -s ' ')\"\n"
+    "    note \"readlink[$p]=$(readlink $p 2>&1)\"\n"
+    "    R=no; [ -r $p ] && R=yes\n"
+    "    note \"root read $p = $R\"\n"
+    "    if ( : < $p ) 2>/dev/null; then note \"root open $p OK\"; else note \"root open $p FAILED\"; fi\n"
+    "done\n"
+    "note \"--- fragment dir ---\"\n"
+    "note \"$(ls -l /system/etc/vintf/manifest 2>&1 | tr -s ' ')\"\n"
+    "note \"--- selinux label of the manifest (root only) ---\"\n"
+    "note \"$(ls -Zd /system/etc/vintf/manifest.xml 2>&1)\"\n"
+    "note \"--- full mountinfo (no filter: an overlay of /system/etc must not hide again) ---\"\n"
+    "cat /proc/self/mountinfo >> $L\n"
+    "note \"--- servicemenagers ---\"\n"
+    "note \"servicemanager=$(pidof servicemanager) hwservicemanager=$(pidof hwservicemanager)\"\n"
+    "HM=$(pidof hwservicemanager)\n"
+    "if [ -n \"$HM\" ]; then ls -l /proc/$HM/fd >> $L 2>&1; fi\n"
+    "note \"--- service list ---\"\n"
+    "timeout 5 /system/bin/service list >> $L 2>&1\n"
+    "note \"service list rc=$?\"\n"
+    "note \"===== end devprobe[$T] =====\"\n";
 
-// Runs as a service user (keystore / system), i.e. with the same permissions
-// HIDL's access() check and hwservicemanager's manifest read have.  [ -r ] and
-// [ -w ] go through access(), exactly like the check that returns nullptr.
+// Same checks with the permissions of a service user.  [ -r ] is access(R_OK),
+// which is the call HIDL's defaultServiceManager() makes before returning null.
 static const char kDevProbeUidSh[] =
     "#!/system/bin/sh\n"
     "T=\"$1\"\n"
     "K=/dev/kmsg\n"
-    "echo \"devprobe[$T]: id=$(id)\" > $K\n"
+    "L=/metadata/dsh/probe.log\n"
+    "echo \"===== devprobe[$T] id=$(id) ct=$(cat /proc/self/attr/current) =====\" >> $L\n"
+    "note() { echo \"$*\" >> $L; echo \"devprobe[$T]: $*\" > $K; }\n"
     "for p in /dev/binder /dev/hwbinder /dev/vndbinder; do\n"
     "    R=no; W=no\n"
     "    [ -r $p ] && R=yes\n"
     "    [ -w $p ] && W=yes\n"
-    "    echo \"devprobe[$T]: $p read=$R write=$W\" > $K\n"
-    "    if ( : < $p ) 2>/dev/null; then echo \"devprobe[$T]: open $p OK\" > $K; else echo \"devprobe[$T]: open $p FAILED\" > $K; fi\n"
+    "    note \"$p read=$R write=$W\"\n"
+    "    if ( : < $p ) 2>/dev/null; then note \"open $p OK\"; else note \"open $p FAILED\"; fi\n"
     "done\n"
-    "for f in /system/etc/vintf/manifest.xml /system/manifest.xml /system/etc/vintf/manifest /system/etc/vintf/manifest/android.system.suspend@1.0-service.xml /vendor/etc/vintf/manifest.xml /system/etc/seccomp_policy/mediacodec.policy /system/etc/fonts.xml; do\n"
+    "for p in /system/etc/vintf/manifest.xml /system/etc/vintf/manifest /system/etc/seccomp_policy/mediacodec.policy /system/etc/fonts.xml /system/etc/init/hw/init.rc /system/bin/sh; do\n"
     "    R=no\n"
-    "    [ -r $f ] && R=yes\n"
-    "    echo \"devprobe[$T]: read $f $R\" > $K\n"
+    "    [ -r $p ] && R=yes\n"
+    "    note \"read $p = $R\"\n"
     "done\n"
-    "ls -l /dev/hwbinder /dev/binderfs/hwbinder /system/etc/vintf/manifest.xml /system/etc/vintf > $K 2>&1\n"
-    "echo \"devprobe[$T]: done\" > $K\n";
+    "note \"$(ls -ld /system /system/etc /system/etc/vintf 2>&1 | tr -s ' ')\"\n"
+    "note \"$(ls -lL /system/etc/vintf/manifest.xml 2>&1 | tr -s ' ')\"\n"
+    "note \"===== end devprobe[$T] =====\"\n";
 
-// Two probes, because the two failure classes need different witnesses:
-//   * post-fs-data, as root: what the system left behind (modes, symlinks,
-//     mount layout, who holds a binder fd).  This runs *before* the chmods
-//     below, so it captures the state the boot actually failed in.
-//   * boot, after chmod 0666 on the three binderfs nodes: the same report plus
-//     the access() test as keystore and as system, i.e. what HIDL and
-//     hwservicemanager would see, and whether the chmod was what mattered.
 static const char kDevProbeRc[] =
     "on post-fs-data\n"
-    "    exec_background - root root -- /system/bin/sh /metadata/dsh/devprobe.sh post-fs-data\n"
-    "\n"
-    "on boot\n"
-    "    chmod 0666 /dev/binderfs/binder\n"
-    "    chmod 0666 /dev/binderfs/hwbinder\n"
-    "    chmod 0666 /dev/binderfs/vndbinder\n"
-    "    exec_background - root root -- /system/bin/sh /metadata/dsh/devprobe.sh boot\n"
+    "    exec_background - root root -- /system/bin/sh /metadata/dsh/devprobe.sh root\n"
     "    start devprobe_keystore\n"
     "    start devprobe_system\n"
     "\n"
-    "# The access() test HIDL performs, with the permissions keystore has.\n"
+    "# The read test HIDL performs, with the permissions keystore has.\n"
     "service devprobe_keystore /system/bin/sh /metadata/dsh/devprobe-uid.sh keystore\n"
     "    class late_start\n"
     "    user keystore\n"
@@ -142,8 +143,8 @@ static const char kDevProbeRc[] =
     "    oneshot\n"
     "    disabled\n"
     "\n"
-    "# Same, as system: hwservicemanager runs as system and is the one that has to\n"
-    "# read the VINTF manifest and be able to open /dev/hwbinder.\n"
+    "# Same, as system: hwservicemanager's identity, and the one that has to read\n"
+    "# the framework VINTF manifest.\n"
     "service devprobe_system /system/bin/sh /metadata/dsh/devprobe-uid.sh system\n"
     "    class late_start\n"
     "    user system\n"
@@ -160,9 +161,6 @@ static void PublishDevProbe() {
 // ---- end sd50 ---------------------------------------------------------------
 '''
 
-# Same anchors as before: the block goes in front of PublishRamdiskFstab (after
-# PublishTextFile, so the helper is visible) and the call right after the
-# selinux-contexts publish, when the /vendor/etc overlay is already up.
 ANCHOR_FUNC = "void PublishRamdiskFstab(DIR* ramdisk) {"
 ANCHOR_CALL = "    PublishSelinuxContexts();\n"
 CALL_LINE = "    PublishDevProbe();\n"

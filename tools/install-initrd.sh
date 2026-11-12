@@ -1,17 +1,29 @@
 #!/bin/bash
-# Pack /root/initramfs-embed/init.android into the external initrd on the card.
+# Pack the ramdisk binaries into the external initrd on the card.
 #
 # Why an external initrd: the kernel unpacks the built-in cpio first and then the
 # one U-Boot hands over *into the same rootfs*, so a same-named entry replaces
 # the built-in file.  That is how /init.android (the second-stage init) gets
 # swapped without rebuilding Image -- see docs/HANDOVER.md section 6.0.
 #
+# sd51 also carries /init (debug-init) this way, because debug-init's metadata
+# receipt list gained "dsh/probe.log": rebuilding the kernel's built-in cpio for
+# one line would mean a full Image rebuild, while an external entry costs 650 KiB
+# on the card.  Set --no-debug-init to pack only /init.android.
+#
 # Usage:  install-initrd.sh [card-mount]        (default /mnt/g)
 set -e
 
 INIT=/root/initramfs-embed/init.android
-REPO=/mnt/c/Users/LinOcean/Documents/deepseek-harness/default-workspace/03_WSA与安卓/anbernic-rg34xxsp
+DEBUG_INIT=/root/initramfs-embed/init
+REPO=${REPO:-/root/repo}
 CARD=${1:-/mnt/g}
+PACK_DEBUG=1
+for a in "$@"; do
+	case "$a" in
+		--no-debug-init) PACK_DEBUG=0 ;;
+	esac
+done
 
 echo "=== source binary ==="
 ls -l "$INIT"
@@ -22,11 +34,25 @@ for m in 'ctx: probe %s: access=' 'ctx: overlay /vendor/etc/selinux ok' 'devprob
 	printf '  %-44s %s\n' "$m" "$(strings -a "$INIT" | grep -Fc -- "$m")"
 done
 
+ADD=("$INIT:/init.android:0755")
+if [ "$PACK_DEBUG" = 1 ]; then
+	echo
+	echo "=== debug-init (the ramdisk /init) ==="
+	ls -l "$DEBUG_INIT"
+	file "$DEBUG_INIT"
+	sha256sum "$DEBUG_INIT"
+	if [ ! -x "$DEBUG_INIT" ]; then
+		echo "!! $DEBUG_INIT missing; rebuild with tools/debug-init/build.sh -o $DEBUG_INIT" >&2
+		exit 1
+	fi
+	ADD+=("$DEBUG_INIT:/init:0755")
+fi
+
 echo
-echo "=== packing /init.android into a newc cpio (gzip) ==="
+echo "=== packing into a newc cpio (gzip) ==="
 python3 "$REPO/tools/make-initrd.py" \
 	--out /tmp/initrd.img --gzip \
-	--add "$INIT:/init.android:0755"
+	$(for e in "${ADD[@]}"; do printf ' --add %s' "$e"; done)
 
 echo
 echo "=== archive ==="
