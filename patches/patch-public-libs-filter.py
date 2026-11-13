@@ -70,24 +70,31 @@ mkdir -m 0755 /dev/dsh_upper /dev/dsh_work 2>>$LOG
 if mount -t overlay overlay -o lowerdir=/system/etc,upperdir=/dev/dsh_upper,workdir=/dev/dsh_work /system/etc 2>>$LOG; then
     chmod 0755 /system/etc 2>>$LOG
     chmod 0755 /dev/dsh_upper /dev/dsh_work 2>>$LOG
-    # The stock mediacodec-arm.policy ends its mremap line with
-    # `arg3 == 3 || arg3 == MREMAP_MAYMOVE`, and this tree's libminijail has no
-    # MREMAP_* in its generated constant table, so the parse fails and
-    # SetUpMinijail() aborts the whole media.codec service before it ever runs:
-    #   #02 libminijail.so minijail_parse_seccomp_filters_from_fd+170
-    #   #03 libavservices_minijail.so SetUpMinijailList+452
-    # Relaxing that one line to allow any flags keeps the policy parseable. The
-    # filter is only a hardening layer; the build is permissive anyway.
+    # The stock policy ends with two @include lines:
+    #     @include /system/etc/seccomp_policy/crash_dump.arm.policy      (61)
+    #     @include /system/etc/seccomp_policy/code_coverage.arm.policy   (63)
+    # libminijail fopen()s them just fine and then reports 'getmultiline()
+    # failed', because compile_file() checks errno only AFTER the getline loop
+    # has hit EOF (syscall_filter.c:730) and getline does not clear errno. A
+    # stale EINVAL therefore makes a healthy, 68-byte, comments-only file look
+    # unreadable, compile_filter() fails, die() aborts the service, and
+    # vendor.media.omx restarts every 5 s dragging media and wificond with it --
+    # which is why system_server never gets to run.
+    #
+    # Boot 702a1e18 proved it was never the mremap constant: with the policy
+    # unpatched the parse walked straight past the mremap line and died on 63,
+    # and with mremap relaxed it died on 63 again. So stop touching mremap and
+    # drop the two includes instead. The filter is a hardening layer and this
+    # build is permissive, so every syscall rule above them still applies.
     POL=/system/etc/seccomp_policy/mediacodec.policy
     if [ -f "$POL" ]; then
-        cp "$POL" /dev/pol.in 2>>$LOG
-        sed 's|^mremap:.*|mremap: 1|' /dev/pol.in > /dev/pol.out 2>>$LOG
-        if [ -s /dev/pol.out ]; then
-            cp /dev/pol.out "$POL" 2>>$LOG
-            chmod 0644 "$POL" 2>>$LOG
-            echo "policy: mremap relaxed ($(ls -l "$POL" | cut -d' ' -f1)), MREMAP left: $(grep -c MREMAP "$POL")" >> $LOG
+        grep -v '^@include' "$POL" > /dev/pol.in 2>>$LOG
+        if [ -s /dev/pol.in ]; then
+            cp /dev/pol.in "$POL" 2>>$LOG
+            chmod 0644 "$POL" 2>>$LOG      # umask is 077 for init services
+            echo "policy: $(wc -l < "$POL") lines, includes left: $(grep -c '^@include' "$POL"), $(ls -l "$POL" | cut -d' ' -f1)" >> $LOG
         else
-            echo "policy: sed produced nothing, left alone" >> $LOG
+            echo "policy: grep produced nothing, left alone" >> $LOG
         fi
     fi
     if cp $FILT $LIST 2>>$LOG; then
