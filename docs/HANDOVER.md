@@ -48,6 +48,50 @@
 >
 > 完整证据与判读见
 > [2026-11-12 开发日志 §12](../../../../../rg34xxsp开发日志/2026-11-12-sd49上机与cpio-mode根因.md)。
+>
+> ## ★★ 通用规则（2026-11-13 由先行项目 H700Android 交叉验证）
+>
+> **规则一：init `exec` 脚本里创建的文件/目录必须显式给模式。**
+> `system/core/init/service.cpp:500` 是 `umask(077)`，**每个 init 服务（含 `exec`）都在这之下运行**，
+> 所以 `mkdir`/`open(O_CREAT)` 的默认模式会被削成 0700/0600。我们的 `/system/etc` 0700 事故就是
+> `mkdir -p /dev/dsh_upper` 造成的。复查范围：`fix-public-libs.sh`、`96-system-fix.rc`、
+> `98-framework-logs.rc`、`99-mount-data.rc` 等**所有** exec 脚本。
+> （原生 HTML 对照：H700Android 的 RC5 也因 PID1 继承 `0022` 把 `0770` 变 `0750`，Bootfix1 修法就是恢复 `umask 000`。）
+>
+> **规则二：显示面板绝不靠字符串猜分辨率。**
+> H700Android 的 DisplayAuto Test2 因把 `lcd_type=old` 当作「640×480」判据，导致 720 实物屏
+> 花屏重影、RG34XXSP 闪 Logo 后黑屏，**整包被否决**。他们的原文结论：
+> 「不能用单改 `wm size` 或盲改 DTB 宽度代替面板/时序适配」。
+> → **我们坚持显式 `v2-panel` DTB + 固定 720×480，不做运行时自动识别。**
+>
+> **规则三：任何功能都不许用内存大小做开关。**
+> RG34XXSP 存在 2GB（首发）/1GB（现行）/512MB（错发批次）三种；我们实测 1 GiB 是**当前标准**，不是缺陷。
+> H700Android 曾把摇杆模块写成「<1.5GiB 拒绝加载且不进 Android」，结果 1GB 机型直接被阻断，后来不得不改成可选。
+>
+> ## ★★ 从 H700Android 抄来的配置（已改进 `lineage_rg34xxsp.mk`，待重编生效）
+>
+> | 属性 | 值 | 理由 |
+> |---|---|---|
+> | `ro.sf.lcd_density` | `213` | SurfaceFlinger 明报 `must be defined as a build property`；同屏同值 |
+> | `debug.hwui.renderer` | `opengl` | Mali-G31 MP2 + 1 GiB 上更稳 |
+> | `debug.hwui.use_buffer_age` | `false` | 同上（他们实机结论） |
+> | `debug.hwui.use_partial_updates` | `false` | 同上 |
+>
+> 已对齐无需改：`ro.config.low_ram=true`、`zramsize=75%`。
+> 可考虑：`ro.lmk.use_psi=true`（我们现在走 `use_minfree_levels`）。
+>
+> ## ★★ 需要重新审视的 HAL 声明（他们用"少声明"绕开了我们的崩溃）
+>
+> - **health**：他们只声明 **2.0**；我们声明 **2.1**，而崩溃信息正是
+>   `Cannot find passthrough implementation of health 2.1 HAL for instance default`。
+>   → 要么补上真正的 2.1 实现，要么降到 2.0。
+> - **gatekeeper**：他们直接 `PRODUCT_PACKAGES -= android.hardware.gatekeeper@1.0-impl`，
+>   靠 gatekeeperd 的进程内软件回退（我们有 gatekeeper SIGABRT 记录）。→ 可以同样删掉。
+> - `PRODUCT_ENFORCE_VINTF_MANIFEST_OVERRIDE := false` 只绕过**构建期**强制，
+>   **不解决运行期 `getTransport() → EMPTY`**；真正要做的是让 `manifest.xml` 与实装一致。
+>
+> 详细对照表（含图形栈、分区、sepolicy 为何不适用）见
+> [开发日志 §13](../../../../../rg34xxsp开发日志/2026-11-12-sd49上机与cpio-mode根因.md)。
 
 > ### 【2026-11-12 17:5x 更新】boot `4afef271`
 >

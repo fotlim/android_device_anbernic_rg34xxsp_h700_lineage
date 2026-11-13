@@ -64,6 +64,23 @@ PRODUCT_PROPERTY_OVERRIDES += \
     dalvik.vm.heapminfree=2m \
     dalvik.vm.heapmaxfree=8m
 
+# SurfaceFlinger refuses to start the display path without this one, and says so
+# out loud: "ro.sf.lcd_density must be defined as a build property". At 720x480
+# on a 3.4" panel that lands on 213 dpi, which is also the value the H700 ROC OS
+# project uses on the same screen. It has to be a build property, so it belongs
+# here and not in vendor.prop.
+PRODUCT_PROPERTY_OVERRIDES += \
+    ro.sf.lcd_density=213
+
+# Mali-G31 MP2 on 1 GiB. Skia's GL backend is the safer renderer at this size,
+# and both the buffer-age and partial-update paths are known to misbehave on
+# this GPU generation. The H700 ROC OS Android 10 port settled on the same
+# three switches after real-device testing.
+PRODUCT_PROPERTY_OVERRIDES += \
+    debug.hwui.renderer=opengl \
+    debug.hwui.use_buffer_age=false \
+    debug.hwui.use_partial_updates=false
+
 # Fingerprint: keep the stock-style one for Play certification later on.
 PRODUCT_BUILD_PROP_OVERRIDES += \
     PRODUCT_NAME=RG34XXSP \
