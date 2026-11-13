@@ -8,6 +8,45 @@
 
 ## 0. 一句话现状
 
+> # ★ 2026-11-13 11:2x：`/system/etc` 修复已上卡；又发现缺字体（整卡镜像在生成）
+>
+> **进展**
+> 1. **`/system/etc` 0700 的修复已编进 init 并上卡**（sd52）：
+>    `mkdir -m 0755` + 挂载后立刻 `chmod 0755 /system/etc`。
+>    `G:\initrd.img` = 1,243,537 B，sha256 `6eeecbf5…`，含 `/init` + `/init.android`。
+>    **这份卡可以直接上机验**：只要 `/system/etc` 回到 0755，六类 HIDL 崩溃应一起消失。
+> 2. **新发现：产品根本没有字体。** `installed-files.txt` 里 fonts 计数为 0，
+>    `/system/fonts` 在 `system.img` 里**整个目录都不存在**，`/system/etc/fonts.xml` 也没有。
+>    于是 zygote 死在 `java.io.FileNotFoundException: /system/etc/fonts.xml` →
+>    `Error preloading android.graphics.Typeface`。
+>    **修好 `/system/etc` 权限后这里只会从 EACCES 变成 ENOENT，仍然过不去。**
+>
+>    **根因**：字体/断词表/键盘表/WebView 都在 `build/make/target/product/handheld_system.mk`，
+>    而它只被 `generic_no_telephony.mk` 和 `mainline_system.mk` 继承；
+>    我们这条链（`core_64_bit → base → common_full_tablet_wifionly`）一次都没碰到它。
+>
+>    **修法**（已改 `lineage_rg34xxsp.mk`，注意 `inherit-product-if-exists` 实测无效，必须用 `inherit-product`）：
+>    ```make
+>    $(call inherit-product, frameworks/base/data/fonts/fonts.mk)
+>    $(call inherit-product, external/noto-fonts/fonts.mk)
+>    $(call inherit-product, external/roboto-fonts/fonts.mk)
+>    $(call inherit-product, external/hyphenation-patterns/patterns.mk)
+>    $(call inherit-product, frameworks/base/data/keyboards/keyboards.mk)
+>    ```
+>    效果已核实：`/system/fonts` **246 个文件 / 74 MB**、`/etc/fonts.xml` 33,537 B、
+>    `system.img` 748→827 MB、`super.img` 943→1,023,117,616 B（system 分区 829,988,864 B）。
+>
+> **★★ 两个新增的工具/纪律（不遵守会静默失败）**
+> * `tools/sync-device-tree.sh` —— 构建树里的 `/root/android/lineage/device/anbernic/rg34xxsp`
+>   是**实体目录，不是指向本仓库的符号链接**。在这里改 `*.mk` 再 `m` 会得到
+>   `ninja: no work to do`，镜像里什么都没有（`lcd_density` 那批属性就是这么丢的）。
+>   同步后还要 `touch` 那几个 mk 才会让 kati 重生成规则。
+> * **卡在 WSL 里不是块设备**（`lsblk` 只有虚拟盘，`G:` 是 drvfs/9p），
+>   所以**无法直接 dd 到 super 分区**；字体这 74 MB 也塞不进 64 MiB 的 boot 分区，
+>   只能走**整卡镜像 + Rufus 刷写**。
+>
+> 见开发日志 §14。
+
 > # ★ 2026-11-12 22:5x：根因已确认，修复已写好但**未编译**
 >
 > **`/system/etc` 被我们自己的 overlay 兜底改成了 `drwx------`（0700 root:root）。**
