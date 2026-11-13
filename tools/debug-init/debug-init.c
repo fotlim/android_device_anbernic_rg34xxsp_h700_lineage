@@ -329,6 +329,7 @@ static int harvest_metadata(void)
 	const char *devs[] = { "/dev/mmcblk0p3", "/dev/block/mmcblk0p3" };
 	const char *files[] = { "first-stage-publish.txt", "fstab.rg34xxsp",
 				"fstab.published", "dsh/fix.log",
+				"dsh/seccomp-fix.log", "dsh/timeline.log",
 				"dsh/public.libraries.txt", "dsh/probe.log" };
 	char p[160], dst[160];
 	int i, j, copied = 0, mounted = 0;
@@ -352,23 +353,28 @@ static int harvest_metadata(void)
 
 	for (j = 0; j < (int)ARRAY_SIZE(files); j++) {
 		char buf[4096];
-		size_t n;
+		char name[96];
+		size_t n, written = 0;
+		size_t cap = 64 * 1024;
 		FILE *in, *o;
 
 		snprintf(p, sizeof(p), "/meta/%s", files[j]);
 		if (access(p, F_OK) != 0)
 			continue;
-		snprintf(dst, sizeof(dst), "/mnt/DEBUG/meta-%s", files[j]);
-		{
-			/* '/' is not a legal FAT file name character. */
-			char *s = dst;
-
-			while (*s) {
-				if (*s == '/')
-					*s = '_';
-				s++;
-			}
-		}
+		/*
+		 * '/' cannot appear in a FAT file name, but only the relative part
+		 * may be rewritten. The first version walked the whole destination
+		 * string and turned the leading '/' of "/mnt/DEBUG/..." into '_'
+		 * as well, so every receipt became a RELATIVE path and landed in
+		 * the initramfs rootfs instead of on the card. The counter still
+		 * said "metadata receipts: 5" -- the write succeeded, it was just
+		 * the wrong filesystem. That is also why sync() did not save them.
+		 */
+		snprintf(name, sizeof(name), "%s", files[j]);
+		for (char *s = name; *s; s++)
+			if (*s == '/')
+				*s = '_';
+		snprintf(dst, sizeof(dst), "/mnt/DEBUG/meta-%s", name);
 		in = fopen(p, "r");
 		if (!in)
 			continue;
@@ -378,8 +384,15 @@ static int harvest_metadata(void)
 			continue;
 		}
 		fprintf(o, "===== %s (left behind by the first stage) =====\n", p);
-		while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+		/* The boot partition is 64 MiB and the kernel already uses 35. */
+		while (written < cap && (n = fread(buf, 1, sizeof(buf), in)) > 0) {
+			if (written + n > cap)
+				n = cap - written;
 			fwrite(buf, 1, n, o);
+			written += n;
+		}
+		if (written >= cap)
+			fprintf(o, "\n[truncated at %zu bytes]\n", cap);
 		fflush(o);
 		fsync(fileno(o));
 		fclose(o);
@@ -388,11 +401,11 @@ static int harvest_metadata(void)
 		copied++;
 	}
 	/*
-	 * fsync() flushes the file, not the directory entry that names it. Last
-	 * round the card came out of the machine with the seven p??.txt files
-	 * present and both meta-*.txt files gone, written by the same loop: the
-	 * difference was the sync() at the end of harvest_data(). Do the same
-	 * here before the power goes away.
+	 * sync() still matters (it flushes the directory entry, not just the
+	 * data), but it was never the reason the receipts went missing: the
+	 * leading '/' of the destination had been rewritten to '_' above, so
+	 * they were written to the initramfs rootfs and no amount of flushing
+	 * could put them on the card. Keep the flush; it is cheap.
 	 */
 	sync();
 	umount("/meta");
