@@ -623,6 +623,9 @@ bash patches/apply.sh /root/android/lineage
 - 裸写 `\\.\PhysicalDriveN` **彻底不可用**（+1 扇区位移、每 64 KiB 首扇区丢失、且一律返回成功）。整盘写只能 Rufus（DD 模式）。
 - 日常换内核只走**已挂载 FAT 的文件级** `Copy-Item` + `Write-VolumeCache` + sha256 核对。WSL 的 `/mnt/g` 与 Windows 的 `G:` 会不同步，写完必须从 Windows 侧核。
 - 卡上文本用 UTF-8 **无 BOM**；`extlinux.conf` 必须 **LF**（CRLF 会让 U-Boot sysboot 失败）。
+- **弹卡前先把 `/mnt/g` 卸掉**（`umount /mnt/g`）。WSL 的 drvfs 会一直占着这个卷，
+  Windows 弹卡就报「该设备正在使用中」；凡是在脚本里 `mount -t drvfs 'G:' /mnt/g` 过，收尾必须卸。
+  第二个常见拦路虎是**资源管理器窗口停在 `G:`**（拷完 `DEBUG\` 之后几乎必然），先把窗口关掉再弹。
 
 ### 7.4 读卡上日志
 - 卡挂成 `G:`（盘符会漂）。读不出来先 `cmd /c "chkdsk G: /F"`。
