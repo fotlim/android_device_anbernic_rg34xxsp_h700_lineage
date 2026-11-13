@@ -70,33 +70,33 @@ mkdir -m 0755 /dev/dsh_upper /dev/dsh_work 2>>$LOG
 if mount -t overlay overlay -o lowerdir=/system/etc,upperdir=/dev/dsh_upper,workdir=/dev/dsh_work /system/etc 2>>$LOG; then
     chmod 0755 /system/etc 2>>$LOG
     chmod 0755 /dev/dsh_upper /dev/dsh_work 2>>$LOG
-    # The stock policy ends with two @include lines:
-    #     @include /system/etc/seccomp_policy/crash_dump.arm.policy      (61)
-    #     @include /system/etc/seccomp_policy/code_coverage.arm.policy   (63)
+    # Every policy in that directory ends with two @include lines:
+    #     @include /system/etc/seccomp_policy/crash_dump.<arch>.policy
+    #     @include /system/etc/seccomp_policy/code_coverage.<arch>.policy
     # libminijail fopen()s them just fine and then reports 'getmultiline()
     # failed', because compile_file() checks errno only AFTER the getline loop
     # has hit EOF (syscall_filter.c:730) and getline does not clear errno. A
     # stale EINVAL therefore makes a healthy, 68-byte, comments-only file look
-    # unreadable, compile_filter() fails, die() aborts the service, and
-    # vendor.media.omx restarts every 5 s dragging media and wificond with it --
-    # which is why system_server never gets to run.
+    # unreadable, compile_filter() fails, die() aborts the service, and the HAL
+    # then restarts every 5 s dragging its neighbours with it.
     #
-    # Boot 702a1e18 proved it was never the mremap constant: with the policy
-    # unpatched the parse walked straight past the mremap line and died on 63,
-    # and with mremap relaxed it died on 63 again. So stop touching mremap and
-    # drop the two includes instead. The filter is a hardening layer and this
-    # build is permissive, so every syscall rule above them still applies.
-    POL=/system/etc/seccomp_policy/mediacodec.policy
-    if [ -f "$POL" ]; then
+    # Boot 702a1e18 proved it was never the mremap constant, and boot d85ef342
+    # proved this fix works: mediacodec.policy came out at 61 lines with zero
+    # includes and vendor.media.omx stopped restarting altogether (58 -> 0).
+    # mediaextractor.policy carries the same two lines and would hit the same
+    # wall, so do the whole directory instead of one file at a time.
+    for POL in /system/etc/seccomp_policy/*.policy; do
+        [ -f "$POL" ] || continue
+        have=$(grep -c '^@include' "$POL" 2>/dev/null)
+        case "$have" in ''|0) continue ;; esac
         grep -v '^@include' "$POL" > /dev/pol.in 2>>$LOG
-        if [ -s /dev/pol.in ]; then
-            cp /dev/pol.in "$POL" 2>>$LOG
+        if [ -s /dev/pol.in ] && cp /dev/pol.in "$POL" 2>>$LOG; then
             chmod 0644 "$POL" 2>>$LOG      # umask is 077 for init services
-            echo "policy: $(wc -l < "$POL") lines, includes left: $(grep -c '^@include' "$POL"), $(ls -l "$POL" | cut -d' ' -f1)" >> $LOG
+            echo "policy: $(basename "$POL") $(wc -l < "$POL") lines, includes left: $(grep -c '^@include' "$POL")" >> $LOG
         else
-            echo "policy: grep produced nothing, left alone" >> $LOG
+            echo "policy: $(basename "$POL") untouched (grep or cp failed)" >> $LOG
         fi
-    fi
+    done
     if cp $FILT $LIST 2>>$LOG; then
         # This runs as an init service, so umask is 077 and cp creates 0600 root.
         # public.libraries.txt is read by ordinary app processes, so without this

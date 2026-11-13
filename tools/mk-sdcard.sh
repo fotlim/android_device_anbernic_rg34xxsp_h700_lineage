@@ -376,6 +376,16 @@ fi
 #    stderr visible on the panel once fbcon binds, which is the only way to
 #    see where a boot fails on this device.
 #
+#  * drm.debug=0x0 + log_buf_len=4M (sd55) -- the opposite of a debugging aid
+#    at first glance, and it is the single biggest diagnostic win we have had.
+#    0x1f turned on every DRM debug category, and this 7.1.2 kernel traces every
+#    drm_ioctl with comm/pid, so a single boot produced ~2900 `[drm:drm_ioctl]`
+#    lines against init's ~240. printk then rate-limits init's own messages and
+#    /dev/kmsg loses the interesting half: on boot f491bbf9 there was not one
+#    `F DEBUG` line and no record of who stopped zygote. Quieting DRM back to 0
+#    and raising the ring buffer to 4 MiB keeps init's story intact. Put 0x1f
+#    back only when a specific DRM question needs it.
+#
 # When --debug-init is given the default label uses initrd-debug.img, which is
 # the stock ramdisk with a logger prepended: it records to DEBUG/dmesg.txt and
 # then exec's the real Android init, so this is still a normal boot.
@@ -408,7 +418,7 @@ label android
     menu label Android 11 (LineageOS 18.1)
     kernel /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb$INITRD_SUFFIX
-    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=soc/4020000.mmc,4020000.mmc androidboot.super_partition=super drm.debug=0x1f drm_leak_fbdev_smem=1
+    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=soc/4020000.mmc,4020000.mmc androidboot.super_partition=super drm.debug=0x0 drm_leak_fbdev_smem=1 log_buf_len=4M
 
 # Same Android image but with the v2 panel firmware. The two DTB files differ
 # only in rocknix-dt-id and the panel node's first compatible string, which is
@@ -418,7 +428,7 @@ label android-v2
     menu label Android 11 (v2 panel)
     kernel /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb$INITRD_SUFFIX
-    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=soc/4020000.mmc,4020000.mmc androidboot.super_partition=super drm.debug=0x1f drm_leak_fbdev_smem=1
+    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=soc/4020000.mmc,4020000.mmc androidboot.super_partition=super drm.debug=0x0 drm_leak_fbdev_smem=1 log_buf_len=4M
 
 # Same kernel, but no ramdisk and no init: the kernel panics after
 # init_mount_root() because there is nothing to exec. Kept as an escape hatch
@@ -440,7 +450,7 @@ label plain
     kernel /Image
     devicetree /sun50i-h700-anbernic-rg34xx-sp.dtb
     initrd /initrd.img
-    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=soc/4020000.mmc,4020000.mmc androidboot.super_partition=super drm.debug=0x1f drm_leak_fbdev_smem=1
+    append console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=soc/4020000.mmc,4020000.mmc androidboot.super_partition=super drm.debug=0x0 drm_leak_fbdev_smem=1 log_buf_len=4M
 EOF
 fi
 
@@ -469,7 +479,7 @@ if command -v mkimage >/dev/null 2>&1; then
 fatwrite mmc 0:1 0x4FC00040 BREAD.TXT 32
 fatload mmc 0:1 0x4FA00000 /sun50i-h700-anbernic-rg34xx-sp.dtb && fatwrite mmc 0:1 0x4FA00000 STEP1DTB.TXT 16
 fatload mmc 0:1 0x40080000 /Image && fatwrite mmc 0:1 0x40080000 STEP2IMG.TXT 16
-setenv bootargs console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=soc/4020000.mmc,4020000.mmc androidboot.super_partition=super drm.debug=0x1f drm_leak_fbdev_smem=1
+setenv bootargs console=ttyS0,115200 console=tty0 earlycon no_console_suspend ignore_loglevel loglevel=7 coherent_pool=1M androidboot.hardware=rg34xxsp androidboot.selinux=permissive androidboot.boot_devices=soc/4020000.mmc,4020000.mmc androidboot.super_partition=super drm.debug=0x0 drm_leak_fbdev_smem=1 log_buf_len=4M
 booti 0x40080000 - 0x4FA00000
 fatwrite mmc 0:1 0x4FC00040 STEP3FAIL.TXT 32
 EOF
