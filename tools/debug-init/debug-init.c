@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1764,7 +1765,7 @@ static void snapshot(FILE *o)
 	/* Does the super partition look like an Android dynamic partition? */
 	{
 		int fd = open("/dev/mmcblk0p4", O_RDONLY);
-		unsigned char hdr[4096];
+		unsigned char hdr[8192];
 
 		say("\n===== super (mmcblk0p4) LP metadata =====\n");
 		if (fd < 0) {
@@ -1772,17 +1773,49 @@ static void snapshot(FILE *o)
 		} else {
 			ssize_t n = read(fd, hdr, sizeof(hdr));
 
-			if (n < 4096) {
+			if (n < 8192) {
 				say("(short read: %zd)\n", n);
 			} else {
-				/* geometry magic 0x616c4467 lives at 4096+offset */
+				/*
+				 * liblp skips LP_PARTITION_RESERVED_BYTES (4096) before
+				 * writing the geometry, so bytes 0..31 are legitimately
+				 * zero and reading them tells you nothing.  The first
+				 * geometry lives at 4096 and the magic is 0x616c4467
+				 * ("gDla" when laid out little-endian), so print that.
+				 */
+				uint32_t g;
+
+				memcpy(&g, hdr + 4096, 4);
+				say("geometry @4096: %08x (%s)\n", g,
+				    g == 0x616c4467U ? "gDla OK" : "MISSING");
 				say("first 32 bytes: ");
 				for (int k = 0; k < 32; k++)
+					say("%02x", hdr[k]);
+				say("\nnext 32 bytes : ");
+				for (int k = 4096; k < 4096 + 32; k++)
 					say("%02x", hdr[k]);
 				say("\n");
 			}
 			close(fd);
 		}
+	}
+
+	/*
+	 * Android builds /dev/block/by-name/<partition> from the PARTNAME the
+	 * kernel puts in each partition's uevent.  A boot that dies with
+	 * "realpath failed: /dev/block/by-name/super" means that symlink never
+	 * appeared, so dump the uevents here: if PARTNAME=super is present the
+	 * kernel side is fine and the problem is in init's uevent handling.
+	 */
+	say("\n===== block uevents (PARTNAME is what by-name uses) =====\n");
+	for (int i = 0; i <= 5; i++) {
+		char p[64];
+
+		if (i == 0)
+			snprintf(p, sizeof(p), "/sys/class/block/mmcblk0/uevent");
+		else
+			snprintf(p, sizeof(p), "/sys/class/block/mmcblk0p%d/uevent", i);
+		dump_file(p);
 	}
 
 	dump_kmsg();

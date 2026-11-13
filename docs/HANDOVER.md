@@ -8,6 +8,36 @@
 
 ## 0. 一句话现状
 
+> # ★ 2026-11-13 12:3x：镜像没错，卡卡在 `/dev/block/by-name/super`
+>
+> **先更正上一轮的结论**：我说"super 分区全零 = 镜像没写进去"，**是误判**。
+> 我自己的探针读错了偏移——liblp 跳过 `LP_PARTITION_RESERVED_BYTES(4096)` 才写 geometry，
+> 偏移 0 本来就该是零。losetup 实测：magic `gDla` 在 **4096 / 8192**，
+> `/sys/class/block/loop0p4/uevent` 里有 **`PARTNAME=super`**，五个 GPT 名字全对。**镜像是对的。**
+>
+> **真正的失败点**（连续 22 次开机都一样）：
+> ```
+> init: realpath failed: /dev/block/by-name/super: No such file or directory
+> init: Failed to mount required partitions early ... → InitFatalReboot: signal 6
+> ```
+> 出处 `system/core/init/first_stage_mount.cpp:270`。`/dev/block/by-name/<name>` 由 init 自己的
+> `BlockDeviceInitializer`（`devices.cpp:361`）依据内核 uevent 的 **`PARTNAME`** 创建。
+> 所以只剩两种可能：**(1) 设备内核没发 `PARTNAME=super`；(2) uevent 来了但 symlink 没建出来。**
+> **这与 super 分区内容无关**——realpath 发生在读 super 之前。
+>
+> **已做的**：`debug-init` 探针修好偏移并新增
+> `===== block uevents (PARTNAME is what by-name uses) =====`，
+> 新 initrd 已写入卡（FAT 可直更，**不需要重刷整卡**）：
+> `G:\initrd.img` 1,243,665 B sha256 `881c82b7…`，`/init` BuildID `237c60d5…`。
+>
+> **下一步**：上机一次，把 `DEBUG\dmesg-*.txt` 里
+> `super (mmcblk0p4) LP metadata`（看 `geometry @4096`）与 `block uevents`（看 `PARTNAME=super`）
+> 两节发我，即可定位是内核侧还是 init 侧。
+>
+> **两条新纪律**
+> * **镜像一律 `--total-gib 8`**（16 GiB 里 11.9 GiB 是空 userdata，白白把写盘时间翻倍）。
+> * **构建脚本不要 `| tail`**：上一版 debug-init 编译失败被管道吞掉，脚本"成功"了却没产出新文件。
+
 > ## ⚠ 落盘位置约定（2026-11-13 用户要求，必须遵守）
 >
 > **本会话产生的一切大文件/产物一律放 `F:\rg34xxsp\`，不要放别的盘。**
