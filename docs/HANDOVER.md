@@ -636,6 +636,23 @@ bash tools/verify-patch-chain.sh        # 从 git 的 337 行重放，逐字节�
 - **弹卡前先把 `/mnt/g` 卸掉**（`umount /mnt/g`）。WSL 的 drvfs 会一直占着这个卷，
   Windows 弹卡就报「该设备正在使用中」；凡是在脚本里 `mount -t drvfs 'G:' /mnt/g` 过，收尾必须卸。
   第二个常见拦路虎是**资源管理器窗口停在 `G:`**（拷完 `DEBUG\` 之后几乎必然），先把窗口关掉再弹。
+- **`/mnt/g` 不一定是卡**：重插卡之后 WSL 有时不会自动重新挂 drvfs，`ls /mnt/g` 只会看到
+  `total 0`（一个空普通目录，还能往里写、写完 Windows 看不着）。写卡前先
+  `mount -t drvfs 'G:' /mnt/g` 再 `ls` 确认能看到 `Image`/`initrd.img`。
+- 重建 initrd 的完整调用（`make-initrd.py` 少了 `--gzip`/`--add` 只会出一个 930 KB
+  的单条目包，别被"写成功"骗过去）：
+  ```bash
+  cd /root/initramfs-embed
+  python3 tools/make-initrd.py --gzip --out /mnt/g/initrd.img \
+    --add /root/initramfs-embed/init.android:/init.android:0755 \
+    --add /root/initramfs-embed/init:/init:0755 \
+    --add vendor-overlay/lib64/hw/gralloc.minigbm.so:/vendor-overlay/lib64/hw/gralloc.minigbm.so:0644 \
+    --add vendor-overlay/lib64/hw/android.hardware.graphics.mapper@4.0-impl.minigbm.so:/vendor-overlay/lib64/hw/android.hardware.graphics.mapper@4.0-impl.minigbm.so:0644 \
+    --add vendor-overlay/bin/hw/android.hardware.graphics.allocator@4.0-service.minigbm:/vendor-overlay/bin/hw/android.hardware.graphics.allocator@4.0-service.minigbm:0755 \
+    --add vendor-overlay/lib64/hw/android.hardware.health@2.0-impl-2.1.so:/vendor-overlay/lib64/hw/android.hardware.health@2.0-impl-2.1.so:0644 \
+    --add vendor-overlay/lib64/hw/android.hardware.memtrack@1.0-impl.so:/vendor-overlay/lib64/hw/android.hardware.memtrack@1.0-impl.so:0644
+  ```
+  正常产物约 **1.4 MB / 7 条目**（sd59 = 1,418,990 B）。少一条目就是参数又没带全。
 
 ### 7.4 读卡上日志
 - 卡挂成 `G:`（盘符会漂）。读不出来先 `cmd /c "chkdsk G: /F"`。
@@ -651,6 +668,35 @@ bash tools/verify-patch-chain.sh        # 从 git 的 337 行重放，逐字节�
 - 关键结论走 `/metadata/<file>` + `fsync` + `sync()`（**只 fsync 不刷目录项**，sd46 曾因此丢掉整批 `meta-*`）。
 - `pstore`/ramoops 虽然 bind 成功，但**从未抢救到过 panic 文本**，不要指望它。
 
+### 7.7 用「时间」判断这一卡成没成
+先别翻日志正文。拿开机 uptime 对着这张表打勾，**第一个对不上的格子就是失败点**：
+
+| 里程碑 | 正常窗口 | 证据 |
+|---|---|---|
+| 一阶交接 `init.android` | ≤ 25 s | `ran-<id>.txt` 的 `hb: [x.xx] stage 9: about to execl` |
+| `netd` 第一次启动 | 20–45 s | `starting service 'netd'` |
+| `zygote` 第一次启动 | 20–50 s | `starting service 'zygote'` / `Created socket '/dev/socket/zygote'` |
+| **`system_server`** | zygote 之后 **10 s 内** | 整份 kmsg 一次都没有 = 这一卡废了 |
+| `bootanim` | 25–40 s | `starting service 'bootanim'` |
+| `sys.boot_completed=1` | 45–120 s | 到桌面 |
+
+三条硬判据（实测基线：一阶交接 17.4 s、bootanim 29.4 s、zygote 约 38 s）：
+
+1. **90 秒**：上电起 90 s 还没有 `system_server` → 直接断电取 log，别等。
+   （`04213c6b` 空转到 335 s 依旧没有，白等了 4 分钟。）
+2. **`zygote` 启动 ≥ 3 次且没有 `system_server`** → 是重启死循环，等下去不会自己好。
+3. **120 秒**：还没有 `boot_completed` 算慢；但只要有 `system_server`，就继续等，别断电。
+
+一键判定（Windows 侧，不碰 WSL）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1            # G:\DEBUG 里最新一次开机
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -BootId 04213c6b
+```
+
+退出码 `0` = 成功或还在正轨，`1` = 失败。脚本文件**必须带 UTF-8 BOM**，
+否则 Windows PowerShell 5.1 会把中文注释读成乱码、整份脚本报 ParserError（已踩过）。
+
 ---
 
 ## 8. 文件索引
@@ -661,6 +707,7 @@ bash tools/verify-patch-chain.sh        # 从 git 的 337 行重放，逐字节�
 | `tools/build-kernel.sh` | 打补丁 + 配置断言 + 编 Image（**注意它会清空 `INITRAMFS_SOURCE`**） |
 | `tools/build-image.sh` | 把 `initramfs-embed` 打进 Image：断言 `.config` → 重打 initramfs → 编 → 断言标记串 → 落地 |
 | `tools/debug-init/debug-init.c` | 包装真 init：心跳 / MMIO / 显示探针 / 看门狗控制 / 采集 `/metadata` 与 `/data` 证据 / `execl("/init.android")` |
+| `tools/boot-verdict.ps1` | 只看 `DEBUG` 里的 `kmsg-*`/`ran-*`，按 uptime 判断这一卡成没成（退出码 0/1；**文件必须 UTF-8 带 BOM**） |
 | `tools/audit-patches.py` | 检查补丁新增行是否真进了树（`git apply --reject` 会静默丢 hunk） |
 | `patches/apply.sh` | 一条命令重放全部 init / minigbm 改动（幂等） |
 | `patches/minigbm/` | `sun4i.c`、`minigbm-graphics.patch`、`README.md`（为什么是 sun4i 不是 panfrost） |
@@ -694,6 +741,25 @@ bash tools/verify-patch-chain.sh        # 从 git 的 337 行重放，逐字节�
 12. `memtrack` 的 legacy HAL 模块 `hardware/libhardware/modules/memtrack` **这棵树里不存在**，
     所以 `android.hardware.memtrack@1.0-service` 永远 `exit 1`。服务已用 rc 覆盖停掉；
     干净的收尾是补一个 stub 模块，或者把 device manifest 里的 memtrack 声明删掉（免得 VINTF 说"声明了却没人注册"）。
+13. **★ zygote 被 RenderScript 预加载打死**（11-13 从 `04213c6b` 的 logcat 拿到的新根因）：
+    `Error preloading android.renderscript.Element$1` → `java.lang.ExceptionInInitializerError`
+    → `Caused by: UnsatisfiedLinkError: dlopen failed: library "librs_jni.so" not found`；
+    Android 11 的 `ZygoteInit.preloadClasses()` 对 `Error` 是 **rethrow**，于是 zygote 在
+    fork `system_server` 之前就死（活约 5 s），init 每 **5.03 s** 重启一轮 ——
+    `04213c6b` 一路转到 335 s、共 59 次，一次都没 fork 出 `system_server`。
+    注意：**`netd` 的 rc 覆盖这次是生效的**（整份 kmsg 里 0 条 `onrestart restart zygote`），
+    所以死循环不是 netd 连坐，别再往那边查。
+    **已修（sd59，纯 initrd）**：`out/…/system/lib64` 里 `librs_jni.so`/`librs.so` **根本不存在**
+    （不是漏装），而 `system/etc/preloaded-classes` 列着 19 行 `android.renderscript.*`。
+    `patch-service-rc.py` 新增 `PublishFilteredPreloadedClasses()`：一阶读穿 `/system/etc` overlay
+    的 lowerdir，滤掉含 `android.renderscript` 的行再写回，日志留
+    `preload: kept N lines, dropped 19 renderscript lines`。下次开机看 `DEBUG\live-preload.txt`
+    第二格是不是 0 就知道。
+14. `patches/patch-live-snapshot.py` 两个拷贝路径写错（11-13 发现并已修）：
+    `cp /vendor/etc/init/netd.rc` 应为 `/system/etc/init/netd.rc`；
+    `cp /metadata/dsh/first-stage-publish.txt` 应为 `/metadata/first-stage-publish.txt`。
+    现在另外写一份 `DEBUG/live-preload.txt`（preloaded-classes 行数/renderscript 行数、
+    netd.rc 的 onrestart 行数、mediacodec.policy 的行数/include 数）自证三个文件的状态。
 
 ---
 

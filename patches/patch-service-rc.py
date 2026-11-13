@@ -38,6 +38,14 @@ only after the first stage has run, and the first stage already overlays
 /vendor/etc. /system/etc gets the same treatment here (and gains the useful side
 effect that the later fix-public-libs.sh script can write its file directly
 instead of mounting a second overlay of its own).
+
+Boot 04213c6b then showed the loop had nothing to do with netd any more: the
+kmsg held zero `onrestart restart zygote` entries, and logcat finally carried
+zygote's own words -- `Error preloading android.renderscript.Element$1`,
+`ExceptionInInitializerError`, `librs_jni.so not found`. /system/lib64 has no
+librs_jni.so at all and preloaded-classes lists 19 android.renderscript lines,
+so preloadClasses() rethrows the Error and zygote dies before forkSystemServer.
+The same /system/etc overlay now publishes a filtered preloaded-classes.
 """
 import sys
 
@@ -79,6 +87,46 @@ const char kMemtrackRc[] =
     "# See patches/patch-service-rc.py: hw_get_module(\"memtrack\") can never\n"
     "# succeed on this tree, and the failure only restarts a HAL nobody needs.\n";
 
+// sd59: /system/etc/preloaded-classes ships 19 android.renderscript lines, but
+// this image has no librs_jni.so *at all* (checked in
+// out/target/product/rg34xxsp/system/lib64). RenderScript.<clinit> therefore
+// throws ExceptionInInitializerError, and ZygoteInit.preloadClasses() answers
+// any Error by rethrowing it -- so zygote dies in the middle of preload, before
+// forkSystemServer is ever called. Boot 04213c6b proved it: 59 zygote lives of
+// five seconds each, "Error preloading android.renderscript.Element$1", and not
+// one system_server. Nothing else on this device needs those classes, so drop
+// the lines from the list instead of shipping a RenderScript that cannot load.
+void PublishFilteredPreloadedClasses() {
+    static const char kPath[] = "/system/etc/preloaded-classes";
+    FILE* fp = fopen(kPath, "re");
+    if (fp == nullptr) {
+        pubnote("preload: open %s failed: %d (%s)", kPath, errno, strerror(errno));
+        return;
+    }
+    std::string kept;
+    char line[400];
+    size_t kept_lines = 0, dropped = 0;
+    while (fgets(line, sizeof(line), fp) != nullptr) {
+        if (strstr(line, "android.renderscript") != nullptr) {
+            dropped++;
+            continue;
+        }
+        kept += line;
+        kept_lines++;
+    }
+    fclose(fp);
+    if (kept.empty()) {
+        pubnote("preload: %s read back empty, not publishing", kPath);
+        return;
+    }
+    if (!PublishTextFile(kPath, kept.c_str(), 0644)) {
+        return;
+    }
+    chmod(kPath, 0644);
+    pubnote("preload: kept %zu lines, dropped %zu renderscript lines (%zu bytes)",
+            kept_lines, dropped, kept.size());
+}
+
 void PublishServiceRcOverrides() {
     mkdir("/dev/sys_etc_upper", 0755);
     mkdir("/dev/sys_etc_work", 0755);
@@ -87,6 +135,7 @@ void PublishServiceRcOverrides() {
         chmod("/dev/sys_etc_upper", 0755);
         chmod("/dev/sys_etc_work", 0755);
         PublishTextFile("/system/etc/init/netd.rc", kNetdRc, 0644);
+        PublishFilteredPreloadedClasses();
     } else {
         pubnote("sd56: /system/etc overlay failed, netd.rc keeps its onrestart");
     }

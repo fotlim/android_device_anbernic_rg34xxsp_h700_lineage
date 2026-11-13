@@ -17,8 +17,16 @@ Boot 9ac27bf6 showed two defects in the first version, both fixed here:
     service a later patch replaced, so it has been stale since boot 702a1e18 --
     the snapshot copied 1.5 MiB of it and every line was an old boot.
   * it now also copies /system/etc/seccomp_policy/mediacodec.policy and
-    /vendor/etc/init/netd.rc, the two files whose state kept being guessed at,
+    /system/etc/init/netd.rc, the two files whose state kept being guessed at,
     so one dump proves whether the early-init fix and the rc override landed.
+    (Boot 04213c6b is why both paths are written down twice in comments: the
+    first version asked /vendor/etc/init/netd.rc, which never exists, and
+    /metadata/dsh/first-stage-publish.txt, which lives one level up.)
+
+  * later still, DEBUG/live-preload.txt records the three numbers that decide
+    whether zygote can survive its preload: renderscript lines left in
+    preloaded-classes (must be 0), onrestart lines in netd.rc, and the seccomp
+    policy's line/include counts.
 
 This script can REGENERATE its literals: an insert-only patch silently keeps the
 first version forever once its marker is in the file, which is how the stale
@@ -42,14 +50,23 @@ if ! mount -t vfat -o rw /dev/block/mmcblk0p1 $CARD 2>>$LOG; then
     exit 0
 fi
 mkdir -p $CARD/DEBUG 2>>$LOG
-for f in fix.log probe.log first-stage-publish.txt public.libraries.txt; do
+for f in fix.log probe.log public.libraries.txt; do
     [ -f /metadata/dsh/$f ] && cp /metadata/dsh/$f $CARD/DEBUG/live-$f 2>>$LOG
 done
-# The two files the last rounds kept getting wrong, in the state this boot
-# actually used: the policy must show 61 lines / 0 includes, and netd.rc must be
-# the rewritten one (no 'onrestart restart zygote').
+# The first stage writes this one at the metadata root, not under dsh/ (boot
+# 04213c6b is missing it precisely because the old line looked in dsh/).
+[ -f /metadata/first-stage-publish.txt ] && cp /metadata/first-stage-publish.txt $CARD/DEBUG/live-first-stage-publish.txt 2>>$LOG
+# The three files the last rounds kept getting wrong, in the state this boot
+# actually used: the policy must show 61 lines / 0 includes, netd.rc must be the
+# rewritten one (no 'onrestart restart zygote'), and the preload list must have
+# dropped its android.renderscript lines or zygote will die again.
 cp /system/etc/seccomp_policy/mediacodec.policy $CARD/DEBUG/live-mediacodec.policy 2>>$LOG
-cp /vendor/etc/init/netd.rc $CARD/DEBUG/live-netd.rc 2>>$LOG
+cp /system/etc/init/netd.rc $CARD/DEBUG/live-netd.rc 2>>$LOG
+{
+    echo "preloaded-classes: $(wc -l < /system/etc/preloaded-classes) lines, $(grep -c android.renderscript /system/etc/preloaded-classes) renderscript lines"
+    echo "netd.rc onrestart-restart-zygote: $(grep -c onrestart /system/etc/init/netd.rc) lines"
+    echo "mediacodec.policy: $(wc -l < /system/etc/seccomp_policy/mediacodec.policy) lines, $(grep -c @include /system/etc/seccomp_policy/mediacodec.policy) includes"
+} > $CARD/DEBUG/live-preload.txt 2>>$LOG
 # -d, and not /data/local/tmp/dsh-android.log: logcat's own ring holds THIS boot,
 # while that file has been stale since boot 702a1e18 (the service writing it was
 # replaced by a later patch). 1.5 MiB keeps a 64 MiB card safe.
