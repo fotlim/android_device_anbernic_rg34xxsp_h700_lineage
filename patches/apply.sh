@@ -28,7 +28,8 @@ for p in patch-mount-data-rc.py patch-framework-logs-rc.py \
          patch-graphics-device-rc.py patch-logcat-to-file.py \
          patch-public-libraries.py patch-public-libs-filter.py \
          patch-vendor-graphics.py patch-selinux-contexts.py \
-         patch-devprobe.py patch-service-rc.py; do
+         patch-devprobe.py patch-service-rc.py \
+         patch-live-snapshot.py; do
 	if [ -f "$HERE/$p" ]; then
 		python3 "$HERE/$p" || { echo "$p: FAILED"; exit 1; }
 	fi

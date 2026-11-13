@@ -612,12 +612,20 @@ VERSION=sd49 tools/build-image.sh
 bash patches/apply.sh /root/android/lineage
 ```
 
-它先 `git apply patches/init-first-stage-publish-ramdisk-fstab.patch`（基础版），再按顺序跑 10 个**幂等**脚本：
+它先 `git apply patches/init-first-stage-publish-ramdisk-fstab.patch`（基础版），再按顺序跑 11 个**幂等**脚本：
 `patch-mount-data-rc.py`、`patch-framework-logs-rc.py`、`patch-graphics-device-rc.py`、`patch-logcat-to-file.py`、
 `patch-public-libraries.py`、`patch-public-libs-filter.py`、`patch-vendor-graphics.py`、`patch-selinux-contexts.py`、
-`patch-devprobe.py`、`patch-service-rc.py`。
+`patch-devprobe.py`、`patch-service-rc.py`、`patch-live-snapshot.py`。
 
-**已验证**：从 `git checkout -- init/first_stage_init.cpp`（337 行）开始跑 `apply.sh`，产出与 sd46 编译所用的文件**逐字节相同**（sha256 `448c99b3…`，1203 行代码）。改任何补丁后请重跑这条验证。
+**改任何补丁后跑这条命令**（别再靠"看着觉得对"）：
+
+```bash
+bash tools/verify-patch-chain.sh        # 从 git 的 337 行重放，逐字节比对
+```
+
+本轮结果：`sha256 9849705116a4…`、1248 行、`OK: the patch chain reproduces the tree byte for byte`。
+这条检查存在的原因：这些脚本是**插入式**的，漏掉一次插入，二进制会和上一轮**逐字节相同**，
+于是卡上测的还是旧代码 —— health 条目和空 `.so` 列表各踩过一次。
 
 **坑**：patch 脚本若用 `re.sub()` 拼 C 字面量，替换串会吃掉反斜杠 → 生成带真换行的字符串字面量 → `-Winvalid-pp-token` 编译失败。改用字符串切片重建整段 literal。
 
