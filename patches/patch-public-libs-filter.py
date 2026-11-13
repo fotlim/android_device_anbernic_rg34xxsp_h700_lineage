@@ -45,10 +45,12 @@ while read -r lin; do
 done < $SRC
 echo "kept $(wc -l < $FILT) entries" >> $LOG
 if cp $FILT $LIST 2>>$LOG; then
+    chmod 0644 "$LIST" 2>>$LOG      # umask is 077 for init services
     echo "wrote $LIST directly" >> $LOG
     exit 0
 fi
 if mount -o rw,remount /system 2>>$LOG && cp $FILT $LIST 2>>$LOG; then
+    chmod 0644 "$LIST" 2>>$LOG
     echo "wrote $LIST after remounting /system rw" >> $LOG
     exit 0
 fi
@@ -78,14 +80,22 @@ if mount -t overlay overlay -o lowerdir=/system/etc,upperdir=/dev/dsh_upper,work
     # filter is only a hardening layer; the build is permissive anyway.
     POL=/system/etc/seccomp_policy/mediacodec.policy
     if [ -f "$POL" ]; then
-        cp "$POL" /dev/pol.tmp 2>>$LOG
-        sed -i 's|^mremap:.*|mremap: 1|' /dev/pol.tmp 2>>$LOG
-        if cp /dev/pol.tmp "$POL" 2>>$LOG; then
-            echo "policy: mremap relaxed, MREMAP left in file: $(grep -c MREMAP "$POL")" >> $LOG
+        cp "$POL" /dev/pol.in 2>>$LOG
+        sed 's|^mremap:.*|mremap: 1|' /dev/pol.in > /dev/pol.out 2>>$LOG
+        if [ -s /dev/pol.out ]; then
+            cp /dev/pol.out "$POL" 2>>$LOG
+            chmod 0644 "$POL" 2>>$LOG
+            echo "policy: mremap relaxed ($(ls -l "$POL" | cut -d' ' -f1)), MREMAP left: $(grep -c MREMAP "$POL")" >> $LOG
+        else
+            echo "policy: sed produced nothing, left alone" >> $LOG
         fi
     fi
     if cp $FILT $LIST 2>>$LOG; then
-        echo "wrote $LIST through an overlay of /system/etc" >> $LOG
+        # This runs as an init service, so umask is 077 and cp creates 0600 root.
+        # public.libraries.txt is read by ordinary app processes, so without this
+        # chmod it is effectively empty for everyone but root.
+        chmod 0644 "$LIST" 2>>$LOG
+        echo "wrote $LIST through an overlay of /system/etc ($(ls -l "$LIST" | cut -d' ' -f1))" >> $LOG
         exit 0
     fi
 fi
