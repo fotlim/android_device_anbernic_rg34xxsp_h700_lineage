@@ -33,6 +33,20 @@ $(call inherit-product, device/anbernic/rg34xxsp/device.mk)
 $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
 $(call inherit-product, $(SRC_TARGET_DIR)/product/base.mk)
 
+# ---- fonts, hyphenation and keyboard maps -------------------------------
+# All of these come from handheld_system.mk, which we do not inherit (it drags
+# in Bluetooth/Telecom/Mms and half of media_system). Without this block the
+# product ships **no /system/fonts at all**: out/.../installed-files.txt listed
+# zero font files, /system/fonts did not exist in system.img, and zygote died
+# preloading android.graphics.Typeface from /system/etc/fonts.xml. Every H700
+# Android build we compared against (the ROC OS Android 10 port) inherits the
+# handheld product for exactly this reason.
+$(call inherit-product, frameworks/base/data/fonts/fonts.mk)
+$(call inherit-product, external/noto-fonts/fonts.mk)
+$(call inherit-product, external/roboto-fonts/fonts.mk)
+$(call inherit-product, external/hyphenation-patterns/patterns.mk)
+$(call inherit-product, frameworks/base/data/keyboards/keyboards.mk)
+
 # Lineage's Wi-Fi-only tablet configuration: this is a handheld console with no
 # modem and no camera.
 $(call inherit-product, vendor/lineage/config/common_full_tablet_wifionly.mk)
