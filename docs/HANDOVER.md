@@ -603,6 +603,7 @@ VERSION=sd49 tools/build-image.sh
 - 必须编时用 `-j2`/`-j4`，别用 `-j12`（会抢满 12 核）。
 - `source build/envsetup.sh` **不能配 `set -u`**（`envsetup.sh:375 ZSH_VERSION: unbound variable`）。
 - **PowerShell 里不要内联带引号/管道的 bash**，一律写成 `_tmp/*.sh` 再 `wsl -u root -e bash /mnt/c/.../x.sh`。嵌套引号会被 PowerShell 拆坏（`unexpected EOF while looking for matching '`）。
+- **日志看不清时先降噪，再判断**（sd55/sd56 的血泪）：`drm.debug=0x1f` 让一颗 7.1.2 内核给每个 ioctl 都打一行，单次开机 2917 行 DRM 垃圾把 init 自己的话挤出 printk 限速窗口 —— 前面三轮的 mremap/常量/zygote 猜测全是被噪声带偏的。正确顺序是 `drm.debug=0x0` + `log_buf_len=4M`（已在 `mk-sdcard.sh` 里），把 init 的叙事拿全再推断。
 
 ### 7.2 一阶 init 的补丁怎么重放
 `system/core/init/first_stage_init.cpp` 现在 **989 行**，全部改动用一条命令重放：
@@ -611,11 +612,12 @@ VERSION=sd49 tools/build-image.sh
 bash patches/apply.sh /root/android/lineage
 ```
 
-它先 `git apply patches/init-first-stage-publish-ramdisk-fstab.patch`（基础版），再按顺序跑 8 个**幂等**脚本：
+它先 `git apply patches/init-first-stage-publish-ramdisk-fstab.patch`（基础版），再按顺序跑 10 个**幂等**脚本：
 `patch-mount-data-rc.py`、`patch-framework-logs-rc.py`、`patch-graphics-device-rc.py`、`patch-logcat-to-file.py`、
-`patch-public-libraries.py`、`patch-public-libs-filter.py`、`patch-vendor-graphics.py`、`patch-selinux-contexts.py`。
+`patch-public-libraries.py`、`patch-public-libs-filter.py`、`patch-vendor-graphics.py`、`patch-selinux-contexts.py`、
+`patch-devprobe.py`、`patch-service-rc.py`。
 
-**已验证**：从 `git checkout -- init/first_stage_init.cpp`（337 行）开始跑 `apply.sh`，产出与 sd49 编译所用的文件**逐字节相同**（989 行）。改任何补丁后请重跑这条验证。
+**已验证**：从 `git checkout -- init/first_stage_init.cpp`（337 行）开始跑 `apply.sh`，产出与 sd46 编译所用的文件**逐字节相同**（sha256 `448c99b3…`，1203 行代码）。改任何补丁后请重跑这条验证。
 
 **坑**：patch 脚本若用 `re.sub()` 拼 C 字面量，替换串会吃掉反斜杠 → 生成带真换行的字符串字面量 → `-Winvalid-pp-token` 编译失败。改用字符串切片重建整段 literal。
 
@@ -666,13 +668,24 @@ bash patches/apply.sh /root/android/lineage
 1. ~~v8 补丁收进 `patches/`~~ → **已完成**：`patches/patch-selinux-contexts.py`，并接进 `patches/apply.sh`（幂等，已用「从 337 行重放到 989 行逐字节相同」验证）。
 2. `allocator@4.0-service.minigbm` / `gatekeeper@1.0-service.software` 的标签目前靠运行时 overlay，标签仍是 `vendor_file`、进程留在 `u:r:init:s0`（permissive 下不致命）。**要真正干净必须重编 vendor.img**（file_contexts 编进 `precompiled_sepolicy`，不能运行时改）。
 3. `system_suspend`（`Unable to register suspend_control service: -1`）、`vendor.keymaster-4-0`（`Could not register service (-2147483648)`）同样在等 contexts 修复。
-4. `health 2.1` HAL：`Cannot find passthrough implementation of health 2.1 HAL`（服务反复 abort，不阻塞框架）。
+4. ~~`health 2.1` HAL：`Cannot find passthrough implementation`~~ → **已完成**：`android.hardware.health@2.1-impl` 既进了 `PRODUCT_PACKAGES`，也随 initrd 的 `/vendor-overlay/lib64/hw` 走 `kVendorGraphicsFiles` 发布，服务不再崩。
 5. `logd: Cannot read /system/etc/event-log-tags`。
 6. 1 GiB 内存优化：`PRODUCT_DISABLE_SCUDO` / `TARGET_VNDK_USE_CORE_VARIANT` / `PRODUCT_MINIMIZE_JAVA_DEBUG_INFO`。
 7. 8 GiB 镜像写到 32 GB 卡会触发 GPT 警告（**不影响启动**）。
 8. `panel_mipi_get_modes()` 每次都调 `drm_connector_set_panel_orientation()` → 属性泄漏 + 双 WARN。
 9. 补打 `0155`（RGB connector 改 DSI）、`0162` 的 `pinctrl-sun50i-h616.c` 部分（消 56 条 `io_disabled` 报错，不影响功能）。
 10. panfork-mesa 接 18.1（需 libdrm ≥ 2.4.109 + Bifrost；本机是 G31 MP2）——**当前用 SwiftShader，不急**。
+11. **★ 内核缺 netfilter 一整套**（7.1.2 `.config`）：`NETFILTER_NETLINK`/`NFLOG`、
+    `IP_NF_FILTER`（iptables `filter` 表）、`XFRM` netlink（family 6）、`xt_quota2`。
+    证据：netd 启动即死
+    `Unable to create NFLogListener: Status[code: 93, msg: "[Protocol not supported] : socket() failed"]`
+    + `iptables-restore: unable to initialize table 'filter'`。
+    **在补之前这台机器没有网络**（wifi/ril 都谈不上）。用户的绕法是
+    `patches/patch-service-rc.py` 把 `netd.rc` 的两条 `onrestart restart zygote[_secondary]` 盖掉，
+    让 netd 死得安静、不再连坐 zygote —— 那是保开机的权宜，不是修好网络。
+12. `memtrack` 的 legacy HAL 模块 `hardware/libhardware/modules/memtrack` **这棵树里不存在**，
+    所以 `android.hardware.memtrack@1.0-service` 永远 `exit 1`。服务已用 rc 覆盖停掉；
+    干净的收尾是补一个 stub 模块，或者把 device manifest 里的 memtrack 声明删掉（免得 VINTF 说"声明了却没人注册"）。
 
 ---
 
