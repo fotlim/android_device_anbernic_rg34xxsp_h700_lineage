@@ -67,6 +67,25 @@ if [ "$PACK_OVERLAY" = 1 ] && [ -d "$OVERLAY" ]; then
 	done < <(find "$OVERLAY" -type f | sort)
 fi
 
+# Anything the repo itself ships under boot/vendor-overlay/ rides along too, so
+# a fix can be reviewed and committed here instead of being hand-dropped into
+# the WSL build tree.  .sh files are packed executable, the rest are data.
+REPO_OVERLAY=$REPO/boot/vendor-overlay
+if [ "$PACK_OVERLAY" = 1 ] && [ -d "$REPO_OVERLAY" ]; then
+	echo
+	echo "=== vendor-overlay from the repo ==="
+	while IFS= read -r f; do
+		rel=${f#"$REPO_OVERLAY/"}
+		mode=0644
+		case "$f" in
+			*.sh) mode=0755 ;;
+		esac
+		ADD+=("$f:vendor-overlay/$rel:$mode")
+		printf '  %-58s %s B  %s\n' "vendor-overlay/$rel" \
+			"$(stat -c%s "$f")" "$mode"
+	done < <(find "$REPO_OVERLAY" -type f | sort)
+fi
+
 echo
 echo "=== packing into a newc cpio (gzip) ==="
 python3 "$REPO/tools/make-initrd.py" \

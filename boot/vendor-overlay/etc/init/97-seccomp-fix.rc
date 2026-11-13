@@ -1,0 +1,4 @@
+# 97-seccomp-fix.rc -- must sort after 96-system-fix.rc in the same directory,
+# because it edits a file that 96 publishes through its overlay of /system/etc.
+on early-init
+    exec - root root -- /system/bin/sh /vendor/bin/seccomp-fix.sh

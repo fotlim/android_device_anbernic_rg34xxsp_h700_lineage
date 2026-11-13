@@ -1,0 +1,13 @@
+# 98-zygote-watch.rc -- the sampler has to outlive the crash loop, so it is a
+# oneshot service in class core rather than an early-init exec: class_start
+# does not wait for oneshot, and by the time the framework starts looping the
+# sampler is already watching.
+service dsh-zygote-watch /system/bin/sh /vendor/bin/zygote-watch.sh
+    class core
+    oneshot
+    user root
+    group root
+    disabled
+
+on late-init
+    start dsh-zygote-watch
