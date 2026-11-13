@@ -95,6 +95,18 @@ PRODUCT_PACKAGES += \
 PRODUCT_PACKAGES += \
     android.hardware.health@2.1-impl
 
+# Same story, one HAL over: android.hardware.memtrack@1.0-service is a
+# passthrough wrapper too, and boot d85ef342 showed it exiting with status 1
+# every 5 s:
+#   E LegacySupport: Could not get passthrough implementation for
+#                    android.hardware.memtrack@1.0::IMemtrack/default
+#   init: Service 'vendor.memtrack-hal-1-0' (pid 294) exited with status 1
+# The impl module exists but nothing pulled it in, so /vendor/lib64/hw had no
+# android.hardware.memtrack@1.0-impl.so (installed-files.txt listed only
+# /system/lib*/android.hardware.memtrack@1.0.so and libmemtrack.so).
+PRODUCT_PACKAGES += \
+    android.hardware.memtrack@1.0-impl
+
 # EGL/GLES 先用 SwiftShader 顶上，把 M1（出画面）解锁。
 #
 # 为什么不是 Mesa：18.1 树里的 external/mesa3d 只有源码 + 给 host 用的

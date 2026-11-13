@@ -1,5 +1,5 @@
 d8111adace5009de4c72148866027d35996c50c2a26d86776156d897effc7969  /root/initramfs-embed/init
-2cc3e4d1c72b7108eeb9d1a4d1016863760a949bf5b4462e7484b52a017c1da4  /root/initramfs-embed/init.android
+53d2e2a13e4037b6e596f08d4cceb9578325cde88f06500d89119b82a3d7c991  /root/initramfs-embed/init.android
 70c2455fe55cf85d76b01e87ff54d48552f1264b8000569599e75bff5658d3e9  /root/initramfs-embed/vendor-overlay/lib64/hw/gralloc.minigbm.so
 49e62ad38da1092754d0bd30c1682887e5f4dee1d1fd81cd13a6ee5bc69da924  /root/initramfs-embed/vendor-overlay/lib64/hw/android.hardware.graphics.mapper@4.0-impl.minigbm.so
 8d158fb7031a30343e14d2771020dac61a018ec0bb90e4f3f174f6ca9574f78f  /root/initramfs-embed/vendor-overlay/lib64/hw/android.hardware.health@2.0-impl-2.1.so

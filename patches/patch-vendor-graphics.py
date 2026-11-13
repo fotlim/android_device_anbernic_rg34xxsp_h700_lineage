@@ -155,24 +155,48 @@ with open(SRC, encoding="utf-8") as f:
 # script had no effect at all: apply.sh said "already patched" and the binary came
 # out byte-identical (the health@2.1 passthrough .so never got published).
 ARRAY_ANCHOR = "const VendorGraphicsFile kVendorGraphicsFiles[] = {"
-HEALTH_ENTRY = """    {"vendor-overlay/lib64/hw/android.hardware.health@2.0-impl-2.1.so",
+
+# Entries added after the block itself was first applied. Each is inserted only
+# if its install path is not in the source yet; before this loop existed, adding
+# an entry here had no effect at all (apply.sh said "already patched" and the
+# binary came out byte-identical).
+EXTRA_ENTRIES = [
+    ("/vendor/lib64/hw/android.hardware.health@2.0-impl-2.1.so",
+     """    {"vendor-overlay/lib64/hw/android.hardware.health@2.0-impl-2.1.so",
      "/vendor/lib64/hw/android.hardware.health@2.0-impl-2.1.so", false},
-"""
+"""),
+    ("/vendor/lib64/hw/android.hardware.memtrack@1.0-impl.so",
+     """    // android.hardware.memtrack@1.0-service is a passthrough wrapper as well:
+    // it dlopen()s this .so and, when it is missing, prints
+    //   "Could not get passthrough implementation for
+    //    android.hardware.memtrack@1.0::IMemtrack/default"
+    // and exits with status 1 every 5 s (boot d85ef342). The impl module is
+    // now in PRODUCT_PACKAGES too, but vendor.img only picks it up on a full
+    // rebuild, so carry it on the ramdisk meanwhile.
+    {"vendor-overlay/lib64/hw/android.hardware.memtrack@1.0-impl.so",
+     "/vendor/lib64/hw/android.hardware.memtrack@1.0-impl.so", false},
+"""),
+]
 
 if "PublishVendorGraphics" in text:
-    if "android.hardware.health@2.0-impl-2.1" in text:
-        print("already patched (health impl already listed), nothing to do")
+    added = []
+    for probe, entry in EXTRA_ENTRIES:
+        if probe in text:
+            continue
+        start = text.find(ARRAY_ANCHOR)
+        if start < 0:
+            sys.exit("kVendorGraphicsFiles not found although PublishVendorGraphics is present")
+        end = text.find("};", start)
+        if end < 0:
+            sys.exit("end of kVendorGraphicsFiles not found")
+        text = text[:end] + entry + text[end:]
+        added.append(probe.rsplit("/", 1)[-1])
+    if not added:
+        print("already patched: every extra entry is listed, nothing to do")
         sys.exit(0)
-    start = text.find(ARRAY_ANCHOR)
-    if start < 0:
-        sys.exit("kVendorGraphicsFiles not found although PublishVendorGraphics is present")
-    end = text.find("};", start)
-    if end < 0:
-        sys.exit("end of kVendorGraphicsFiles not found")
-    text = text[:end] + HEALTH_ENTRY + text[end:]
     with open(SRC, "w", encoding="utf-8") as f:
         f.write(text)
-    print("added the health passthrough impl to kVendorGraphicsFiles")
+    print("added to kVendorGraphicsFiles: " + ", ".join(added))
     sys.exit(0)
 
 if ANCHOR_FUNC not in text:
