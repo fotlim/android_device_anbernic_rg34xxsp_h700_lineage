@@ -30,7 +30,44 @@ LIST=/system/etc/public.libraries.txt
 SRC=/metadata/dsh/public.libraries.txt
 FILT=/metadata/dsh/list.txt
 LOG=/metadata/dsh/fix.log
+
+# Every policy in that directory ends with two @include lines:
+#     @include /system/etc/seccomp_policy/crash_dump.<arch>.policy
+#     @include /system/etc/seccomp_policy/code_coverage.<arch>.policy
+# libminijail fopen()s them just fine and then reports 'getmultiline()
+# failed', because compile_file() checks errno only AFTER the getline loop has
+# hit EOF (syscall_filter.c:730) and getline does not clear errno. A stale
+# EINVAL makes a healthy, 68-byte, comments-only file look unreadable,
+# compile_filter() fails, die() aborts the service, and the HAL then restarts
+# every 5 s dragging its neighbours with it.
+#
+# Boot 702a1e18 proved it was never the mremap constant; boot d85ef342 proved
+# this fix works (61 lines, no includes, vendor.media.omx 58 -> 0 restarts).
+# mediaextractor.policy carries the same two lines, so do the whole directory.
+#
+# THIS MUST RUN BEFORE ANY 'exit 0' BELOW. Boot 9ac27bf6 lost it that way: the
+# first stage now overlays /system/etc, so `cp $FILT $LIST` succeeded on the
+# direct path and the script exited before reaching this block -- the policy
+# went back to 63 lines with both includes and vendor.media.omx aborted 159
+# times. Defining it as a function and calling it first makes the order
+# independent of which write path happens to work.
+fix_policies() {
+    for POL in /system/etc/seccomp_policy/*.policy; do
+        [ -f "$POL" ] || continue
+        have=$(grep -c '^@include' "$POL" 2>/dev/null)
+        case "$have" in ''|0) continue ;; esac
+        grep -v '^@include' "$POL" > /dev/pol.in 2>>$LOG
+        if [ -s /dev/pol.in ] && cp /dev/pol.in "$POL" 2>>$LOG; then
+            chmod 0644 "$POL" 2>>$LOG      # umask is 077 for init services
+            echo "policy: $(basename "$POL") $(wc -l < "$POL") lines, includes left: $(grep -c '^@include' "$POL")" >> $LOG
+        else
+            echo "policy: $(basename "$POL") postponed (/system/etc is read-only here)" >> $LOG
+        fi
+    done
+}
+
 echo "start" > $LOG
+fix_policies
 : > $FILT
 while read -r lin; do
     case "$lin" in
@@ -70,33 +107,10 @@ mkdir -m 0755 /dev/dsh_upper /dev/dsh_work 2>>$LOG
 if mount -t overlay overlay -o lowerdir=/system/etc,upperdir=/dev/dsh_upper,workdir=/dev/dsh_work /system/etc 2>>$LOG; then
     chmod 0755 /system/etc 2>>$LOG
     chmod 0755 /dev/dsh_upper /dev/dsh_work 2>>$LOG
-    # Every policy in that directory ends with two @include lines:
-    #     @include /system/etc/seccomp_policy/crash_dump.<arch>.policy
-    #     @include /system/etc/seccomp_policy/code_coverage.<arch>.policy
-    # libminijail fopen()s them just fine and then reports 'getmultiline()
-    # failed', because compile_file() checks errno only AFTER the getline loop
-    # has hit EOF (syscall_filter.c:730) and getline does not clear errno. A
-    # stale EINVAL therefore makes a healthy, 68-byte, comments-only file look
-    # unreadable, compile_filter() fails, die() aborts the service, and the HAL
-    # then restarts every 5 s dragging its neighbours with it.
-    #
-    # Boot 702a1e18 proved it was never the mremap constant, and boot d85ef342
-    # proved this fix works: mediacodec.policy came out at 61 lines with zero
-    # includes and vendor.media.omx stopped restarting altogether (58 -> 0).
-    # mediaextractor.policy carries the same two lines and would hit the same
-    # wall, so do the whole directory instead of one file at a time.
-    for POL in /system/etc/seccomp_policy/*.policy; do
-        [ -f "$POL" ] || continue
-        have=$(grep -c '^@include' "$POL" 2>/dev/null)
-        case "$have" in ''|0) continue ;; esac
-        grep -v '^@include' "$POL" > /dev/pol.in 2>>$LOG
-        if [ -s /dev/pol.in ] && cp /dev/pol.in "$POL" 2>>$LOG; then
-            chmod 0644 "$POL" 2>>$LOG      # umask is 077 for init services
-            echo "policy: $(basename "$POL") $(wc -l < "$POL") lines, includes left: $(grep -c '^@include' "$POL")" >> $LOG
-        else
-            echo "policy: $(basename "$POL") untouched (grep or cp failed)" >> $LOG
-        fi
-    done
+    # The policies were already fixed at the top of this script; call again only
+    # in case that ran while /system/etc was still read-only (the case in which
+    # this overlay had to be created). It is a no-op once the includes are gone.
+    fix_policies
     if cp $FILT $LIST 2>>$LOG; then
         # This runs as an init service, so umask is 077 and cp creates 0600 root.
         # public.libraries.txt is read by ordinary app processes, so without this
