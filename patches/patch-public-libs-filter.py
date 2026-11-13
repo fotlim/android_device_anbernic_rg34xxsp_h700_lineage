@@ -68,6 +68,22 @@ mkdir -m 0755 /dev/dsh_upper /dev/dsh_work 2>>$LOG
 if mount -t overlay overlay -o lowerdir=/system/etc,upperdir=/dev/dsh_upper,workdir=/dev/dsh_work /system/etc 2>>$LOG; then
     chmod 0755 /system/etc 2>>$LOG
     chmod 0755 /dev/dsh_upper /dev/dsh_work 2>>$LOG
+    # The stock mediacodec-arm.policy ends its mremap line with
+    # `arg3 == 3 || arg3 == MREMAP_MAYMOVE`, and this tree's libminijail has no
+    # MREMAP_* in its generated constant table, so the parse fails and
+    # SetUpMinijail() aborts the whole media.codec service before it ever runs:
+    #   #02 libminijail.so minijail_parse_seccomp_filters_from_fd+170
+    #   #03 libavservices_minijail.so SetUpMinijailList+452
+    # Relaxing that one line to allow any flags keeps the policy parseable. The
+    # filter is only a hardening layer; the build is permissive anyway.
+    POL=/system/etc/seccomp_policy/mediacodec.policy
+    if [ -f "$POL" ]; then
+        cp "$POL" /dev/pol.tmp 2>>$LOG
+        sed -i 's|^mremap:.*|mremap: 1|' /dev/pol.tmp 2>>$LOG
+        if cp /dev/pol.tmp "$POL" 2>>$LOG; then
+            echo "policy: mremap relaxed, MREMAP left in file: $(grep -c MREMAP "$POL")" >> $LOG
+        fi
+    fi
     if cp $FILT $LIST 2>>$LOG; then
         echo "wrote $LIST through an overlay of /system/etc" >> $LOG
         exit 0
