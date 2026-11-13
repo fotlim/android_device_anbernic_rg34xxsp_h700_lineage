@@ -2122,9 +2122,9 @@ static int logger_started;
  */
 static void start_kmsg_logger(void)
 {
-	int kfd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
-	int lfd = open(kmsg_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-	int rfd = open(trace_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+	int kfd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	int lfd = open(kmsg_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+	int rfd = open(trace_path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
 	pid_t pid;
 
 	if (kfd < 0 || lfd < 0) {
@@ -2164,6 +2164,28 @@ static void start_kmsg_logger(void)
 		_exit(0);
 	}
 	logger_started = (pid > 0);
+	if (logger_started) {
+		/*
+		 * The follower owns these now. Keeping the copies here would leak
+		 * them straight through the exec into /init.android (CLOEXEC is
+		 * only belt and braces, since the executor is this very process),
+		 * and then into every service Android init forks.
+		 *
+		 * That is not cosmetic: boot 9c7489bb died on it exactly once
+		 * zygote finally got far enough to fork. Zygote's
+		 * ForkSystemServer checks the child's fds and the child aborted
+		 * with
+		 *
+		 *   JNI FatalError called: (system_server)
+		 *   Not whitelisted (3): /DEBUG/kmsg-9c7489bb.txt
+		 *
+		 * 5.03 s after every "ZygoteInit took to complete: 6464ms", so
+		 * system_server never ran a line of its own.
+		 */
+		close(kfd);
+		close(lfd);
+		close(rfd);
+	}
 	hb(logger_started ? "logger: kmsg follower running from the paint test on"
 			   : "logger: fork failed");
 }
@@ -2649,6 +2671,25 @@ handover:
 	umount2("/sys", MNT_DETACH);
 	umount2("/mnt", MNT_DETACH);
 	sync();
+
+	/*
+	 * Leave nothing of ours open across the handover.
+	 *
+	 * Android's init inherits the descriptor table, hands it down to every
+	 * service it forks, and zygote's ForkSystemServer refuses to fork a
+	 * system_server that carries a descriptor outside its whitelist:
+	 *
+	 *   JNI FatalError called: (system_server)
+	 *   Not whitelisted (3): /DEBUG/kmsg-9c7489bb.txt
+	 *
+	 * Boot 9c7489bb hit exactly that every 5.03 s, immediately after
+	 * "ZygoteInit took to complete: 6464ms" -- the RenderScript filter had
+	 * finally let preload finish, and the boot then died in the fork rather
+	 * than in the preload. The follower child keeps its own copies, so the
+	 * descriptors here only hurt.
+	 */
+	for (int fd = 3; fd < 1024; fd++)
+		close(fd);
 
 	execl("/init.android", "/init", NULL);
 
