@@ -83,6 +83,18 @@ PRODUCT_PACKAGES += \
     gralloc.minigbm \
     libdrm
 
+# The health@2.1 binderized service is a thin wrapper: it dlopen()s the
+# passthrough implementation and CHECK()s that it got one
+# (hardware/interfaces/health/2.1/default/service.cpp:28), dying with
+#   "Cannot find passthrough implementation of health 2.1 HAL for instance default"
+# when the impl is missing. The module's stem makes the file
+# android.hardware.health@2.0-impl-2.1.so. Nothing in this product pulled the
+# module in, so it never reached vendor.img and the service crash-looped; every
+# failure stops the HAL notifier, which keeps `init` restarting class `main`
+# and therefore keeps zygote from ever getting to system_server.
+PRODUCT_PACKAGES += \
+    android.hardware.health@2.1-impl
+
 # EGL/GLES 先用 SwiftShader 顶上，把 M1（出画面）解锁。
 #
 # 为什么不是 Mesa：18.1 树里的 external/mesa3d 只有源码 + 给 host 用的

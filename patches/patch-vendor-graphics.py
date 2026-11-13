@@ -52,6 +52,16 @@ const VendorGraphicsFile kVendorGraphicsFiles[] = {
      "/vendor/lib64/hw/android.hardware.graphics.mapper@4.0-impl.minigbm.so", false},
     {"vendor-overlay/bin/hw/android.hardware.graphics.allocator@4.0-service.minigbm",
      "/vendor/bin/hw/android.hardware.graphics.allocator@4.0-service.minigbm", true},
+    // Not a graphics module, but it has the same problem and the same cure: the
+    // health@2.1 binderized service dlopen()s its passthrough implementation and
+    // dies with "Cannot find passthrough implementation of health 2.1 HAL for
+    // instance default" when that .so is absent. The module is
+    // android.hardware.health@2.1-impl, whose stem makes it
+    // android.hardware.health@2.0-impl-2.1.so; nothing in the product pulled it
+    // into vendor.img, so it never shipped. Carrying it on the ramdisk fixes a
+    // whole card-flash cycle per attempt.
+    {"vendor-overlay/lib64/hw/android.hardware.health@2.0-impl-2.1.so",
+     "/vendor/lib64/hw/android.hardware.health@2.0-impl-2.1.so", false},
 };
 
 bool OverlayDir(const char* target, const char* upper, const char* work) {
@@ -140,8 +150,29 @@ ANCHOR_CALL = "    if (published) PublishSystemFix();\n"
 with open(SRC, encoding="utf-8") as f:
     text = f.read()
 
+# The block itself is insert-only, but the file list inside it has to be able to
+# grow later. Without this, adding a fourth entry to kVendorGraphicsFiles in this
+# script had no effect at all: apply.sh said "already patched" and the binary came
+# out byte-identical (the health@2.1 passthrough .so never got published).
+ARRAY_ANCHOR = "const VendorGraphicsFile kVendorGraphicsFiles[] = {"
+HEALTH_ENTRY = """    {"vendor-overlay/lib64/hw/android.hardware.health@2.0-impl-2.1.so",
+     "/vendor/lib64/hw/android.hardware.health@2.0-impl-2.1.so", false},
+"""
+
 if "PublishVendorGraphics" in text:
-    print("already patched, nothing to do")
+    if "android.hardware.health@2.0-impl-2.1" in text:
+        print("already patched (health impl already listed), nothing to do")
+        sys.exit(0)
+    start = text.find(ARRAY_ANCHOR)
+    if start < 0:
+        sys.exit("kVendorGraphicsFiles not found although PublishVendorGraphics is present")
+    end = text.find("};", start)
+    if end < 0:
+        sys.exit("end of kVendorGraphicsFiles not found")
+    text = text[:end] + HEALTH_ENTRY + text[end:]
+    with open(SRC, "w", encoding="utf-8") as f:
+        f.write(text)
+    print("added the health passthrough impl to kVendorGraphicsFiles")
     sys.exit(0)
 
 if ANCHOR_FUNC not in text:

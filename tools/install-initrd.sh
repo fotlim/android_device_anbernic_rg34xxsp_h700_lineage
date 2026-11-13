@@ -19,9 +19,11 @@ DEBUG_INIT=/root/initramfs-embed/init
 REPO=${REPO:-/root/repo}
 CARD=${1:-/mnt/g}
 PACK_DEBUG=1
+PACK_OVERLAY=1
 for a in "$@"; do
 	case "$a" in
 		--no-debug-init) PACK_DEBUG=0 ;;
+		--no-overlay)    PACK_OVERLAY=0 ;;
 	esac
 done
 
@@ -46,6 +48,23 @@ if [ "$PACK_DEBUG" = 1 ]; then
 		exit 1
 	fi
 	ADD+=("$DEBUG_INIT:/init:0755")
+fi
+
+# vendor-overlay/ is what the first stage copies into /vendor/lib64/hw and
+# /vendor/bin/hw (gralloc/mapper/allocator, and now the health@2.1 passthrough
+# impl). It normally travels inside the kernel's built-in initramfs, but the
+# external initrd is unpacked into the same rootfs and overwrites same-named
+# entries, so carrying it here means those .so files can be updated without
+# rebuilding Image -- which is the whole point of this route.
+OVERLAY=/root/initramfs-embed/vendor-overlay
+if [ "$PACK_OVERLAY" = 1 ] && [ -d "$OVERLAY" ]; then
+	echo
+	echo "=== vendor-overlay (published into /vendor by the first stage) ==="
+	while IFS= read -r f; do
+		rel=${f#"$OVERLAY/"}
+		ADD+=("$f:vendor-overlay/$rel:0644")
+		printf '  %-58s %s\n' "vendor-overlay/$rel" "$(stat -c%s "$f") B"
+	done < <(find "$OVERLAY" -type f | sort)
 fi
 
 echo
