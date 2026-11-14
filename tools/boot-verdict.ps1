@@ -100,7 +100,7 @@ foreach ($cand in @(
 # 只有「system_server 自己说话了」才算数：abort 文本里也带着 (system_server) 这个词，
 # 9c7489bb 就靠它骗出过一次「还在正轨」的结论。
 $systemServer = FirstHit 'Entered the Android system server|SystemServer\s*:'
-$ssCrashes    = AllHits '\(system_server\)'
+$ssCrashes    = AllHits 'FatalError called: \(system_server\)'
 $bootAnim     = FirstHit "starting service 'bootanim'"
 $bootDone     = FirstHit 'boot_completed=|sys\.boot_completed=1|Boot is finished'
 $netdFirst    = FirstHit "starting service 'netd'"

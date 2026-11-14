@@ -195,6 +195,41 @@ void PublishFilteredPreloadedClasses() {
             kept_lines, dropped, kept.size());
 }
 
+// sd67: the rc setprop for sys.use_memfd did NOT take (boot 0abadd0b still read
+// [sys.use_memfd]: [false] at 120 s, with no parser error and no property denial
+// in kmsg). do_setprop() ignores the return value of SetProperty(), so a rejected
+// write is invisible. Set it where init cannot refuse: /system/etc/prop.default,
+// which PropertyLoadBootDefaults() reads first. The file is read through the same
+// /system/etc overlay the rc is written to, so this needs no image change.
+void PublishPropDefault() {
+    static const char kPath[] = "/system/etc/prop.default";
+    FILE* fp = fopen(kPath, "re");
+    if (fp == nullptr) {
+        pubnote("prop: open %s failed: %d (%s)", kPath, errno, strerror(errno));
+        return;
+    }
+    std::string text;
+    char line[512];
+    bool have = false;
+    while (fgets(line, sizeof(line), fp) != nullptr) {
+        if (strncmp(line, "sys.use_memfd=", 14) == 0)
+            have = true;
+        text += line;
+    }
+    fclose(fp);
+    if (have) {
+        pubnote("prop: %s already sets sys.use_memfd", kPath);
+        return;
+    }
+    text += "# no ashmem driver in this kernel; libcutils must use memfd\n";
+    text += "sys.use_memfd=true\n";
+    if (!PublishTextFile(kPath, text.c_str(), 0644)) {
+        return;
+    }
+    chmod(kPath, 0644);
+    pubnote("prop: appended sys.use_memfd=true to %s (%zu bytes)", kPath, text.size());
+}
+
 void PublishServiceRcOverrides() {
     mkdir("/dev/sys_etc_upper", 0755);
     mkdir("/dev/sys_etc_work", 0755);
@@ -204,6 +239,7 @@ void PublishServiceRcOverrides() {
         chmod("/dev/sys_etc_work", 0755);
         PublishTextFile("/system/etc/init/netd.rc", kNetdRc, 0644);
         PublishFilteredPreloadedClasses();
+        PublishPropDefault();
     } else {
         pubnote("sd56: /system/etc overlay failed, netd.rc keeps its onrestart");
     }
