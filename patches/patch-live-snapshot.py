@@ -72,6 +72,18 @@ cp /system/etc/init/netd.rc $CARD/DEBUG/live-netd.rc 2>>$LOG
 # while that file has been stale since boot 702a1e18 (the service writing it was
 # replaced by a later patch). 1.5 MiB keeps a 64 MiB card safe.
 logcat -d -b main -b system -b crash -v threadtime 2>/dev/null | tail -c 1572864 > $CARD/DEBUG/live-logcat.txt 2>>$LOG
+# 45 s is too early to see the interesting half. Boot 18c6c7be reached
+# "SystemServer: Entered the Android system server!" at 47 s and the snapshot
+# stopped exactly there, so the failure (or the stall) after it was invisible.
+# Wait another 75 s and take a second sample: services that started, a hang or a
+# watchdog kill all show up in this window, and the property table answers
+# "which of them is actually running" even when logcat has lost the lines.
+sleep 75
+logcat -d -b main -b system -b crash -b events -v threadtime 2>/dev/null | tail -c 1048576 > $CARD/DEBUG/live-logcat-late.txt 2>>$LOG
+getprop 2>/dev/null | grep -E 'init\\.svc\\.|boot_completed|dev\\.bootcomplete' > $CARD/DEBUG/live-props.txt 2>>$LOG
+ps -A 2>/dev/null | grep -E 'zygote|system_server|surfaceflinger|bootanim|netd|installd|audioserver|media' > $CARD/DEBUG/live-ps.txt 2>>$LOG
+# 已注册的 binder 服务：system_server 卡在哪个 startService，这张表比日志直接
+service list 2>/dev/null > $CARD/DEBUG/live-services.txt 2>>$LOG
 sync
 echo "snapshot: wrote $(ls $CARD/DEBUG/live-* 2>/dev/null | wc -l) files" >> $LOG
 umount $CARD 2>>$LOG

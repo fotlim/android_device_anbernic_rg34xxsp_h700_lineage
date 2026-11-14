@@ -106,6 +106,22 @@ $bootDone     = FirstHit 'boot_completed=|sys\.boot_completed=1|Boot is finished
 $netdFirst    = FirstHit "starting service 'netd'"
 $exits        = AllHits 'exited with status|killed by signal'
 
+# ---- 卡上的 live 证据（快照会在 45 s 和 120 s 各写一次） ----
+# kmsg 只收内核 printk；system_server 自己的话只在 logcat 里，所以只看 kmsg 会把
+# 18c6c7be（明明已经 "Entered the Android system server!"）判成"从未出现"。
+$liveLate = Join-Path $DebugDir 'live-logcat-late.txt'
+$liveMain = Join-Path $DebugDir 'live-logcat.txt'
+$livePath = if (Test-Path $liveLate) { $liveLate } else { $liveMain }
+$liveText = if (Test-Path $livePath) { Get-Content $livePath -Raw } else { '' }
+$propsPath = Join-Path $DebugDir 'live-props.txt'
+$propsText = if (Test-Path $propsPath) { Get-Content $propsPath -Raw } else { '' }
+
+$ssLive   = ($liveText -match 'Entered the Android system server')
+$bootLive = ($propsText -match 'boot_completed\]\s*:\s*\[\s*1\s*\]') -or
+            ($liveText -match 'sys\.boot_completed=1|Boot is finished')
+$ssOk     = ($null -ne $systemServer) -or $ssLive
+$bootOk   = ($null -ne $bootDone) -or $bootLive
+
 # ---------------------------------------------------------------- 账本
 $rows = New-Object System.Collections.Generic.List[object]
 function Add-Row($stage, $time, $expect, $state, $detail = '') {
@@ -133,12 +149,27 @@ if ($systemServer) {
     $ok  = if ($null -eq $lag -or $lag -le 10) { 'OK' } else { '偏慢' }
     $ev  = if ($lag) { 'zygote 之后 {0:N1}s' -f $lag } else { '' }
     Add-Row 'system_server 出现' ('{0:N1}s' -f $systemServer.t) 'zygote +10s 内' $ok $ev
+} elseif ($ssLive) {
+    Add-Row 'system_server 出现' '见 live-logcat' 'zygote +10s 内' 'OK' 'kmsg 里没有，logcat 里有 Entered the Android system server'
 } else {
-    Add-Row 'system_server 出现' '-' 'zygote +10s 内' 'FAIL' '整份 kmsg 一次都没有'
+    Add-Row 'system_server 出现' '-' 'zygote +10s 内' 'FAIL' 'kmsg 和 live-logcat 都没有'
 }
 
 if ($bootAnim) { Add-Row 'bootanim 启动' ('{0:N1}s' -f $bootAnim.t) '25-40s' 'OK' '' }
 if ($bootDone) { Add-Row 'boot_completed' ('{0:N1}s' -f $bootDone.t) '45-120s' 'OK' '' }
+elseif ($bootLive) { Add-Row 'boot_completed' '见 live-props' '45-120s' 'OK' 'sys.boot_completed=1' }
+
+# 快照里的属性表：哪些服务真的在跑，比日志更硬
+if ($propsText) {
+    $running = @()
+    foreach ($line in ($propsText -split "`r?`n")) {
+        if ($line -match '\[init\.svc\.([^\]\[]+)\]:\s*\[(\S+)\]') {
+            if ($Matches[2] -eq 'running') { $running += $Matches[1] }
+        }
+    }
+    if ($running.Count) { Add-Row '在跑的服务 (live-props)' ('{0} 个' -f $running.Count) '' 'OK' ($running -join ', ') }
+    else { Add-Row '在跑的服务 (live-props)' '0 个' '' 'FAIL' 'init.svc.* 里没有 running' }
+}
 
 if ($ssCrashes.Count) {
     $first = $ssCrashes[0].msg
@@ -159,17 +190,18 @@ Note ''
 
 # ---------------------------------------------------------------- 结论
 $zygoteCount = [Math]::Max($zygoteStarts.Count, $zygoteRestarts.Count + 1)
-$restartLoop = ($zygoteCount -ge 3 -and -not $systemServer)
+$restartLoop = ($zygoteCount -ge 3 -and -not $ssOk)
 
-if ($bootDone -and $systemServer) {
-    Note ('结论: 成功 —— {0:N0}s 处拿到 boot_completed，{1:N0}s 处出现 system_server。' -f $bootDone.t, $systemServer.t) 'Green'
+if ($bootOk -and $ssOk) {
+    Note '结论: 成功 —— system_server 起来了，boot_completed 也拿到了。' 'Green'
     exit 0
 }
-if ($systemServer) {
-    Note ('结论: 还在正轨 —— zygote 之后 {0:N1}s 出现 system_server，等到 {1}s 看 boot_completed。' -f ($systemServer.t - $zygoteFirst), $FullBootS) 'Cyan'
+if ($ssOk) {
+    Note '结论: 还在正轨 —— system_server 已经启动，但还没有 boot_completed。' 'Cyan'
+    Note '        如果 live-props 里 sys.boot_completed 为空，看 live-logcat-late.txt 里 SystemServer 停在哪一步。' 'Cyan'
     exit 0
 }
-if ($ssCrashes.Count -and -not $systemServer) {
+if ($ssCrashes.Count -and -not $ssOk) {
     Note ('结论: 失败 —— system_server 一次都没起来，被 abort 打死 {0} 次（首次 {1:N1}s）。' -f $ssCrashes.Count, $ssCrashes[0].t) 'Red'
     Note ('        Abort message: {0}' -f $ssCrashes[0].msg) 'Red'
     Note '        这一层不用等：看 live-logcat.txt 的 Abort message 和崩溃栈，改代码再上卡。' 'Red'

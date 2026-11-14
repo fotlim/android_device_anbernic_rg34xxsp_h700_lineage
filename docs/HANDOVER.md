@@ -658,6 +658,10 @@ bash tools/verify-patch-chain.sh        # 从 git 的 337 行重放，逐字节�
 - 卡挂成 `G:`（盘符会漂）。读不出来先 `cmd /c "chkdsk G: /F"`。
 - 日志里有转义序列，**必须 `grep -a`**。
 - 每次启动的文件名带 boot_id：`ran-<id>.txt`、`kmsg-<id>.txt`、`dmesg-<id>.txt`；`pmap.txt` 说明 `p01…p12.txt` 分别来自哪个源文件。
+- `live-*` 是本轮（快照在 45 s 写第一批、120 s 写第二批）：
+  `live-logcat.txt` / `live-logcat-late.txt` / `live-props.txt`（`init.svc.*` 与 `sys.boot_completed`）/
+  `live-ps.txt` / `live-services.txt`（`service list`）/ `live-preload.txt`（四项自证）。
+  **system_server 的话只在 logcat 里，kmsg 里没有** —— 判它起没起看 `live-logcat*`。
 
 ### 7.5 git 提交
 - 仓库无 local config → `git -c user.name=dsh -c user.email=dsh@local commit`。
@@ -676,9 +680,9 @@ bash tools/verify-patch-chain.sh        # 从 git 的 337 行重放，逐字节�
 | 一阶交接 `init.android` | ≤ 25 s | `ran-<id>.txt` 的 `hb: [x.xx] stage 9: about to execl` |
 | `netd` 第一次启动 | 20–45 s | `starting service 'netd'` |
 | `zygote` 第一次启动 | 20–50 s | `starting service 'zygote'` / `Created socket '/dev/socket/zygote'` |
-| **`system_server`** | zygote 之后 **10 s 内** | 只认 `Entered the Android system server`；abort 文本里的 `(system_server)` 不算 |
+| **`system_server`** | zygote 之后 **10 s 内** | kmsg 里**没有**它的日志 —— 只认 `live-logcat*.txt` 的 `Entered the Android system server` |
 | `bootanim` | 25–40 s | `starting service 'bootanim'` |
-| `sys.boot_completed=1` | 45–120 s | 到桌面 |
+| `sys.boot_completed=1` | 45–120 s | `live-props.txt` / `live-logcat*.txt` |
 
 三条硬判据（实测基线：一阶交接 17.4 s、bootanim 29.4 s、zygote 约 38 s）：
 
