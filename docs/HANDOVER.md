@@ -822,10 +822,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
     修法：`92-systemserver-classpath.rc` 的 `on early-init` 里
     `setprop sys.use_memfd true` —— **这条 rc 写法不可靠**：boot `0abadd0b` 证明它被静默吞掉
     （`builtins.cpp` 的 `do_setprop()` 丢掉了 `SetProperty()` 的返回值，失败不报也不记日志）。
-    **可用的写法（sd67）**：把 `sys.use_memfd=true` 追加进 `/system/etc/prop.default`
-    —— `property_service.cpp:883` 加载顺序的第一条，而 `/system/etc` 本就有 overlay，
-    一阶读穿 lowerdir 追加后写回即可。自证：`live-preload.txt` 的 `prop.default memfd: 1`
-    与 `live-props.txt` 的 `[sys.use_memfd]: [true]`。
+    **可用的写法（sd67/sd68）**：两件事一起做 ——
+    (a) 把 `sys.use_memfd=true` 追加进 `/system/etc/prop.default`（`property_service.cpp:883`
+    加载顺序第一条，而 `/system/etc` 本就有 overlay，一阶读穿 lowerdir 追加后写回）；
+    (b) **关键**：`system/etc/init/hw/init.rc:785` 在 **`on post-fs-data`** 里写着
+    `setprop sys.use_memfd false`，它会把 (a) 和 early-init 的值全部盖掉
+    （boot `4a8a5a14` 就是卡在这里）。所以还要再在 **`on boot`** 里
+    `setprop sys.use_memfd true` —— `on boot` 在 post-fs-data 之后、
+    system_server 第一次分配 CursorWindow 之前。
+    自证：`live-preload.txt` 的 `prop.default memfd: 1` 与 `live-props.txt` 的
+    `[sys.use_memfd]: [true]`。**教训**：属性"设不进去"时先在全镜像里
+    `grep -rn '<属性名>' out/target/product/rg34xxsp/`，找"谁把它设回去了"。
     长期正解仍是内核里补 ashmem 或改 `BOARD` 侧的 memfd 策略，但这条已够用。
 
 ---

@@ -153,6 +153,15 @@ const char kSystemServerClasspathRc[] =
     "/apex/com.android.permission/javalib/service-permission.jar:"
     "/apex/com.android.ipsec/javalib/android.net.ipsec.ike.jar\n"
     "    # there is no ashmem driver in this kernel; make libcutils use memfd\n"
+    "    setprop sys.use_memfd true\n"
+    "\n"
+    "# ...and set it again, because init.rc:785 does 'setprop sys.use_memfd false'\n"
+    "# inside 'on post-fs-data', i.e. AFTER early-init (boot 4a8a5a14 still read\n"
+    "# false at 120 s even though /system/etc/prop.default carried the line: the\n"
+    "# boot property load and this early-init write both happen before post-fs-data).\n"
+    "# 'on boot' fires after post-fs-data and long before system_server allocates\n"
+    "# its first CursorWindow, and libcutils only samples the property per process.\n"
+    "on boot\n"
     "    setprop sys.use_memfd true\n";
 
 // sd59: /system/etc/preloaded-classes ships 19 android.renderscript lines, but
