@@ -772,7 +772,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
     `Abort message: 'JNI FatalError called: (system_server) Not whitelisted (3): /DEBUG/kmsg-9c7489bb.txt'`。
     只有 zygote 真的跑到 `ZygoteInit.forkSystemServer` 才会咬人，所以 sd59 之前一直没暴露。
     修法：三个 open 加 `O_CLOEXEC`、fork 后父进程 close、交接前 `3..1023` 全 close，
-    并留一条自证心跳 `stage 9c: handing over with N open descriptor(s)`（下一卡应为 **3**）。
+    并留一条自证心跳 `stage 9c: handing over with N open descriptor(s)`（实测 **0**：`release_console()` 早已收掉 0/1/2）。
+16. **★ `SYSTEMSERVERCLASSPATH` 是空的 → system_server 找不到自己的类**（11-14，sd62 已用 initrd 绕开）：
+    `out/…/root/init.environ.rc:15` 生成成 `export SYSTEMSERVERCLASSPATH` 后面空无一物，
+    因为 `PRODUCT_SYSTEM_SERVER_JARS` **只有 `build/make/target/product/media_system.mk:52` 会设置**，
+    而我们的 `device.mk` 只继承了 `core_64_bit.mk` / `updatable_apex.mk` /
+    `developer_gsi_keys.mk` / tablet heap —— 没有一条链走到 `media_system.mk`。
+    后果：`fetchSystemServerClassLoader` 拿到空串，`handleSystemServerProcess()` 继续用
+    boot classloader，`services.jar` 又不在 `BOOTCLASSPATH` 里 ⇒
+    `ClassNotFoundException: com.android.server.SystemServer`，每 5 s 一轮，
+    **而且因为是 Java 异常，kmsg 里连 crash buffer 都没有**，看起来"最健康"。
+    当前的权宜：`patch-service-rc.py` 发一份 `/vendor/etc/init/92-systemserver-classpath.rc`，
+    `on early-init` 里 `export SYSTEMSERVERCLASSPATH` 三个存在的 jar
+    （`org.lineageos.platform` / `com.android.location.provider` / `services`；
+    `ethernet-service.jar` 这镜像没编，写进去会让 `createPathClassLoader` 抛）。
+    自证：`DEBUG/live-preload.txt` 第 4 行 `systemserver-classpath rc files: 1`。
+    **正统修法**：`device.mk` 继承 `$(SRC_TARGET_DIR)/product/media_system.mk`
+    （或直接赋 `PRODUCT_SYSTEM_SERVER_JARS`），然后重出 ramdisk/Image ——
+    顺带 `BOOTCLASSPATH` 也缺 `org.lineageos.platform.jar`，同一个根因。
 
 ---
 

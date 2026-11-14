@@ -87,6 +87,33 @@ const char kMemtrackRc[] =
     "# See patches/patch-service-rc.py: hw_get_module(\"memtrack\") can never\n"
     "# succeed on this tree, and the failure only restarts a HAL nobody needs.\n";
 
+const char kSystemServerClasspathRc[] =
+    "# sd62: SYSTEMSERVERCLASSPATH has to be set, or system_server never starts.\n"
+    "#\n"
+    "# This tree's init.environ.rc is generated with an EMPTY SYSTEMSERVERCLASSPATH\n"
+    "# (out/target/product/rg34xxsp/root/init.environ.rc, line 15). The device tree\n"
+    "# never inherits build/make/target/product/media_system.mk, which is the only\n"
+    "# file that sets PRODUCT_SYSTEM_SERVER_JARS, so the substitution had nothing to\n"
+    "# fill in. ZygoteInit.handleSystemServerProcess() therefore kept the boot\n"
+    "# class loader, and boot 07973417 died inside every fork with\n"
+    "#\n"
+    "#   java.lang.RuntimeException: Missing class when invoking static main\n"
+    "#       com.android.server.SystemServer\n"
+    "#   Caused by: ClassNotFoundException: com.android.server.SystemServer\n"
+    "#\n"
+    "# Everything before that looked healthy -- zygote finished preload in 6.3 s and\n"
+    "# callers saw no crash buffer at all, because this is a Java exception in the\n"
+    "# forked child, not an abort.\n"
+    "#\n"
+    "# The jars are media_system.mk's list minus ethernet-service.jar, which this\n"
+    "# image does not build. Every \"on early-init\" section runs in parse order, well\n"
+    "# before zygote, so a vendor rc is enough to bring the value back.\n"
+    "on early-init\n"
+    "    export SYSTEMSERVERCLASSPATH "
+    "/system/framework/org.lineageos.platform.jar:"
+    "/system/framework/com.android.location.provider.jar:"
+    "/system/framework/services.jar\n";
+
 // sd59: /system/etc/preloaded-classes ships 19 android.renderscript lines, but
 // this image has no librs_jni.so *at all* (checked in
 // out/target/product/rg34xxsp/system/lib64). RenderScript.<clinit> therefore
@@ -141,6 +168,8 @@ void PublishServiceRcOverrides() {
     }
     PublishTextFile("/vendor/etc/init/android.hardware.memtrack@1.0-service.rc",
                     kMemtrackRc, 0644);
+    PublishTextFile("/vendor/etc/init/92-systemserver-classpath.rc",
+                    kSystemServerClasspathRc, 0644);
 }
 
 '''
