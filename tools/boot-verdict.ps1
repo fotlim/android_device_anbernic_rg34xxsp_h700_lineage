@@ -59,7 +59,7 @@ if (Test-Path $ranPath) {
 }
 
 # ---------------------------------------------------------------- 第二阶段（kmsg）
-$re = '^\s*\d+,\s*\d+,\s*(\d+),[-+;]?(.*)$'
+$re = '^\s*\d+,\s*\d+,\s*(\d+),[^;]*;(.*)$'
 $t  = [System.Collections.Generic.List[double]]::new()
 $m  = [System.Collections.Generic.List[string]]::new()
 foreach ($line in Get-Content $kmsgPath) {
@@ -87,7 +87,7 @@ function AllHits([string]$pattern) {
 
 $zygoteStarts = AllHits "init: starting service 'zygote'"
 # 有些开机里 init 的 "starting service" 行被 printk 限速吃掉，只剩 socket / audit 痕迹
-$zygoteMarks  = AllHits "Created socket '/dev/socket/zygote'|comm=`"app_process64`""
+$zygoteMarks  = AllHits "Created socket '/dev/socket/zygote'|comm=`"app_process64`"|scontext=u:r:zygote:s0"
 # zygote 每死一次，init 就跑一遍它的 onrestart 组（<Service 'zygote' onrestart>:N），
 # 这条在日志里比 "starting service" 更不容易丢，用来数重启次数。
 $zygoteRestarts = AllHits "action=onrestart \(<Service 'zygote' onrestart>:1\)"
@@ -97,7 +97,10 @@ foreach ($cand in @(
         $(if ($zygoteMarks.Count)  { $zygoteMarks[0].t }))) {
     if ($null -ne $cand -and ($null -eq $zygoteFirst -or $cand -lt $zygoteFirst)) { $zygoteFirst = $cand }
 }
-$systemServer = FirstHit 'system_server|SystemServer|fork system server|Entered the Android system server'
+# 只有「system_server 自己说话了」才算数：abort 文本里也带着 (system_server) 这个词，
+# 9c7489bb 就靠它骗出过一次「还在正轨」的结论。
+$systemServer = FirstHit 'Entered the Android system server|SystemServer\s*:'
+$ssCrashes    = AllHits '\(system_server\)'
 $bootAnim     = FirstHit "starting service 'bootanim'"
 $bootDone     = FirstHit 'boot_completed=|sys\.boot_completed=1|Boot is finished'
 $netdFirst    = FirstHit "starting service 'netd'"
@@ -137,6 +140,12 @@ if ($systemServer) {
 if ($bootAnim) { Add-Row 'bootanim 启动' ('{0:N1}s' -f $bootAnim.t) '25-40s' 'OK' '' }
 if ($bootDone) { Add-Row 'boot_completed' ('{0:N1}s' -f $bootDone.t) '45-120s' 'OK' '' }
 
+if ($ssCrashes.Count) {
+    $first = $ssCrashes[0].msg
+    if ($first.Length -gt 88) { $first = $first.Substring(0, 88) + '...' }
+    Add-Row 'system_server 崩溃' ('{0} 次，首次 {1:N1}s' -f $ssCrashes.Count, $ssCrashes[0].t) '0 次' 'FAIL' $first
+}
+
 if ($zygoteRestarts.Count) {
     $per = if ($zygoteRestarts.Count -gt 1) { ($zygoteRestarts[-1].t - $zygoteRestarts[0].t) / ($zygoteRestarts.Count - 1) } else { 0 }
     Add-Row 'zygote 重启组' ('{0} 次' -f ($zygoteRestarts.Count + 1)) '应为 1 次' $(if ($zygoteRestarts.Count -ge 2) { 'FAIL' } else { 'OK' }) ('周期 {0:N2}s' -f $per)
@@ -159,6 +168,12 @@ if ($bootDone -and $systemServer) {
 if ($systemServer) {
     Note ('结论: 还在正轨 —— zygote 之后 {0:N1}s 出现 system_server，等到 {1}s 看 boot_completed。' -f ($systemServer.t - $zygoteFirst), $FullBootS) 'Cyan'
     exit 0
+}
+if ($ssCrashes.Count -and -not $systemServer) {
+    Note ('结论: 失败 —— system_server 一次都没起来，被 abort 打死 {0} 次（首次 {1:N1}s）。' -f $ssCrashes.Count, $ssCrashes[0].t) 'Red'
+    Note ('        Abort message: {0}' -f $ssCrashes[0].msg) 'Red'
+    Note '        这一层不用等：看 live-logcat.txt 的 Abort message 和崩溃栈，改代码再上卡。' 'Red'
+    exit 1
 }
 if ($restartLoop) {
     # 用最干净的一组数：优先 "starting service"，没有就退回 onrestart 组

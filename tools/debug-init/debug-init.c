@@ -2691,6 +2691,25 @@ handover:
 	for (int fd = 3; fd < 1024; fd++)
 		close(fd);
 
+	/*
+	 * Leave a number behind, because this fix is invisible otherwise: the
+	 * next boot's ran-<id>.txt should say "handing over with no descriptors
+	 * beyond stdio". Anything above 3 means something still crossed the
+	 * handover and system_server will abort in ForkSystemServer again.
+	 */
+	{
+		char line[128];
+		int kept = 0;
+
+		for (int fd = 0; fd < 1024; fd++)
+			if (fcntl(fd, F_GETFD) != -1)
+				kept++;
+		snprintf(line, sizeof(line),
+			 "stage 9c: handing over with %d open descriptor(s) (0-2 = stdio)",
+			 kept);
+		hb(line);
+	}
+
 	execl("/init.android", "/init", NULL);
 
 	/* Only reached if the Android init is missing -- keep the log, then stop. */

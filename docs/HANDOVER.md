@@ -676,7 +676,7 @@ bash tools/verify-patch-chain.sh        # 从 git 的 337 行重放，逐字节�
 | 一阶交接 `init.android` | ≤ 25 s | `ran-<id>.txt` 的 `hb: [x.xx] stage 9: about to execl` |
 | `netd` 第一次启动 | 20–45 s | `starting service 'netd'` |
 | `zygote` 第一次启动 | 20–50 s | `starting service 'zygote'` / `Created socket '/dev/socket/zygote'` |
-| **`system_server`** | zygote 之后 **10 s 内** | 整份 kmsg 一次都没有 = 这一卡废了 |
+| **`system_server`** | zygote 之后 **10 s 内** | 只认 `Entered the Android system server`；abort 文本里的 `(system_server)` 不算 |
 | `bootanim` | 25–40 s | `starting service 'bootanim'` |
 | `sys.boot_completed=1` | 45–120 s | 到桌面 |
 
@@ -696,6 +696,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
 
 退出码 `0` = 成功或还在正轨，`1` = 失败。脚本文件**必须带 UTF-8 BOM**，
 否则 Windows PowerShell 5.1 会把中文注释读成乱码、整份脚本报 ParserError（已踩过）。
+
+它还会多打一行 **`system_server 崩溃 N 次`**（按 abort 文本里的 `(system_server)` 计数）：
+只看 `system_server` 这个词出现过就判"在正轨"会骗人 —— 9c7489bb 就是这么被它判过一回，
+实际是 `Not whitelisted (3)` 把 fork 出来的子进程当场毙掉。
 
 ---
 
@@ -760,6 +764,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
     `cp /metadata/dsh/first-stage-publish.txt` 应为 `/metadata/first-stage-publish.txt`。
     现在另外写一份 `DEBUG/live-preload.txt`（preloaded-classes 行数/renderscript 行数、
     netd.rc 的 onrestart 行数、mediacodec.policy 的行数/include 数）自证三个文件的状态。
+15. **★ 一阶把调试日志的 fd 漏给了 Android**（11-14 由 `9c7489bb` 抓到，sd60 已修）：
+    `debug-init.c` 的 `start_kmsg_logger()` 在 PID 1 里 open `/dev/kmsg`、`DEBUG/kmsg-<id>.txt`、
+    `ran-<id>.txt`，fork 出跟随进程后**父进程的三份拷贝没关**。它们穿过
+    `execl("/init.android")` 留在 PID1，再被 Android init 传给每个服务，
+    最后跟着 zygote 的 fork 进了 system_server：
+    `Abort message: 'JNI FatalError called: (system_server) Not whitelisted (3): /DEBUG/kmsg-9c7489bb.txt'`。
+    只有 zygote 真的跑到 `ZygoteInit.forkSystemServer` 才会咬人，所以 sd59 之前一直没暴露。
+    修法：三个 open 加 `O_CLOEXEC`、fork 后父进程 close、交接前 `3..1023` 全 close，
+    并留一条自证心跳 `stage 9c: handing over with N open descriptor(s)`（下一卡应为 **3**）。
 
 ---
 
