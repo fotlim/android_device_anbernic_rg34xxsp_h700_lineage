@@ -82,7 +82,7 @@ logcat -d -b main -b system -b crash -v threadtime 2>/dev/null | tail -c 1572864
 # "which of them is actually running" even when logcat has lost the lines.
 sleep 75
 logcat -d -b main -b system -b crash -b events -v threadtime 2>/dev/null | tail -c 1048576 > $CARD/DEBUG/live-logcat-late.txt 2>>$LOG
-getprop 2>/dev/null | grep -E 'init\\.svc\\.|boot_completed|dev\\.bootcomplete' > $CARD/DEBUG/live-props.txt 2>>$LOG
+getprop 2>/dev/null | grep -E 'init\\.svc\\.|boot_completed|dev\\.bootcomplete|sys\\.use_memfd|vndk\\.version' > $CARD/DEBUG/live-props.txt 2>>$LOG
 ps -A 2>/dev/null | grep -E 'zygote|system_server|surfaceflinger|bootanim|netd|installd|audioserver|media' > $CARD/DEBUG/live-ps.txt 2>>$LOG
 # 已注册的 binder 服务：system_server 卡在哪个 startService，这张表比日志直接
 service list 2>/dev/null > $CARD/DEBUG/live-services.txt 2>>$LOG

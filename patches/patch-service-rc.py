@@ -133,13 +133,27 @@ const char kSystemServerClasspathRc[] =
     "# and /apex/com.android.ipsec/javalib/android.net.ipsec.ike.jar (455,181 B).\n"
     "# Every \"on early-init\" section runs in parse order, well before zygote, so a\n"
     "# vendor rc is enough to bring the value back.\n"
+    "#\n"
+    "# Same file, second problem: boot 5a29c962 reached InstallSystemProviders and\n"
+    "# then died with\n"
+    "#\n"
+    "#   CursorWindowAllocationException: Could not allocate CursorWindow\n"
+    "#     .../settings.db of size 2097152 due to error -2\n"
+    "#\n"
+    "# -2 is ENOENT: libcutils fell back to /dev/ashmem<boot_id>, and this kernel\n"
+    "# (CONFIG_MEMFD_CREATE=y, no ashmem driver) never creates that node. libcutils'\n"
+    "# memfd path is gated on ro.vndk.version >= 29 (this image already has 30 in\n"
+    "# vendor/default.prop) AND on sys.use_memfd, which defaults to false. Flip it\n"
+    "# before system_server allocates its first CursorWindow.\n"
     "on early-init\n"
     "    export SYSTEMSERVERCLASSPATH "
     "/system/framework/org.lineageos.platform.jar:"
     "/system/framework/com.android.location.provider.jar:"
     "/system/framework/services.jar:"
     "/apex/com.android.permission/javalib/service-permission.jar:"
-    "/apex/com.android.ipsec/javalib/android.net.ipsec.ike.jar\n";
+    "/apex/com.android.ipsec/javalib/android.net.ipsec.ike.jar\n"
+    "    # there is no ashmem driver in this kernel; make libcutils use memfd\n"
+    "    setprop sys.use_memfd true\n";
 
 // sd59: /system/etc/preloaded-classes ships 19 android.renderscript lines, but
 // this image has no librs_jni.so *at all* (checked in

@@ -812,6 +812,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
     **正统修法**：`device.mk` 继承 `$(SRC_TARGET_DIR)/product/media_system.mk`
     （或直接赋 `PRODUCT_SYSTEM_SERVER_JARS`），然后重出 ramdisk/Image ——
     顺带 `BOOTCLASSPATH` 也缺 `org.lineageos.platform.jar`，同一个根因。
+17. **★ 内核没有 ashmem，`sys.use_memfd` 默认 false**（11-14 由 `5a29c962` 抓到，sd66 已修）：
+    `ActivityManagerService.installSystemProviders` 里 `SettingsProvider` 一开
+    `CursorWindow` 就 `CursorWindowAllocationException ... due to error -2`（ENOENT），
+    system_server 每 5 s 一轮。原因是 `libcutils` 的 `has_memfd_support()` 有**两道闸门**：
+    `ro.vndk.version >= 29`（本镜像 `vendor/default.prop` 已有 30 ✓）与
+    **`sys.use_memfd`（默认 false）**；闸门不过就回落到 `/dev/ashmem<boot_id>`，
+    而这颗内核 `CONFIG_MEMFD_CREATE=y`、**没有 ashmem 驱动**（`config.sd35` 里一条 `ASHMEM` 都没有）。
+    修法：`92-systemserver-classpath.rc` 的 `on early-init` 里
+    `setprop sys.use_memfd true` —— 必须早于 system_server 第一次分配 CursorWindow，
+    且 `libcutils` 每进程只判一次。自证：`live-props.txt` 里
+    `[sys.use_memfd]: [true]` 与 `[ro.vndk.version]: [30]`。
+    长期正解仍是内核里补 ashmem 或改 `BOARD` 侧的 memfd 策略，但这条 rc 已够用。
 
 ---
 
