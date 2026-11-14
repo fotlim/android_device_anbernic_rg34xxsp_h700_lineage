@@ -639,6 +639,11 @@ bash tools/verify-patch-chain.sh        # 从 git 的 337 行重放，逐字节�
 - **`/mnt/g` 不一定是卡**：重插卡之后 WSL 有时不会自动重新挂 drvfs，`ls /mnt/g` 只会看到
   `total 0`（一个空普通目录，还能往里写、写完 Windows 看不着）。写卡前先
   `mount -t drvfs 'G:' /mnt/g` 再 `ls` 确认能看到 `Image`/`initrd.img`。
+- **WSL 写卡会让 Windows 的卷缓存打架**：即使 `umount /mnt/g` 之后再从 Windows 读
+  `G:\Image`，也会报 "The file or directory is corrupted and unreadable"；
+  `chkdsk G: /F`（它通常说 no problems）+ 再读就好了，哈希也是对的。
+  **做法改成**：WSL 先把产物写到 `F:\rg34xxsp\`，再用 Windows 侧 `Copy-Item` 到 `G:`，
+  全程不让 drvfs 碰卡。
 - 重建 initrd 的完整调用（`make-initrd.py` 少了 `--gzip`/`--add` 只会出一个 930 KB
   的单条目包，别被"写成功"骗过去）：
   ```bash
@@ -864,12 +869,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
     现在备份统一放 `/root/artifacts/init-backups/`。
     第一次上机（`888112aa`）结果：**netd 活了**（`[init.svc.netd]: [running]`，
     `iptables-restore` 报错 0 条），system_server 推进到 `StartLightsService`；
-    但 `vendor.hwcomposer-2-2` 每轮退出 1（154 次），它的 rc 里
+    但 `vendor.hwcomposer-2-2` 每轮退出 1（145~154 次），它的 rc 里
     `onrestart restart surfaceflinger` 把 SF 一起带死，SF 重启又要 composer →
-    死循环。新旧内核的图形配置（CMA 32M、DRM_SUN4I/PANFROST/FB）**完全一致**，
-    所以怀疑 sd68 的 `sys.use_memfd=true` 与 gralloc/minigbm，或 DRM master 竞态；
-    sd71 已把该 HAL 的原始输出（`live-hwc-run.txt`）与 composer/drm 全量日志
-    （`live-hwc.txt`）加入快照，下一卡定位。
+    死循环。新旧内核的图形配置（CMA 32M、DRM_SUN4I/PANFROST/FB）**完全一致**
+    （用 `scripts/extract-ikconfig` 从旧 Image 抽 config 对比过），内核无罪。
+20. **★ composer HAL 起不来（进行中，11-14）**：`vendor.hwcomposer-2-2` 是 AOSP 的
+    **hwc2on1 包装器**（NEEDED 含 `libhwc2on1adapter.so` / `libhwc2onfbadapter.so`），
+    它先 `hw_get_module("hwcomposer")`（找 `hwcomposer.<ro.hardware>.so` /
+    `hwcomposer.default.so`），本树只有 **`hwcomposer.drm_minigbm.so`**，名字对不上；
+    正常设备靠 vendor 侧一个 `hwcomposer.default.so` 链接补上。所以此刻它大概走在
+    fbdev 回退（`gralloc.default` + `/dev/graphics/fb0`）上。
+    `/dev/dri` 有 `card0 card1 renderD128`，`/vendor/lib64/hw` 里
+    `hwcomposer.drm_minigbm.so`、`gralloc.default.so`、`gralloc.minigbm.so` 都在。
+    sd72/sd73 的 `live-snapshot.sh` 已改成：**清空 logcat → 手跑该 HAL → 立刻取
+    buffer**（`live-hwc-log.txt`），并做一次 `sys.use_memfd=false` 的 A/B
+    （`live-hwc-log-nomemfd.txt`），用来判定是不是 sd68 的 memfd 惹的祸。
+    判读：`live-hwc.txt` 里的 `/dev/graphics` 有没有 `fb0`；两份日志是否逐行相同。
     长期正解仍是内核里补 ashmem 或改 `BOARD` 侧的 memfd 策略，但这条已够用。
 
 ---

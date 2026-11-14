@@ -88,16 +88,26 @@ getprop 2>/dev/null | grep -E 'init\\.svc\\.|boot_completed|dev\\.bootcomplete|s
 ps -A 2>/dev/null | grep -E 'zygote|system_server|surfaceflinger|bootanim|netd|installd|audioserver|media' > $CARD/DEBUG/live-ps.txt 2>>$LOG
 # 已注册的 binder 服务：system_server 卡在哪个 startService，这张表比日志直接
 service list 2>/dev/null > $CARD/DEBUG/live-services.txt 2>>$LOG
-# sd70 起 vendor.hwcomposer-2-2 每轮退出 status 1（154 次），而且它自己的 log
-# 没进我们抓的那 1 MiB。这里把整个 ring 里跟 composer/drm 有关的行全捞出来，
-# 再把 /dev/dri 目录列一遍 —— 它到底打不开设备还是拿不到 master，一眼可见。
-logcat -d -b main -b system -b crash -v threadtime 2>/dev/null | grep -iE 'hwc|composer|hw_get_module|minigbm|drm' | tail -120 > $CARD/DEBUG/live-hwc.txt 2>>$LOG
-{ echo "===== ls -l /dev/dri ====="; ls -l /dev/dri 2>&1; echo "===== /vendor/lib64/hw ====="; ls /vendor/lib64/hw 2>/dev/null | grep -E 'hwcomposer|gralloc|mapper'; } >> $CARD/DEBUG/live-hwc.txt 2>>$LOG
-# 再亲手跑一次这个 HAL，把 stdout/stderr 原样抓下来（它平时的话被 init 收走/丢掉）
+# sd70 起 vendor.hwcomposer-2-2 每轮退出 status 1，而且它自己的 log 完全没进
+# logcat 尾巴。sd72：把 logcat 清空、亲手跑一次这个 HAL，再立刻取 buffer ——
+# 这样 live-hwc-log.txt 里只剩它自己说的话，不会被 auditd 刷掉。
+logcat -c 2>/dev/null
+{ echo "===== ls -l /dev/dri ====="; ls -l /dev/dri 2>&1; echo "===== ls -l /dev/graphics ====="; ls -l /dev/graphics 2>&1; echo "===== /vendor/lib64/hw ====="; ls /vendor/lib64/hw 2>&1; } > $CARD/DEBUG/live-hwc.txt 2>>$LOG
 /vendor/bin/hw/android.hardware.graphics.composer@2.2-service > $CARD/DEBUG/live-hwc-run.txt 2>&1 &
 HWPID=$!
-sleep 3
+sleep 2
 kill $HWPID 2>/dev/null
+logcat -d -b main -b system -b crash -v threadtime 2>/dev/null | tail -c 262144 > $CARD/DEBUG/live-hwc-log.txt 2>>$LOG
+# A/B：同一份 HAL 再用 sys.use_memfd=false 跑一次。libcutils 的属性是每进程采样的，
+# 所以这一次会走 ashmem 分支 —— 两次日志的差别就是 memfd 到底有没有关系的答案。
+setprop sys.use_memfd false
+logcat -c 2>/dev/null
+/vendor/bin/hw/android.hardware.graphics.composer@2.2-service > $CARD/DEBUG/live-hwc-run-nomemfd.txt 2>&1 &
+HWPID=$!
+sleep 2
+kill $HWPID 2>/dev/null
+logcat -d -b main -b system -b crash -v threadtime 2>/dev/null | tail -c 262144 > $CARD/DEBUG/live-hwc-log-nomemfd.txt 2>>$LOG
+setprop sys.use_memfd true
 sync
 echo "snapshot: wrote $(ls $CARD/DEBUG/live-* 2>/dev/null | wc -l) files" >> $LOG
 umount $CARD 2>>$LOG
