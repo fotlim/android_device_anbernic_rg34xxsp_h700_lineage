@@ -176,6 +176,16 @@ EXTRA_ENTRIES = [
     {"vendor-overlay/lib64/hw/android.hardware.memtrack@1.0-impl.so",
      "/vendor/lib64/hw/android.hardware.memtrack@1.0-impl.so", false},
 """),
+    ("/vendor/lib64/hw/memtrack.default.so",
+     """    // memtrack.default.so is the empty legacy HAL (patches/memtrack-stub) that
+    // lets android.hardware.memtrack@1.0-service register at all. Without it
+    // hw_get_module("memtrack") fails, the HIDL service never publishes, and
+    // Debug.getMemoryInfo -> memtrack_proc_get blocks system_server's main
+    // thread inside ActivityManagerService.<init> until the Watchdog kills it
+    // 60 s later (boot b8c70ff4: "Blocked in handler on main thread (main)").
+    {"vendor-overlay/lib64/hw/memtrack.default.so",
+     "/vendor/lib64/hw/memtrack.default.so", false},
+"""),
 ]
 
 if "PublishVendorGraphics" in text:

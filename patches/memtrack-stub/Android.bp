@@ -1,0 +1,22 @@
+// Builds /vendor/lib64/hw/memtrack.default.so from the stub in this directory.
+//
+// The module is named memtrack.rg34xxsp because hardware/qcom-caf/sm8350 already
+// defines a soong module called memtrack.default (it is never built for this
+// product, but soong still rejects a duplicate name). `stem` makes the installed
+// file the name hw_get_module() looks for.
+cc_library_shared {
+    name: "memtrack.rg34xxsp",
+    proprietary: true,
+    relative_install_path: "hw",
+    stem: "memtrack.default",
+    srcs: ["memtrack.c"],
+    shared_libs: [
+        "liblog",
+        "libhardware",
+    ],
+    header_libs: ["libhardware_headers"],
+    cflags: [
+        "-Wall",
+        "-Wno-unused-parameter",
+    ],
+}

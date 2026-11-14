@@ -67,6 +67,8 @@ cp /system/etc/init/netd.rc $CARD/DEBUG/live-netd.rc 2>>$LOG
     echo "netd.rc onrestart-restart-zygote: $(grep -c onrestart /system/etc/init/netd.rc) lines"
     echo "mediacodec.policy: $(wc -l < /system/etc/seccomp_policy/mediacodec.policy) lines, $(grep -c @include /system/etc/seccomp_policy/mediacodec.policy) includes"
     echo "systemserver-classpath rc files: $(grep -l SYSTEMSERVERCLASSPATH /vendor/etc/init/*.rc 2>/dev/null | wc -l)"
+    echo "memtrack stub module: $(ls /vendor/lib64/hw/memtrack.default.so 2>/dev/null | wc -l)"
+    echo "memtrack service rc: $(grep -c 'IMemtrack default' /vendor/etc/init/android.hardware.memtrack@1.0-service.rc 2>/dev/null)"
 } > $CARD/DEBUG/live-preload.txt 2>>$LOG
 # -d, and not /data/local/tmp/dsh-android.log: logcat's own ring holds THIS boot,
 # while that file has been stale since boot 702a1e18 (the service writing it was

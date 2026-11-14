@@ -82,10 +82,20 @@ const char kNetdRc[] =
     "    # then kill both zygotes before either can fork system_server.\n"
     "    updatable\n";
 
+// The memtrack HAL used to be commented out here (sd56), because the passthrough
+// service could only exit 1 without a legacy module. That was wrong in the end:
+// boot b8c70ff4 showed system_server's main thread stuck in
+// Debug.getMemoryInfo -> memtrack_proc_get waiting for
+// android.hardware.memtrack@1.0::IMemtrack/default, which never appeared, until
+// the Watchdog killed the whole process 60 s later -- inside every cycle. With
+// memtrack.default.so now shipped (patches/memtrack-stub), the service registers
+// and answers "no records", so it is defined again, exactly as the image ships it.
 const char kMemtrackRc[] =
-    "# android.hardware.memtrack@1.0-service is deliberately not defined.\n"
-    "# See patches/patch-service-rc.py: hw_get_module(\"memtrack\") can never\n"
-    "# succeed on this tree, and the failure only restarts a HAL nobody needs.\n";
+    "service vendor.memtrack-hal-1-0 /vendor/bin/hw/android.hardware.memtrack@1.0-service\n"
+    "    interface android.hardware.memtrack@1.0::IMemtrack default\n"
+    "    class hal\n"
+    "    user system\n"
+    "    group system\n";
 
 const char kSystemServerClasspathRc[] =
     "# sd62: SYSTEMSERVERCLASSPATH has to be set, or system_server never starts.\n"

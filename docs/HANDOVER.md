@@ -746,9 +746,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
     **在补之前这台机器没有网络**（wifi/ril 都谈不上）。用户的绕法是
     `patches/patch-service-rc.py` 把 `netd.rc` 的两条 `onrestart restart zygote[_secondary]` 盖掉，
     让 netd 死得安静、不再连坐 zygote —— 那是保开机的权宜，不是修好网络。
-12. `memtrack` 的 legacy HAL 模块 `hardware/libhardware/modules/memtrack` **这棵树里不存在**，
-    所以 `android.hardware.memtrack@1.0-service` 永远 `exit 1`。服务已用 rc 覆盖停掉；
-    干净的收尾是补一个 stub 模块，或者把 device manifest 里的 memtrack 声明删掉（免得 VINTF 说"声明了却没人注册"）。
+12. `memtrack` 的 legacy HAL 模块 `hardware/libhardware/modules/memtrack` **这棵树里不存在**。
+    11-14 的 boot `b8c70ff4` 证明"把这服务关掉"是错的：`ActivityManagerService.<init>`
+    → `ProcessStats` → `Debug.getMemoryInfo` → `memtrack_proc_get` **会一直阻塞**在
+    `android.hardware.memtrack@1.0::IMemtrack/default` 上，60 s 后 Watchdog 打死整个
+    system_server（`*** WATCHDOG KILLING SYSTEM PROCESS: Blocked in handler on main thread`），
+    每一轮都这样。
+    **已修（sd64）**：`patches/memtrack-stub/` 提供一个**空**的 legacy HAL
+    （`init` 返回 0、`getMemory = NULL`，HIDL passthrough 对 NULL 的回答就是"成功 + 空记录"），
+    以 `name: "memtrack.rg34xxsp"` + `stem: "memtrack.default"` 编译（`memtrack.default`
+    这个名字被 `hardware/qcom-caf/sm8350` 占了），由 `tools/build-memtrack-stub.sh` 产出、
+    随 initrd 的 `vendor-overlay/lib64/hw/memtrack.default.so` 发布，
+    `patch-service-rc.py` 里服务 rc 也改回真实定义。自证见 `DEBUG/live-preload.txt` 的两行。
 13. **★ zygote 被 RenderScript 预加载打死**（11-13 从 `04213c6b` 的 logcat 拿到的新根因）：
     `Error preloading android.renderscript.Element$1` → `java.lang.ExceptionInInitializerError`
     → `Caused by: UnsatisfiedLinkError: dlopen failed: library "librs_jni.so" not found`；
