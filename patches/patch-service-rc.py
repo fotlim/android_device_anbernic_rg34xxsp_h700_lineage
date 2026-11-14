@@ -116,13 +116,30 @@ const char kSystemServerClasspathRc[] =
     "# forked child, not an abort.\n"
     "#\n"
     "# The jars are media_system.mk's list minus ethernet-service.jar, which this\n"
-    "# image does not build. Every \"on early-init\" section runs in parse order, well\n"
-    "# before zygote, so a vendor rc is enough to bring the value back.\n"
+    "# image does not build, followed by PRODUCT_UPDATABLE_SYSTEM_SERVER_JARS:\n"
+    "# the two jars inside the permission and ipsec APEXes. Leaving those out cost\n"
+    "# boot 725bd093 a different crash in the same place:\n"
+    "#\n"
+    "#   *** FATAL EXCEPTION IN SYSTEM PROCESS: main\n"
+    "#   java.lang.NoClassDefFoundError: Failed resolution of:\n"
+    "#       Lcom/android/permission/persistence/RuntimePermissionsPersistence;\n"
+    "#     at com.android.server.pm.Settings$RuntimePermissionPersistence.<init>\n"
+    "#     at com.android.server.pm.PackageManagerService.<init>\n"
+    "#   Caused by: ClassNotFoundException:\n"
+    "#       com.android.permission.persistence.RuntimePermissionsPersistence\n"
+    "#\n"
+    "# Both paths were read out of the built apex payloads with debugfs, not\n"
+    "# guessed: /apex/com.android.permission/javalib/service-permission.jar (13,778 B)\n"
+    "# and /apex/com.android.ipsec/javalib/android.net.ipsec.ike.jar (455,181 B).\n"
+    "# Every \"on early-init\" section runs in parse order, well before zygote, so a\n"
+    "# vendor rc is enough to bring the value back.\n"
     "on early-init\n"
     "    export SYSTEMSERVERCLASSPATH "
     "/system/framework/org.lineageos.platform.jar:"
     "/system/framework/com.android.location.provider.jar:"
-    "/system/framework/services.jar\n";
+    "/system/framework/services.jar:"
+    "/apex/com.android.permission/javalib/service-permission.jar:"
+    "/apex/com.android.ipsec/javalib/android.net.ipsec.ike.jar\n";
 
 // sd59: /system/etc/preloaded-classes ships 19 android.renderscript lines, but
 // this image has no librs_jni.so *at all* (checked in

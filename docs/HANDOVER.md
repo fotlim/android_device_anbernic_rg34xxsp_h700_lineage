@@ -800,6 +800,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
     （`org.lineageos.platform` / `com.android.location.provider` / `services`；
     `ethernet-service.jar` 这镜像没编，写进去会让 `createPathClassLoader` 抛）。
     自证：`DEBUG/live-preload.txt` 第 4 行 `systemserver-classpath rc files: 1`。
+    11-14 更进一步：**两个 updatable apex jar 也必须写进去**，否则 PM 死得更晚——
+    `PRODUCT_UPDATABLE_SYSTEM_SERVER_JARS`（`media_system.mk`）列着
+    `com.android.permission:service-permission` 与 `com.android.ipsec:android.net.ipsec.ike`，
+    少了它们，`PackageManagerService` 一构造就
+    `NoClassDefFoundError: com.android.permission.persistence.RuntimePermissionsPersistence`
+    （boot `725bd093`）。两条真实路径是**从 apex payload 里用 `debugfs` 读出来的**，不是猜的：
+    `/apex/com.android.permission/javalib/service-permission.jar`（13,778 B）、
+    `/apex/com.android.ipsec/javalib/android.net.ipsec.ike.jar`（455,181 B）。
+    顺带记住：WSL 里 loop mount apex payload 会失败，`debugfs -R 'ls -l /javalib' <payload.img>` 才行。
     **正统修法**：`device.mk` 继承 `$(SRC_TARGET_DIR)/product/media_system.mk`
     （或直接赋 `PRODUCT_SYSTEM_SERVER_JARS`），然后重出 ramdisk/Image ——
     顺带 `BOOTCLASSPATH` 也缺 `org.lineageos.platform.jar`，同一个根因。
