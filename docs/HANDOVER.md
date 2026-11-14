@@ -833,6 +833,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
     自证：`live-preload.txt` 的 `prop.default memfd: 1` 与 `live-props.txt` 的
     `[sys.use_memfd]: [true]`。**教训**：属性"设不进去"时先在全镜像里
     `grep -rn '<属性名>' out/target/product/rg34xxsp/`，找"谁把它设回去了"。
+18. **★ ART 拒绝跨 dex 内联（services.odex 是过期 AOT）**（11-14 由 `222998ec` 抓到，sd69 绕过）：
+    system_server 装 settings provider 后 abort：
+    `Inlined method resolution crossed dex file boundary: from
+    ActivityTaskManagerService.installSystemProviders() in services.jar!classes2.dex
+    to LineageActivityManager.<init>(Context) in org.lineageos.platform.jar`。
+    ART 的规则在 `runtime/entrypoints/entrypoint_utils-inl.h:102`：
+    **被内联方法的 dex ≠ 调用方 dex 且 targetSdk ≥ P → FATAL**（否则 WARNING）。
+    两个事实促成它：`LineageActivityManager` 在 `platform.jar` 和 `services.jar` **各有一份**
+    （重复类）；且 `services.odex` 的编译期 classpath 与运行时 classpath 不一致
+    （还是 `PRODUCT_SYSTEM_SERVER_JARS` 没设对的老根因）。
+    权宜（sd69）：一阶 overlay `/system/framework/oat/arm64`，把 `services.odex`/`.vdex`
+    覆盖成明显无效的文本 → ART 校验失败、回落纯 dex、**运行时 JIT**（真实 classloader，
+    编译器不做跨 dex 内联）→ 不再 abort；代价是 system_server 首次运行更慢。
+    自证：`live-preload.txt` 的 `services odex shadowed: 1`。
+    **长期正解**：整编时继承 `media_system.mk`，让预编译与运行时 classpath 一致，
+    并查清 `LineageActivityManager` 的重复类来源。
     长期正解仍是内核里补 ashmem 或改 `BOARD` 侧的 memfd 策略，但这条已够用。
 
 ---

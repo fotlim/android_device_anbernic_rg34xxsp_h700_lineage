@@ -239,6 +239,45 @@ void PublishPropDefault() {
     pubnote("prop: appended sys.use_memfd=true to %s (%zu bytes)", kPath, text.size());
 }
 
+// sd69: boot 222998ec got past the CursorWindow/memfd layer (69 binder services,
+// settings provider installed) and then died in ART:
+//
+//   Abort message: 'Inlined method resolution crossed dex file boundary: from
+//     com.android.server.wm.ActivityTaskManagerService.installSystemProviders()
+//     in /system/framework/services.jar!classes2.dex to
+//     org.lineageos.internal.applications.LineageActivityManager.<init>(Context)
+//     in /system/framework/org.lineageos.platform.jar ...'
+//
+// services.jar is preopted against a classpath that could see platform.jar, but
+// at runtime the class resolves to another copy in another dex file, and ART
+// treats that as fatal for targetSdk >= P (entrypoint_utils-inl.h:102). The
+// build never got PRODUCT_SYSTEM_SERVER_JARS right, so the preopt was made
+// against a classpath this boot cannot reproduce; the honest fix is to rebuild
+// the image with media_system.mk inherited. Until then, make ART ignore the
+// stale AOT output for services.jar: a shadowed, invalid services.odex/vdex
+// makes it fall back to dex (verified at runtime, JIT-compiled on device, which
+// uses the real class loader chain and therefore cannot cross a dex boundary).
+void PublishStaleServicesOdex() {
+    static const char kOdex[] = "/system/framework/oat/arm64/services.odex";
+    static const char kVdex[] = "/system/framework/oat/arm64/services.vdex";
+    mkdir("/dev/oat_upper", 0755);
+    mkdir("/dev/oat_work", 0755);
+    if (!OverlayDir("/system/framework/oat/arm64", "/dev/oat_upper", "/dev/oat_work")) {
+        pubnote("oat: overlay of /system/framework/oat/arm64 failed, preopt stays in place");
+        return;
+    }
+    chmod("/system/framework/oat/arm64", 0755);
+    static const char kBogus[] =
+        "stale preopt: services.odex was compiled against a classpath this boot\n"
+        "cannot reproduce (see patch-service-rc.py, sd69). LEFT DELIBERATELY\n"
+        "INVALID so art falls back to the dex and JITs it with the real loader.\n";
+    PublishTextFile(kOdex, kBogus, 0644);
+    PublishTextFile(kVdex, kBogus, 0644);
+    chmod(kOdex, 0644);
+    chmod(kVdex, 0644);
+    pubnote("oat: services.odex/vdex shadowed with an invalid file (ART will JIT)");
+}
+
 void PublishServiceRcOverrides() {
     mkdir("/dev/sys_etc_upper", 0755);
     mkdir("/dev/sys_etc_work", 0755);
@@ -256,6 +295,7 @@ void PublishServiceRcOverrides() {
                     kMemtrackRc, 0644);
     PublishTextFile("/vendor/etc/init/92-systemserver-classpath.rc",
                     kSystemServerClasspathRc, 0644);
+    PublishStaleServicesOdex();
 }
 
 '''
