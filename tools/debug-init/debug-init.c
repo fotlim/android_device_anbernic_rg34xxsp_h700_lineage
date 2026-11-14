@@ -2659,19 +2659,6 @@ handover:
 		}
 	}
 
-	release_console();
-	hb("stage 9b: unmounting our /dev, /proc, /sys and /mnt");
-	/*
-	 * We got all the way here, so no fault loop is in progress: clear the
-	 * counter the fault handler uses to stop rebooting forever.
-	 */
-	unlink("/mnt/FAULTCOUNT");
-	umount2("/dev", MNT_DETACH);
-	umount2("/proc", MNT_DETACH);
-	umount2("/sys", MNT_DETACH);
-	umount2("/mnt", MNT_DETACH);
-	sync();
-
 	/*
 	 * Leave nothing of ours open across the handover.
 	 *
@@ -2687,15 +2674,19 @@ handover:
 	 * finally let preload finish, and the boot then died in the fork rather
 	 * than in the preload. The follower child keeps its own copies, so the
 	 * descriptors here only hurt.
+	 *
+	 * Done here rather than at the very end because the count has to be
+	 * written while /mnt is still mounted; a second silent sweep runs just
+	 * before the exec.
 	 */
 	for (int fd = 3; fd < 1024; fd++)
 		close(fd);
 
 	/*
 	 * Leave a number behind, because this fix is invisible otherwise: the
-	 * next boot's ran-<id>.txt should say "handing over with no descriptors
-	 * beyond stdio". Anything above 3 means something still crossed the
-	 * handover and system_server will abort in ForkSystemServer again.
+	 * next boot's ran-<id>.txt should say 3 (stdio only). Anything above
+	 * that means something still crosses the handover and system_server
+	 * will abort in ForkSystemServer again.
 	 */
 	{
 		char line[128];
@@ -2709,6 +2700,23 @@ handover:
 			 kept);
 		hb(line);
 	}
+
+	release_console();
+	hb("stage 9b: unmounting our /dev, /proc, /sys and /mnt");
+	/*
+	 * We got all the way here, so no fault loop is in progress: clear the
+	 * counter the fault handler uses to stop rebooting forever.
+	 */
+	unlink("/mnt/FAULTCOUNT");
+	umount2("/dev", MNT_DETACH);
+	umount2("/proc", MNT_DETACH);
+	umount2("/sys", MNT_DETACH);
+	umount2("/mnt", MNT_DETACH);
+	sync();
+
+	/* Last chance: whatever release_console() or the unmounts opened. */
+	for (int fd = 3; fd < 1024; fd++)
+		close(fd);
 
 	execl("/init.android", "/init", NULL);
 
