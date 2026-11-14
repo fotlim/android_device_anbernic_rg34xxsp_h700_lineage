@@ -656,6 +656,9 @@ bash tools/verify-patch-chain.sh        # 从 git 的 337 行重放，逐字节�
 
 ### 7.4 读卡上日志
 - 卡挂成 `G:`（盘符会漂）。读不出来先 `cmd /c "chkdsk G: /F"`。
+- **重新插卡后 `Get-Content` 报 `The file or directory is corrupted and unreadable` 时，
+  同样先 `chkdsk G: /F`**：它常常报告 "Windows has scanned the file system and found no
+  problems"，然后文件就能读了 —— 这是 Windows 卷缓存没刷新，不是 FAT 结构坏了。
 - 日志里有转义序列，**必须 `grep -a`**。
 - 每次启动的文件名带 boot_id：`ran-<id>.txt`、`kmsg-<id>.txt`、`dmesg-<id>.txt`；`pmap.txt` 说明 `p01…p12.txt` 分别来自哪个源文件。
 - `live-*` 是本轮（快照在 45 s 写第一批、120 s 写第二批）：
@@ -844,11 +847,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
     （重复类）；且 `services.odex` 的编译期 classpath 与运行时 classpath 不一致
     （还是 `PRODUCT_SYSTEM_SERVER_JARS` 没设对的老根因）。
     权宜（sd69）：一阶 overlay `/system/framework/oat/arm64`，把 `services.odex`/`.vdex`
-    覆盖成明显无效的文本 → ART 校验失败、回落纯 dex、**运行时 JIT**（真实 classloader，
-    编译器不做跨 dex 内联）→ 不再 abort；代价是 system_server 首次运行更慢。
-    自证：`live-preload.txt` 的 `services odex shadowed: 1`。
-    **长期正解**：整编时继承 `media_system.mk`，让预编译与运行时 classpath 一致，
-    并查清 `LineageActivityManager` 的重复类来源。
+    覆盖成明显无效的文本 → ART 校验失败、回落纯 dex、**运行时 JIT** → 不再 abort；
+    代价是 system_server 首次运行更慢。自证：`live-preload.txt` 的
+    `services odex shadowed: 1`。**长期正解**：整编时继承 `media_system.mk`，
+    让预编译与运行时 classpath 一致，并查清 `LineageActivityManager` 的重复类来源。
+19. **★ 内核净滤器（sd70，已上卡）**（11-14）：`StartNetworkManagementService` 会
+    `waitForService("netd")` 阻塞，而 netd 因缺 netfilter 每 5 s 退出一次 —— 用户空间无解，
+    必须重编内核。做法：`cp /root/artifacts/config.sd35 .config` → 追加
+    `kernel/fragment.config` → **把所有 netfilter/ip/ip6/xfrm 的 `=m` 改成 `=y`**
+    （本机没有 `/lib/modules`）→ `scripts/config --set-str INITRAMFS_SOURCE
+    "/root/initramfs-embed"` → `olddefconfig` → 断言 18 个符号 →
+    `make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j4 Image`。
+    `Image.sd70 = 35,629,064 B，sha256 a22b2183…`，已写入 `G:\Image`。
+    **坑**：`/root/initramfs-embed` 是会被**整目录打进内核**的目录，
+    里面攒的 15 个 `init.android.bak-sd5x`（约 29 MB）让第一个 Image 变成 64 MB；
+    现在备份统一放 `/root/artifacts/init-backups/`。
     长期正解仍是内核里补 ashmem 或改 `BOARD` 侧的 memfd 策略，但这条已够用。
 
 ---
