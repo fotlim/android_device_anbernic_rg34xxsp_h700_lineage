@@ -862,6 +862,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
     **坑**：`/root/initramfs-embed` 是会被**整目录打进内核**的目录，
     里面攒的 15 个 `init.android.bak-sd5x`（约 29 MB）让第一个 Image 变成 64 MB；
     现在备份统一放 `/root/artifacts/init-backups/`。
+    第一次上机（`888112aa`）结果：**netd 活了**（`[init.svc.netd]: [running]`，
+    `iptables-restore` 报错 0 条），system_server 推进到 `StartLightsService`；
+    但 `vendor.hwcomposer-2-2` 每轮退出 1（154 次），它的 rc 里
+    `onrestart restart surfaceflinger` 把 SF 一起带死，SF 重启又要 composer →
+    死循环。新旧内核的图形配置（CMA 32M、DRM_SUN4I/PANFROST/FB）**完全一致**，
+    所以怀疑 sd68 的 `sys.use_memfd=true` 与 gralloc/minigbm，或 DRM master 竞态；
+    sd71 已把该 HAL 的原始输出（`live-hwc-run.txt`）与 composer/drm 全量日志
+    （`live-hwc.txt`）加入快照，下一卡定位。
     长期正解仍是内核里补 ashmem 或改 `BOARD` 侧的 memfd 策略，但这条已够用。
 
 ---
