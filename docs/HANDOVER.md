@@ -885,6 +885,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot-verdict.ps1 -Boot
     buffer**（`live-hwc-log.txt`），并做一次 `sys.use_memfd=false` 的 A/B
     （`live-hwc-log-nomemfd.txt`），用来判定是不是 sd68 的 memfd 惹的祸。
     判读：`live-hwc.txt` 里的 `/dev/graphics` 有没有 `fb0`；两份日志是否逐行相同。
+    11-14 已排除"模块名对不上"：`hwcomposer.drm_minigbm.so` **导出 HMI**、
+    `ro.hardware.hwcomposer=drm_minigbm` 在 `/vendor/build.prop:52`、
+    `hardware.c:220` 正是先读 `ro.hardware.<class>`；设备节点与服务依赖库全齐。
+    它在 ~10 ms 内退出 1 且**零日志**（init 把服务 stdout/stderr 指到 /dev/null）。
+    sd74 起快照做两件事：记录环境（`/dev/dri`、`/dev/graphics`、`/vendor/lib64/hw`、
+    `ro.hardware*`、`/system/lib64/vndk*`），并**前台 `timeout 3` 跑一次该 HAL**、
+    把输出与 `exit=$?` 一起写进 `live-hwc-run.txt`：`exit=124` = 手动能活（问题在 init 环境），
+    `exit=1` = 它自己失败且 stderr 里会有原因。
     长期正解仍是内核里补 ashmem 或改 `BOARD` 侧的 memfd 策略，但这条已够用。
 
 ---

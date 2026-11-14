@@ -89,25 +89,17 @@ ps -A 2>/dev/null | grep -E 'zygote|system_server|surfaceflinger|bootanim|netd|i
 # 已注册的 binder 服务：system_server 卡在哪个 startService，这张表比日志直接
 service list 2>/dev/null > $CARD/DEBUG/live-services.txt 2>>$LOG
 # sd70 起 vendor.hwcomposer-2-2 每轮退出 status 1，而且它自己的 log 完全没进
-# logcat 尾巴。sd72：把 logcat 清空、亲手跑一次这个 HAL，再立刻取 buffer ——
-# 这样 live-hwc-log.txt 里只剩它自己说的话，不会被 auditd 刷掉。
-logcat -c 2>/dev/null
-{ echo "===== ls -l /dev/dri ====="; ls -l /dev/dri 2>&1; echo "===== ls -l /dev/graphics ====="; ls -l /dev/graphics 2>&1; echo "===== /vendor/lib64/hw ====="; ls /vendor/lib64/hw 2>&1; } > $CARD/DEBUG/live-hwc.txt 2>>$LOG
-/vendor/bin/hw/android.hardware.graphics.composer@2.2-service > $CARD/DEBUG/live-hwc-run.txt 2>&1 &
-HWPID=$!
-sleep 2
-kill $HWPID 2>/dev/null
-logcat -d -b main -b system -b crash -v threadtime 2>/dev/null | tail -c 262144 > $CARD/DEBUG/live-hwc-log.txt 2>>$LOG
-# A/B：同一份 HAL 再用 sys.use_memfd=false 跑一次。libcutils 的属性是每进程采样的，
-# 所以这一次会走 ashmem 分支 —— 两次日志的差别就是 memfd 到底有没有关系的答案。
-setprop sys.use_memfd false
-logcat -c 2>/dev/null
-/vendor/bin/hw/android.hardware.graphics.composer@2.2-service > $CARD/DEBUG/live-hwc-run-nomemfd.txt 2>&1 &
-HWPID=$!
-sleep 2
-kill $HWPID 2>/dev/null
-logcat -d -b main -b system -b crash -v threadtime 2>/dev/null | tail -c 262144 > $CARD/DEBUG/live-hwc-log-nomemfd.txt 2>>$LOG
-setprop sys.use_memfd true
+# logcat。sd74：先记环境（设备节点、库、ro.hardware*、vndk 目录），再**前台**
+# 跑一次这个 HAL（timeout 3 s），把 stdout/stderr 与退出码一起落盘：
+#   exit=124 → 它在 joinRpcThreadpool 里活着（手动能跑通，问题在 init 的环境）
+#   exit=1   → 它自己也失败，stderr 里通常有 linker 或模块的错
+{ echo "===== ls -l /dev/dri ====="; ls -l /dev/dri 2>&1
+  echo "===== ls -l /dev/graphics ====="; ls -l /dev/graphics 2>&1
+  echo "===== /vendor/lib64/hw ====="; ls /vendor/lib64/hw 2>&1
+  echo "===== props ====="; getprop ro.hardware; getprop ro.hardware.hwcomposer; getprop ro.hardware.gralloc
+  echo "===== vndk ====="; ls -d /system/lib64/vndk* 2>&1; } > $CARD/DEBUG/live-hwc.txt 2>>$LOG
+timeout 3 /vendor/bin/hw/android.hardware.graphics.composer@2.2-service > $CARD/DEBUG/live-hwc-run.txt 2>&1
+echo "exit=$?" >> $CARD/DEBUG/live-hwc-run.txt
 sync
 echo "snapshot: wrote $(ls $CARD/DEBUG/live-* 2>/dev/null | wc -l) files" >> $LOG
 umount $CARD 2>>$LOG
