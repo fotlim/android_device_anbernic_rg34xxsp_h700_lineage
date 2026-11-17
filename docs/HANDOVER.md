@@ -8,6 +8,44 @@
 
 ## 0. 一句话现状
 
+
+> # ★ 2026-11-17 18:1x（sd86）：bootanim 死锁**已解开**；现在卡在“用户没解锁”
+>
+> boot `450b1a1c`：`init.svc.bootanim = stopped`（上一卡是 running）、system_server 长驻、
+> 163 个 binder 服务。`live-bootanim-run.txt` = `exit=0`，说明 `debug.sf.nobootanimation`
+> 生效，`WindowManagerService.checkBootAnimationCompleteLocked()` 不再被 running 卡住。
+>
+> 新的门闸在**用户状态**，不是包/launcher：
+> * `resolve HOME` → `No activity found`；`Stack #1 type=home ... sz=0`；`mCurrentFocus=null`；
+> * logcat：`E WindowManager: No home screen found ...` 与
+>   `W ActivityThread: ... (user not unlocked)`；
+> * **launcher 本身没问题**：`system_ext/priv-app/TrebuchetQuickStep`（7.87 MB），
+>   `aapt2 badging` 的包名是 `com.android.launcher3`，`QuickstepLauncher` `enabled=true`
+>   且带 `MAIN + {HOME, DEFAULT, MONKEY, LAUNCHER_APP}`。
+>   （`packages/apps/Launcher3` 不存在是正常的：Lineage 用 `packages/apps/Trebuchet`。）
+> * 门闸：`RootWindowContainer.resolveHomeActivity()` 只是 `resolveIntent(..., userId)`；
+>   “是否解锁”只看 `StorageManagerService.isUserKeyUnlocked()`（:3355）里的
+>   `mLocalUnlockedUsers`，而它只在 `unlockUserKey()` 成功时被 append（:3334）。
+>   `init.rc:761` 的 `init_user0` 是无条件执行的，但本卡 kmsg 里没有任何
+>   `cryptfs`/`init_user0` 输出，`sys.user.0.ce_available` 也不存在
+>   ⇒ CE 解锁在 vold 侧就没走通。设备是 `ro.crypto.state=unsupported`
+>   （fstab 的 `/data` 没有任何加密标志）。
+>
+> **sd86 已上卡（只加取证，不改行为）**：`live-user-state.txt`（`am unlock-user 0` 的
+> stderr、`dumpsys user`、`ce_available` 属性、`/data/user` 与 `/data_mirror/data_ce`、
+> `cmd package resolve-activity --user 0`）+ `live-vold-log.txt`
+> （`logcat -b all` 抓 vold / StorageManagerService / UserController）。
+> `G:\initrd.img` 1,482,462 B sha256 `8202274f…`；`init.android` 2,164,064 B `a3e409f7…`；
+> `G:\Image` 保持 sd83 `fa57280f…`。补丁链 1788 行字节可复现。
+>
+> **下一卡按 `am unlock-user 0` 的输出分流**：`Success` ⇒ 补一条 rc 主动解锁；
+> keymaster/gatekeeper 相关 ⇒ 查 software keymaster；`not encrypted`/`fbe not available`
+> ⇒ 让 `/data` 真走 FBE，或显式让框架把该用户当已解锁。
+>
+> 另注：kmsg 有 `init: Top-level directory needs encryption action, eg mkdir
+> /data/vendor ...` —— 有 `mkdir /data/<top>` 少写 `encryption=`，init 会**拒绝创建**
+> 该目录，与 FBE 属同一根因家族。
+
 > # ★ 2026-11-17 13:1x（sd85）：**死锁点是 `bootanim`，不是显示**
 >
 > boot `9300494a` 实测：DRM `card1-DSI-1 = connected / enabled / dpms On`、720x480；
