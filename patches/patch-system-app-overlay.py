@@ -23,6 +23,22 @@ mknods it under /dev, then mounts it read-only.  The GPT layout is known from
 dmesg-da17cd8a (`mmcblk0: p1 p2 p3 p4 p5`, p1 = 64 MiB, PARTNAME=boot, vfat) and
 `vfat` is in /proc/filesystems, so no module loading is needed.
 
+boot b5c8841d then proved the mknod half right and the mount half still wrong:
+
+    sysapp: candidate /dev/block/mmcblk0p1 access=-1
+    sysapp: node /dev/dsh_mmcblk0p1 = 179:1 (mmcblk0p1), ok
+    sysapp: mount /dev/dsh_mmcblk0p1 -> /mnt/dshboot rc=-1 errno=16 (Device or resource busy)
+    sysapp: candidate /dev/block/mmcblk1p1 access=-1
+    sysapp: mmcblk1p1: no /sys/class/block/mmcblk1p1/dev (2)
+    sysapp: no mountable boot partition (tried mmcblk0p1, mmcblk1p1)
+
+EBUSY because the kmsg follower child in tools/debug-init/debug-init.c has its
+own mount namespace, so the FAT superblock and its exclusive claim on
+mmcblk0p1 outlive the MNT_DETACH the handover does.  sd89 stops depending on
+this mount: debug-init copies both APKs into /dshsysapp/ in the RAM rootfs
+while /mnt is still its own, and this code reads them from there.  The mount
+path below is kept only as a fallback for a build without that staging.
+
 Both apps are carried on the card now, because they both have to be there:
 
   * SystemUI      -> /system_ext/priv-app/SystemUI/SystemUI.apk  (handheld_system_ext.mk)
@@ -170,14 +186,29 @@ void PublishSystemApp(int /*dfd*/) {
     chmod("/dev/sysext_work", 0755);
 
     char boot[64];
-    if (!MountCardBoot(boot, sizeof(boot))) return;
 
-    // FusedLocation first: it is 17 KiB and it is the phase-600 crash loop.
-    CopyAppFromCard(boot, "/FusedLocation.apk", "/system/priv-app/FusedLocation",
-                    "/system/priv-app/FusedLocation/FusedLocation.apk");
-    // Then SystemUI, which is what lets the screen ever be enabled.
-    CopyAppFromCard(boot, "/SystemUI.apk", "/system_ext/priv-app/SystemUI",
-                    "/system_ext/priv-app/SystemUI/SystemUI.apk");
+    // sd89: /dshsysapp first.  debug-init stages the APKs there while the card
+    // is still its own mount; mounting the card from here comes back EBUSY
+    // (boot b5c8841d: `mount ... rc=-1 errno=16`) because the kmsg follower
+    // keeps a second mount namespace holding the FAT superblock.
+    bool have_fused = CopyAppFromCard("/dshsysapp", "/FusedLocation.apk",
+                                      "/system/priv-app/FusedLocation",
+                                      "/system/priv-app/FusedLocation/FusedLocation.apk");
+    bool have_sysui = CopyAppFromCard("/dshsysapp", "/SystemUI.apk",
+                                      "/system_ext/priv-app/SystemUI",
+                                      "/system_ext/priv-app/SystemUI/SystemUI.apk");
+    if (have_fused && have_sysui) return;
+
+    // Fallback for a build without debug-init staging (or a missing APK there).
+    if (!MountCardBoot(boot, sizeof(boot))) return;
+    if (!have_fused) {
+        CopyAppFromCard(boot, "/FusedLocation.apk", "/system/priv-app/FusedLocation",
+                        "/system/priv-app/FusedLocation/FusedLocation.apk");
+    }
+    if (!have_sysui) {
+        CopyAppFromCard(boot, "/SystemUI.apk", "/system_ext/priv-app/SystemUI",
+                        "/system_ext/priv-app/SystemUI/SystemUI.apk");
+    }
     umount(boot);
 }
 
@@ -204,18 +235,18 @@ def strip_previous(text):
         start = text.index(START)
         end_marker = "// sd88-end"
         stop = text.index(end_marker, start) + len(end_marker)
-        return text[:start] + text[stop:].lstrip("\n"), START
+        return text[:start] + text[stop:].lstrip("\n"), start, START
     if OLD_START in text:
         start = text.index(OLD_START)
         stop = text.index(FUNC_ANCHOR)
-        return text[:start] + text[stop:], OLD_START
-    return text, None
+        return text[:start] + text[stop:], start, OLD_START
+    return text, None, None
 
 
 with open(PATH, encoding="utf-8") as f:
     text = f.read()
 
-text, removed = strip_previous(text)
+text, hint, removed = strip_previous(text)
 if removed:
     print("removed the previous block (%s)" % removed.split(':')[0])
 
@@ -226,7 +257,21 @@ if CALL_ANCHOR not in text:
 if "    PublishSystemApp(dfd);\n" not in text:
     text = text.replace(CALL_ANCHOR, CALL_ANCHOR + "    PublishSystemApp(dfd);\n", 1)
 
-text = text.replace(FUNC_ANCHOR, CODE + FUNC_ANCHOR, 1)
+# Put the block back where it was, not at the anchor.
+#
+# Every patch inserts itself immediately before PublishRamdiskFstab, so a chain
+# replay puts this block first and the live-snapshot block (applied later, same
+# anchor) directly behind it: [sysapp][snapshot][anchor].  A plain re-insert at
+# the anchor lands it *after* snapshot instead -- [snapshot][sysapp][anchor] --
+# and since the live-snapshot patch is insert-once, it never moves back. That
+# made tools/verify-patch-chain.sh report a difference after every incremental
+# build even though the compiled binary was byte-identical. Re-inserting at the
+# stripped position keeps both orders the same.
+BLOCK = CODE + "\n"
+if hint is not None:
+    text = text[:hint] + BLOCK + text[hint:]
+else:
+    text = text.replace(FUNC_ANCHOR, BLOCK + FUNC_ANCHOR, 1)
 
 # makedev() lives in <sys/sysmacros.h>; add it next to the other includes.
 if "#include <sys/sysmacros.h>" not in text:

@@ -2287,6 +2287,74 @@ static void ramoops_marker(FILE *m)
 	fprintf(m, "ramo: %d ramoops region(s) in iomem\n", seen);
 }
 
+/*
+ * Stage the two privileged apps off the card into the RAM rootfs.
+ *
+ * Why this cannot be left to the first stage (sd88 tried exactly that and boot
+ * b5c8841d came back with):
+ *
+ *   sysapp: node /dev/dsh_mmcblk0p1 = 179:1 (mmcblk0p1), ok
+ *   sysapp: mount /dev/dsh_mmcblk0p1 -> /mnt/dshboot rc=-1 errno=16 (Device
+ *   or resource busy)
+ *
+ * EBUSY, not ENOENT: the mknod fix worked, the block device is simply still
+ * claimed. The kmsg follower started further down this function gets its own
+ * mount namespace (see the pthread split just above), so the FAT superblock --
+ * and with it the exclusive claim on mmcblk0p1 -- survives the MNT_DETACH we do
+ * at handover, and a second mount in PID 1's namespace is refused while the
+ * follower lives.
+ *
+ * Copying the APKs here, while /mnt is still ours, sidesteps the whole thing:
+ * the rootfs we write to is the same tmpfs the first stage runs in, so
+ * /dshsysapp/SystemUI.apk is readable there with no mount at all.
+ */
+static int stage_system_apps(void)
+{
+	static const char *const names[] = { "SystemUI.apk", "FusedLocation.apk" };
+	char buf[65536];
+	int files = 0;
+	size_t i;
+
+	mkdir("/dshsysapp", 0755);
+	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		char src[128], dst[128];
+		FILE *in, *o;
+		size_t total = 0;
+		ssize_t n;
+
+		snprintf(src, sizeof(src), "/mnt/%s", names[i]);
+		snprintf(dst, sizeof(dst), "/dshsysapp/%s", names[i]);
+		in = fopen(src, "rb");
+		if (!in) {
+			say("dshsysapp: %s not on the card (errno=%d)\n", src,
+			    errno);
+			continue;
+		}
+		o = fopen(dst, "wb");
+		if (!o) {
+			say("dshsysapp: cannot create %s: %d (%s)\n", dst, errno,
+			    strerror(errno));
+			fclose(in);
+			continue;
+		}
+		while ((n = (ssize_t)fread(buf, 1, sizeof(buf), in)) > 0) {
+			if (fwrite(buf, 1, (size_t)n, o) != (size_t)n) {
+				say("dshsysapp: short write at %zu bytes\n",
+				    total);
+				break;
+			}
+			total += (size_t)n;
+		}
+		fclose(in);
+		fclose(o);
+		chmod(dst, 0644);
+		say("dshsysapp: staged %s -> %s (%zu bytes)\n", src, dst, total);
+		files++;
+	}
+	say("dshsysapp: %d app(s) staged for the first stage\n", files);
+	return files;
+}
+
 int main(void)
 {
 	const char *bootdev = NULL;
@@ -2421,6 +2489,12 @@ int main(void)
 			 * would be written to the card but stay invisible.
 			 */
 			durable = 1;
+			/*
+			 * Before the watchdog is armed below: 12 MiB of FAT reads
+			 * have to fit inside the 16 s window, and they also have
+			 * to happen while /mnt is still reachable from here.
+			 */
+			stage_system_apps();
 			/*
 			 * Keep a kernel-message follower alive from here on, so
 			 * a freeze during the paint test or the child probe
