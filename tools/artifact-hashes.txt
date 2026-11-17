@@ -1,5 +1,5 @@
 1ba6dcad318c0c9afcb79486e601656dcda10bb755782a056152420256330384  /root/initramfs-embed/init
-38ee3ec0f7d23067cf856339e5e7e67545eb56500c1edf255d9a7570f1be41cc  /root/initramfs-embed/init.android
+a3e409f7616ada8a3d9c00c1d90276748135b9984c938654962c4b0067cb7376  /root/initramfs-embed/init.android
 70c2455fe55cf85d76b01e87ff54d48552f1264b8000569599e75bff5658d3e9  /root/initramfs-embed/vendor-overlay/lib64/hw/gralloc.minigbm.so
 49e62ad38da1092754d0bd30c1682887e5f4dee1d1fd81cd13a6ee5bc69da924  /root/initramfs-embed/vendor-overlay/lib64/hw/android.hardware.graphics.mapper@4.0-impl.minigbm.so
 8d158fb7031a30343e14d2771020dac61a018ec0bb90e4f3f174f6ca9574f78f  /root/initramfs-embed/vendor-overlay/lib64/hw/android.hardware.health@2.0-impl-2.1.so
@@ -9,7 +9,7 @@ f878e646a9f32ef5a4b60088c9343fb8d60c465ebafe1af05c43e2b37876c0e1  /root/initramf
 104c514afa60e2d01b1301dfe957b00c22272c693d1d9e17176978c68d1fd082  /root/initramfs-embed/vendor-overlay/bin/hw/dsh-wifi-stub
 064985204ddead814092844c3fb3dc5d60d4d835f451d8a225d465c63d3c6354  /root/initramfs-embed/vendor-overlay/lib64/hw/memtrack.default.so
 6401adc5381e38bcf268620fd4ce816b1ae3dbdf3d603fc10a0787d9dee8f758  /root/initramfs-embed/vendor-overlay/lib64/hw/android.hardware.memtrack@1.0-impl.so
-68fef9e091a549d178dee2ef7000eb5f92c06c890dea27a2792f3947af41d852  /mnt/f/rg34xxsp/initrd.img
+8202274fb2481b70e3ec7c66fdb28e5206fea19cdf0396de96afab60945bfa97  /mnt/f/rg34xxsp/initrd.img
 fa57280fd8eb77e7d51bfc69afc22ae74849f5f513351a27df0abdf0a729a019  /root/artifacts/Image.sd83
 578ce52e1c89e29bbcc4aa8ef6ad2f7bae9428b0d76bd8d571db3e971418ae05  /root/android/lineage/out/target/product/rg34xxsp/system.img
 fd499d16bd2bcf70c1b926faad7c24edc52b7d8d900e11c8742730bf0e1f5fb7  /root/android/lineage/out/target/product/rg34xxsp/super.img

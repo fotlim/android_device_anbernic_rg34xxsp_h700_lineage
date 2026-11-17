@@ -144,6 +144,39 @@ timeout 8 /system/bin/bootanimation > $CARD/DEBUG/live-bootanim-run.txt 2>&1
 echo "exit=$?" >> $CARD/DEBUG/live-bootanim-run.txt
 logcat -d -b main -b system -s BootAnimation -v threadtime 2>/dev/null \
     | tail -c 65536 > $CARD/DEBUG/live-bootanim-log.txt 2>>$LOG
+# sd86: bootanim no longer deadlocks, but the framework still refuses to start
+# Home: RootWindowContainer.resolveHomeActivity() -> resolveIntent(HOME, user 0)
+# returns null, and ActivityThread already complains "(user not unlocked)".
+# The launcher itself is fine (system_ext/priv-app/TrebuchetQuickStep, package
+# com.android.launcher3, QuickstepLauncher enabled=true with MAIN/HOME/DEFAULT),
+# so the gate is the user state: StorageManagerService.isUserKeyUnlocked() only
+# consults mLocalUnlockedUsers, which is appended only when unlockUserKey()
+# succeeds. Ask the system directly instead of inferring from logs, and try the
+# unlock so its stderr names the reason.
+{
+  echo "===== am get-current-user ====="; am get-current-user 2>&1
+  echo "===== cmd user (help) ====="; cmd user 2>&1 | head -25
+  echo "===== dumpsys user ====="; timeout 10 dumpsys user 2>&1 | head -60
+  echo "===== ce_available / user props ====="
+  getprop | grep -E 'ce_available|sys\.user|vold\.' 
+  echo "===== /data/user + data_ce ====="
+  ls -la /data/user 2>&1 | head -10
+  ls -la /data_mirror/data_ce 2>&1 | head -10
+  echo "===== am unlock-user 0 (stderr says why) ====="
+  am unlock-user 0 2>&1
+  echo "rc=$?"
+  echo "===== cmd user start-user 0 ====="
+  cmd user start-user 0 2>&1
+  echo "rc=$?"
+  echo "===== resolve HOME as user 0 ====="
+  cmd package resolve-activity --brief --user 0 \
+      -a android.intent.action.MAIN -c android.intent.category.HOME 2>&1
+} > $CARD/DEBUG/live-user-state.txt 2>>$LOG
+# vold / storage / user plumbing logs, from every buffer (they scrolled out of
+# the trimmed main ring before the snapshot ran).
+logcat -d -b all -s vold -s Vold -s StorageManagerService -s UserController \
+       -s StorageUserManager -s vold_storage -v threadtime 2>/dev/null \
+    | tail -c 131072 > $CARD/DEBUG/live-vold-log.txt 2>>$LOG
 # sd70 起 vendor.hwcomposer-2-2 每轮退出 status 1，而且它自己的 log 完全没进
 # logcat。sd74：先记环境（设备节点、库、ro.hardware*、vndk 目录），再**前台**
 # 跑一次这个 HAL（timeout 3 s），把 stdout/stderr 与退出码一起落盘：
