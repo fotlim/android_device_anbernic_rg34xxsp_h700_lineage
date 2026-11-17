@@ -96,8 +96,26 @@ service list 2>/dev/null > $CARD/DEBUG/live-services.txt 2>>$LOG
 { echo "===== ls -l /dev/dri ====="; ls -l /dev/dri 2>&1
   echo "===== ls -l /dev/graphics ====="; ls -l /dev/graphics 2>&1
   echo "===== /vendor/lib64/hw ====="; ls /vendor/lib64/hw 2>&1
+  echo "===== /vendor/bin/hw ====="; ls /vendor/bin/hw 2>&1
+  echo "===== composer rc files ====="
+  for f in /vendor/etc/init/android.hardware.graphics.composer@2.1-service.rc \
+           /vendor/etc/init/android.hardware.graphics.composer@2.2-service.rc; do
+      echo "--- $f"
+      cat "$f" 2>&1 | head -12
+  done
+  echo "===== composer service states ====="
+  getprop init.svc.vendor.hwcomposer-2-1; getprop init.svc.vendor.hwcomposer-2-2
   echo "===== props ====="; getprop ro.hardware; getprop ro.hardware.hwcomposer; getprop ro.hardware.gralloc
   echo "===== vndk ====="; ls -d /system/lib64/vndk* 2>&1; } > $CARD/DEBUG/live-hwc.txt 2>>$LOG
+# sd75: the probe walks hw_get_module -> methods->open -> getCapabilities ->
+# getFunction and prints each step, because none of the HAL's own ALOG output
+# reaches logcat on this device. Then run both composer versions in the
+# foreground: 124 means it stayed alive in joinRpcThreadpool, 1 means it failed
+# the same way init saw, and its stderr is the only place a linker error shows.
+timeout 5 /vendor/bin/hw/dsh-hwcprobe > $CARD/DEBUG/live-hwc-probe.txt 2>&1
+echo "exit=$?" >> $CARD/DEBUG/live-hwc-probe.txt
+timeout 5 /vendor/bin/hw/android.hardware.graphics.composer@2.1-service > $CARD/DEBUG/live-hwc21-run.txt 2>&1
+echo "exit=$?" >> $CARD/DEBUG/live-hwc21-run.txt
 timeout 3 /vendor/bin/hw/android.hardware.graphics.composer@2.2-service > $CARD/DEBUG/live-hwc-run.txt 2>&1
 echo "exit=$?" >> $CARD/DEBUG/live-hwc-run.txt
 sync

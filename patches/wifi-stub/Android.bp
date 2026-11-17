@@ -1,0 +1,36 @@
+// Note: this module is deliberately NOT `vendor: true`.
+//
+// A vendor module is compiled with -D__ANDROID_VNDK__, and libbinder selects its
+// Parcel interface-token magic at compile time (frameworks/native/libs/binder/
+// Parcel.cpp:531):
+//
+//     constexpr int32_t kHeader = B_PACK_CHARS('V','N','D','R');  // __ANDROID_VNDK__
+//     constexpr int32_t kHeader = B_PACK_CHARS('S','Y','S','T');  // otherwise
+//
+// Boot ee9a6ca4: the stub opened /dev/binder, init'd ProcessState on /dev/binder,
+// and still got
+//     E Parcel: Expecting header 0x53595354 but found 0x564e4452.
+//               Mixing copies of libbinder?
+//     addService(wifi) failed: -129
+// from the framework servicemanager, because a VNDR parcel is not a SYST parcel.
+// Building the system variant makes both the header and the default driver correct,
+// so the service lands on the framework servicemanager where WifiManager looks.
+//
+// The binary is still shipped into /vendor/bin/hw by tools/build-wifi-stub.sh;
+// the install path does not affect the variant, and the process (no SELinux
+// domain transition, see the tmpfs label warning in kmsg) resolves /system/lib64
+// libs anyway.
+cc_binary {
+    name: "dsh-wifi-stub",
+    owner: "anbernic-rg34xxsp",
+    srcs: ["wifi_stub.cpp"],
+    cflags: [
+        "-Wall",
+        "-Wno-unused-parameter",
+    ],
+    shared_libs: [
+        "libbinder",
+        "liblog",
+        "libutils",
+    ],
+}

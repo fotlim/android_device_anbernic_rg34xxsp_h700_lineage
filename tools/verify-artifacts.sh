@@ -21,9 +21,14 @@ LIST=(
 	/root/initramfs-embed/vendor-overlay/lib64/hw/android.hardware.graphics.mapper@4.0-impl.minigbm.so
 	/root/initramfs-embed/vendor-overlay/lib64/hw/android.hardware.health@2.0-impl-2.1.so
 	/root/initramfs-embed/vendor-overlay/bin/hw/android.hardware.graphics.allocator@4.0-service.minigbm
+	/root/initramfs-embed/vendor-overlay/bin/hw/android.hardware.graphics.composer@2.1-service
+	/root/initramfs-embed/vendor-overlay/bin/hw/dsh-hwcprobe
+	/root/initramfs-embed/vendor-overlay/bin/hw/dsh-wifi-stub
 	/root/initramfs-embed/vendor-overlay/lib64/hw/memtrack.default.so
+	/root/initramfs-embed/vendor-overlay/lib64/hw/android.hardware.memtrack@1.0-impl.so
+	/root/initramfs-embed/system-overlay/priv-app/FusedLocation/FusedLocation.apk
+	/mnt/f/rg34xxsp/initrd.img
 	/root/artifacts/Image.sd70
-	/root/artifacts/Image.card-20261113
 	/root/android/lineage/out/target/product/rg34xxsp/system.img
 	/root/android/lineage/out/target/product/rg34xxsp/super.img
 	/root/android/lineage/out/target/product/rg34xxsp/vendor.img

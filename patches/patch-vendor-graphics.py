@@ -176,6 +176,32 @@ EXTRA_ENTRIES = [
     {"vendor-overlay/lib64/hw/android.hardware.memtrack@1.0-impl.so",
      "/vendor/lib64/hw/android.hardware.memtrack@1.0-impl.so", false},
 """),
+    ("/vendor/bin/hw/android.hardware.graphics.composer@2.1-service",
+     """    // sd75: SurfaceFlinger is a composer@2.1 client (boot df79ab2d:
+    // hwservicemanager "Since android.hardware.graphics.composer@2.1::
+    // IComposer/default is not registered" + init "Could not find ... for
+    // ctl.interface_start"), but vendor.img only carries the 2.2 service.
+    // tools/build-hwc-probe.sh builds the 2.1 one from this tree; its rc is
+    // published by patches/patch-composer-rc.py.
+    {"vendor-overlay/bin/hw/android.hardware.graphics.composer@2.1-service",
+     "/vendor/bin/hw/android.hardware.graphics.composer@2.1-service", true},
+"""),
+    ("/vendor/bin/hw/dsh-hwcprobe",
+     """    // dsh-hwcprobe walks hw_get_module -> methods->open -> getCapabilities ->
+    // getFunction and prints every step to stdout, because not one byte of the
+    // composer service's own ALOG output reaches the snapshot's logcat. See
+    // patches/hwc-probe/probe.c.
+    {"vendor-overlay/bin/hw/dsh-hwcprobe",
+     "/vendor/bin/hw/dsh-hwcprobe", true},
+"""),
+    ("/vendor/bin/hw/dsh-wifi-stub",
+     """    // sd77: a do-nothing "wifi" binder (patches/wifi-stub). Without an owner for
+    // that binder, Context.getSystemService(WIFI_SERVICE) is null and Lineage's
+    // ProfileManagerService NPEs at boot phase 550, taking system_server down
+    // (boot a95db9e0). The rc is published by patches/patch-wifi-stub-rc.py.
+    {"vendor-overlay/bin/hw/dsh-wifi-stub",
+     "/vendor/bin/hw/dsh-wifi-stub", true},
+"""),
     ("/vendor/lib64/hw/memtrack.default.so",
      """    // memtrack.default.so is the empty legacy HAL (patches/memtrack-stub) that
     // lets android.hardware.memtrack@1.0-service register at all. Without it

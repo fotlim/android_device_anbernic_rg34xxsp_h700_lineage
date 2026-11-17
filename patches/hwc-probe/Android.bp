@@ -1,0 +1,13 @@
+cc_binary {
+    name: "dsh-hwcprobe",
+    vendor: true,
+    relative_install_path: "hw",
+    srcs: ["probe.c"],
+    shared_libs: [
+        "libhardware",
+    ],
+    cflags: [
+        "-Wall",
+        "-Wno-unused-parameter",
+    ],
+}

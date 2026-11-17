@@ -8,6 +8,278 @@
 
 ## 0. 一句话现状
 
+> # ★ 2026-11-17 10:2x（sd81）：**wpa 桩成了 → 推进到 phase 600**；新阻塞是缺 `FusedLocation`
+>
+> 两次开机（`5230a870`、`ec9f8a19`）兑现了上一轮的判断：
+> ```
+> init: Control message: Processed ctl.start for 'wpa_supplicant' from pid: 468 (system_server)
+> ```
+> 不再有 `Could not find` / `error code: 0x20`，`WifiHandlerThread` 那条 FATAL 也没了。
+> ⇒ 「重编 lineage-sdk 下发 jar」那条路线**已撤**（`patch-system-framework-overlay.py`
+> 从 apply.sh 移除，脚本保留作技术参考；它会让 `org.lineageos.platform` 无谓地 JIT）。
+>
+> **新阻塞（phase 600）**：
+> ```
+> IllegalStateException: Unable to find a direct boot aware fused location provider
+>   at LocationManagerService.initializeProvidersLocked(LocationManagerService.java:555)
+> ```
+> 那行是无条件的 `Preconditions.checkState(queryIntentServicesAsUser(FUSED_LOCATION…))`。
+> AOSP 实现 `frameworks/base/packages/FusedLocation` 只被
+> `build/make/target/product/handheld_system.mk` 收录，而本产品继承链从不经过它
+> —— 与当年缺字体同根因。
+>
+> **sd81 已做**：`tools/build-fused-location.sh` 编出
+> `system/priv-app/FusedLocation/FusedLocation.apk`（16,798 B，testkey 签名）；
+> `patches/patch-system-app-overlay.py` 在 first stage 给 `/system/priv-app` 挂 tmpfs
+> overlay 并拷进去（PMS 扫描早于 phase 600，会当特权系统应用装上）。
+>
+> **卡已写好**：`G:\initrd.img` 1,476,609 B sha256 `d26a4542…`，`init.android` `39f258df…`，
+> `G:\Image` 未变（`a22b2183…`）。补丁链 1651 行、字节可复现。
+> `DEBUG/` 已清空，上一轮证据归档在 `F:\rg34xxsp\debug-archive-5230a870-ec9f8a19\`（37 个文件）。
+>
+> **下一卡先看**：logcat 里还有没有那条 `Unable to find … fused location provider`；
+> 没有的话就盯 `sys.boot_completed`。
+>
+> **环境提醒**：`F:\rg34xxsp\` 与 `/root/artifacts/` 曾被清理过一次 —— 都无实质损失
+> （内核 Image `a22b2183` 已从内核树恢复回 `/root/artifacts/Image.sd70`）。
+
+> # ★ 2026-11-14 22:2x（sd80 收工）：**整卡镜像已重出**，明天的第一件事是刷这张卡
+>
+> 老 TF 卡的 FAT 根目录彻底坏了（`dir G:\` 只剩 `FOUND.000` 和一个乱码文件，
+> chkdsk 说"没有问题"但枚举直接报"路径中具有非法字符"），所以收工前整卡重做：
+>
+> ```
+> F:\rg34xxsp\rg34xxsp-sd.img   8,589,934,592 B  sha256 f84d4a05f103fa47…
+>   boot 分区：/Image（sd70 a22b2183…）、/initrd.img（b6eed752…）、两个 dtb、
+>              /boot.scr、/extlinux/extlinux.conf
+>   super 4096 MiB、userdata 剩余、hybrid MBR + GPT 已校验
+> ```
+> **刷写**：Rufus → 选这张卡 → 选这个 .img → **写盘方式必须选 "DD 镜像"**（ISO 模式会写到错位置）。
+>
+> 镜像里的 initrd 就是这一轮最后改好的版本：
+> composer@2.1 service + `hwc.drm.device=/dev/dri/card1` + `dsh-hwcprobe` +
+> `persist.sys.disable_rescue=true` + **FEATURE_WIFI xml** +
+> **`wpa_supplicant` 名字桩的 rc**（`service wpa_supplicant /system/bin/sleep 1000000`）。
+>
+> **明天第一卡的决定性判读**（kmsg/logcat）：
+> 1. `init: Control message: Processed ctl.start for 'wpa_supplicant'`
+>    （不再是 `Could not find`，也不再 `Unable to set property "ctl.start" ... 0x20`）；
+> 2. 没有 `FATAL EXCEPTION IN SYSTEM PROCESS: WifiHandlerThread`；
+> 3. `live-props.txt` 里出现 `sys.boot_completed=1` —— 走到这一步就是第一次真正"开机完成"。
+
+> # ★ 2026-11-14 22:1x（sd80）：WifiService 的死因只是 **init 不认 `wpa_supplicant` 这个名字**
+>
+> 从 boot `b30feba9` 的 FAT 碎片里挖到两行：
+> ```
+> init: Control message: Could not find 'wpa_supplicant' for ctl.start from pid: 465 (system_server)
+> libc: Unable to set property "ctl.start" to "wpa_supplicant": error code: 0x20
+> ```
+> `SystemService.start()` 就是写 `ctl.start`；**init 对不认识的服务名回 EPERM**，
+> 于是写入失败 → `SystemProperties.native_set` 抛异常 → `WifiHandlerThread` 干掉 system_server。
+>
+> ⇒ 「重编 lineage-sdk/`framework`/`services` 下发 jar」那条重活作废（还撞上 metalava API lint）。
+> 改成一行 rc：`patch-wpa-supplicant-stub.py` 发布
+> ```
+> service wpa_supplicant /system/bin/sleep 1000000
+>     user root
+>     group root
+> ```
+> （无 `class`，只在 `ctl.start` 点名时起来）；同时把 FEATURE_WIFI 重新声明回来。
+>
+> **状态**：init.android `b4c0914a…`、`F:\rg34xxsp\initrd.img` `b6eed752…` 已生成，
+> **但读卡器里没有卡，还没写进去**。
+>
+> **下一卡决定性判读**：kmsg 里出现
+> `Processed ctl.start for 'wpa_supplicant'`（而不是 Could not find），
+> 且 logcat 不再有 `FATAL EXCEPTION IN SYSTEM PROCESS: WifiHandlerThread`。
+
+> # ★ 2026-11-14 21:1x（sd78）：放弃自建 wifi binder，改为**声明 FEATURE_WIFI 让 framework 起 WifiService**
+>
+> boot `b30feba9`：把桩改成 system 变体后，`VNDR vs SYST` **原样复现**。原因：
+> `kHeader` 是编进 `libbinder.so` 的常量，而运行时链接器挑到的是 vendor 版那份 .so ——
+> 改自己模块的变体没用。**自建 binder 这条路在这套镜像上不划算。**
+>
+> 于是回到根源：`wifi` binder 没人注册，是因为产品没声明 `FEATURE_WIFI`，
+> `SystemServer` 里 `if (hasSystemFeature(FEATURE_WIFI)) startService(WifiService)` 从不成立。
+> `patches/patch-wifi-feature.py`：
+> 1. 发布 `/system/etc/permissions/android.hardware.wifi.xml`（文本，走既有 /system/etc overlay）；
+> 2. `93-wifi-stub.rc` 置空（WifiService 占名字后桩只会白重试）；
+> 3. `kWifiStubRc` 加 `[[maybe_unused]]`（第一次编译被 `-Werror,-Wunused-const-variable` 拦下）。
+>
+> 卡：`G:\initrd.img` 1,466,909 B sha256 `59b72974…`，`init.android` `82e7bc1c…`。
+>
+> **兜底方案**（若这条路也不通）：重编 `lineage-sdk` 的 `org.lineageos.platform.jar`，
+> 给 `ProfileTriggerHelper.getActiveSSID()` 加空判断，经新开的 `/system/framework`
+> overlay 下发（jar 3.8 MB，另有 `org.lineageos.platform.odex` 需一并失效化）。
+
+> # ★ 2026-11-14 20:5x（sd77d）：**VNDR vs SYST** —— vendor 变体的 libbinder 和框架 servicemanager 说不同的话
+>
+> boot `ee9a6ca4` 的诊断把问题夹到了最后一层：
+> ```
+> I dsh-wifi-stub: open(/dev/binder) = 3
+> I dsh-wifi-stub: initWithDriver(/dev/binder) -> 0xb400f053c901b000
+> E Parcel : Expecting header 0x53595354 but found 0x564e4452. Mixing copies of libbinder?
+> W dsh-wifi-stub: addService(wifi) failed: -129
+> ```
+> `frameworks/native/libs/binder/Parcel.cpp:531`：
+> ```cpp
+> constexpr int32_t kHeader = B_PACK_CHARS('V','N','D','R');   // __ANDROID_VNDK__
+> constexpr int32_t kHeader = B_PACK_CHARS('S','Y','S','T');   // otherwise
+> ```
+> 桩原来是 `vendor: true`（编译带 `-D__ANDROID_VNDK__`）⇒ 写 `VNDR` ⇒ 框架 servicemanager
+> 只认 `SYST` ⇒ 每条事务都被当协议错误丢弃 ⇒ libbinder 报
+> `EX_TRANSACTION_FAILED(-129)`。**这跟 vndbinder/binder 是两个独立问题。**
+>
+> **已修**：`patches/wifi-stub/Android.bp` 去掉 `vendor: true`（构建产物改在
+> `system/bin/`，安装路径仍是 `/vendor/bin/hw/`，rc 不变）。
+> 卡：`G:\initrd.img` 1,466,785 B sha256 `5e68a69e…`，桩 `104c514a…`。
+>
+> **下一卡就看** `live-services.txt` 有没有 `wifi: [android.net.wifi.IWifiManager]`；
+> 有就说明 phase 550 该过了。
+
+> # ★ 2026-11-14 20:3x（sd77c）：wifi 桩的 `addService` 卡在 `EX_TRANSACTION_FAILED`，加了诊断
+>
+> boot `e1625b6a`：`dsh-wifi-stub` 依然 `running`、显示依然好，但
+> ```
+> W dsh-wifi-stub: addService(wifi) attempt 59 failed: -129 (Key was rejected by service)
+> E SystemServiceRegistry: Manager wrapper not available: wifi
+> ```
+> **`-129` 不是 errno**（`strerror(129)` 的 `EKEYREJECTED` 文案是误导），它是 libbinder 的
+> `Status::ExceptionCode::EX_TRANSACTION_FAILED` —— 事务没送到 servicemanager。
+>
+> 桩里已加：`open("/dev/binder")` 的 fd/errno、`ProcessState::initWithDriver("/dev/binder")`
+> 的返回值、以及失败时对 `/dev/binderfs/binder` 的兜底，全部 ALOGI 打出来。
+> 卡：`G:\initrd.img` 1,466,779 B sha256 `03f187b6…`，桩 `9b9e597e…`。
+>
+> **顺带修了个坑**：`tools/build-*.sh` 的 `m ... | tail` 会吞掉编译失败，把上一次的二进制
+> 装进 overlay（这一轮就中招，测了旧桩）；两个脚本都补了 `set -o pipefail`。
+
+> # ★ 2026-11-14 20:1x（sd77b）：wifi 桩跑错服务表了（vndbinder vs binder），已修
+>
+> boot `adb4643b`：composer/显示依旧好（`init.svc.vendor.hwcomposer-2-1=running`、
+> `surfaceflinger`/`bootanim` 都 `running`），`init.svc.dsh-wifi-stub=[running]`，
+> **但 `service list` 里没有 `wifi`**，phase 550 的 NPE 原样复现：
+> ```
+> E SystemServiceRegistry: ServiceNotFoundException: No service published for: wifi
+> Caused by: NullPointerException: WifiManager.getConnectionInfo() on a null object reference
+>   at ProfileTriggerHelper.getActiveSSID(:192)
+> ```
+> 桩自己的审计记录给了原因：
+> ```
+> avc: denied { ioctl } for comm="dsh-wifi-stub" path="/dev/binderfs/vndbinder" ioctlcmd=0x6201
+> ```
+> `0x6201` = `BINDER_VERSION` —— **vendor 二进制的 libbinder 默认连 `/dev/vndbinder`**，
+> 于是桩注册到了 vndservicemanager，而 framework 的 `WifiManager` 查的是 `/dev/binder`
+> 上的 servicemanager。两边的服务表不是同一个。
+>
+> **已修**：桩的 `main()` 里先 `ProcessState::initWithDriver("/dev/binder")`。
+> 二进制 17,096 B sha256 `4931b892…`，卡：`G:\initrd.img` 1,466,389 B sha256 `c19154bb…`
+> （`init.android` 未变，只换桩）。
+>
+> **下一卡决定性问题**：`live-services.txt` 里有没有 `wifi: [android.net.wifi.IWifiManager]`。
+> 有了就该过 phase 550，接着看 `sys.boot_completed`。
+
+> # ★ 2026-11-14 19:3x（sd77）：**显示链路通了**；system_server 现在死在 Lineage 情景模式（缺 WiFi）
+>
+> boot `a95db9e0` 兑现的两件事（都算里程碑）：
+> * `dsh-hwcprobe` 五步全绿：`hw_get_module=0`、`methods->open=0`、
+>   `device version=0x02000001`、`capabilities=0`、`42 个 getFunction 全在`；
+>   前台跑 2.1 服务 `exit=124`（活着）。
+> * `init.svc.vendor.hwcomposer-2-1 / surfaceflinger / bootanim / system_suspend` 全 `running`，
+>   `DisplayManagerService: Display device added: "Built-in Screen" 720 x 480, density 213` +
+>   `Display device changed state: ON`；binder 服务 23 → **86**。
+>   **`display is disconnected` 这条彻底翻篇。**
+>
+> **新阻塞**（phase 550，每 5 秒打死一次 system_server）：
+> ```
+> FATAL EXCEPTION IN SYSTEM PROCESS: main
+> RuntimeException: Failed to boot service ProfileManagerService: onBootPhase threw ...
+> Caused by: NullPointerException: WifiManager.getConnectionInfo() on a null object reference
+>   at ProfileTriggerHelper.getActiveSSID(ProfileTriggerHelper.java:192)
+> ```
+> `getSystemService(WIFI_SERVICE)` 返回 null，因为没有任何进程持有叫 `wifi` 的 binder
+> （framework 只在声明了 `FEATURE_WIFI` 时才启动 WifiService，本产品没声明）。
+>
+> **sd77 已做**：`patches/wifi-stub/` + `tools/build-wifi-stub.sh` 起一个空壳
+> `wifi` binder（`93-wifi-stub.rc`，`class core`，在 phase 550 之前注册），
+> `onTransact` 只回 `writeNoException()` 不回 payload ⇒ 客户端读到 null `WifiInfo`
+> ⇒ `getActiveSSID()` 自带的 `if (wifiinfo == null) return null` 兜底 ⇒ NPE 消失。
+> 卡：`G:\initrd.img` 1,466,315 B sha256 `943cee43…`，`init.android` `85503daf…`。
+>
+> **注意**：这是过渡手段，真接 wifi 驱动时必须删掉这个桩，否则它会顶掉真的 WifiService。
+
+> # ★ 2026-11-14 18:4x（sd76）：**composer 的真死因找到了 —— 它打开的是 GPU 节点**
+>
+> 上一卡（`bee7ec29`）的取证被 FAT 打断（`DEBUG` 整个目录空、卷 dirty），
+> `chkdsk G: /F` 从 `FOUND.000` 里捞出 **71 个碎片**，其中 54 个带我们的日志。三行给出结论：
+> ```
+> E android.hardware.graphics.composer@2.1-service: failed to open hwcomposer device: Invalid argument
+> E hwc-resource-manager: Failed to initialize any displays
+> E hwc-drm-two: Can't initialize the resource manager -22
+> ```
+> `drm_hwcomposer/drm/resourcemanager.cpp:35` 用 `hwc.drm.device` 选节点（默认
+> `/dev/dri/card0`），而这块板子上 **`card0` 是 panfrost（GPU，无连接器）**，
+> DSI 屏和 HDMI 在 **`card1`**（`card1-DSI-1`、`card1-HDMI-A-1`，`/proc/fb` 是
+> `sun4i-drmdrmfb`）。我们自己的 `97-graphics-device.rc` 从 sd39 起把该属性写死成 `card0`。
+>
+> **已修**（`patches/patch-hwc-drm-device.py`）：rc 与 `prop.default` 两处都改成
+> `hwc.drm.device=/dev/dri/card1`。卡已写好：
+> `G:\initrd.img` 1,462,228 B sha256 `c7ab1382…`，`init.android` `53e9da8b…`。
+>
+> **同时确认这套 composer 2.1 通路是对的**：init 会把 `ctl.interface_start` 处理成
+> `starting service 'vendor.hwcomposer-2-1'`，服务真的起来了，只在模块 `open()` 这一步失败。
+>
+> **两条遗留**
+> * 服务二进制来自 initrd overlay，SELinux 标签是 `tmpfs` ⇒ **不做 domain 转换，跑在
+>   `u:r:init:s0`**。permissive 下没事，转 enforcing 前必须把标签写进 vendor `file_contexts`。
+> * `ResourceManager::Init()` 是"遇错即停"，所以 `card%` 通配无效（card0 先报错）。
+>   健壮做法是"拿到显示器之前的错误一律跳过"，需要重编 `hwcomposer.drm_minigbm.so`。
+>
+> **取证纪律**：设备写 FAT 时被打断会让 `DEBUG` 看起来是空的、卷变 dirty。先 `chkdsk /F`，
+> 碎片会在 `FOUND.000`，按 ASCII 扫关键字能捞回来（备份见 `F:\rg34xxsp\recover\`）。
+
+> # ★ 2026-11-14 15:2x（sd75）：**当前唯一阻塞 = SurfaceFlinger 绑不上 composer**
+>
+> **surface/server 一路已经通了**：`sys.use_memfd`、`SYSTEMSERVERCLASSPATH`、apex jar、
+> `services.odex` 失效化、memtrack 桩、RenderScript 过滤全部落地，system_server 能一路
+> 起到网络管理服务（boot `8073d6b9` 起 91 个服务）。
+>
+> **新根因（boot `df79ab2d` 抓到的）**：这个树的 SurfaceFlinger 是 **composer@2.1 客户端**，
+> 而镜像只装了 **2.2** 的 service，且 `2.2/default/...@2.2-service.rc` **没有 `interface` 行**：
+> ```
+> I hwservicemanager: Since android.hardware.graphics.composer@2.1::IComposer/default is not
+>                     registered, trying to start it as a lazy HAL.
+> I init            : Control message: Could not find
+>                     'android.hardware.graphics.composer@2.1::IComposer/default'
+>                     for ctl.interface_start from pid: 187
+> ```
+> 于是 SF 每轮都是"display disconnected"，从来没有 composer 可用。那个 2.2 进程本身也
+> 静默退出 1（216 次），日志一个字都不进 logcat（`ComposerHal` 全空），还顺带触发
+> `apexd ... Attempting a revert` 和每次死亡 `onrestart restart surfaceflinger`。
+>
+> **这一轮已做**（`patches/patch-composer-rc.py`、`patches/hwc-probe/`、
+> `tools/build-hwc-probe.sh`）：
+> 1. 从树里编出 **`android.hardware.graphics.composer@2.1-service`**（76 KB），
+>    经 initrd 的 vendor overlay 落到 `/vendor/bin/hw/`；
+> 2. 发布**带 `interface ...@2.1::IComposer default` 的 rc**，并把镜像那份 2.2 rc **置空**
+>    （消掉重启风暴 + apexd revert）；
+> 3. **`dsh-hwcprobe`**（`patches/hwc-probe/probe.c`）：把
+>    `hw_get_module → methods->open(errno) → device->version → getCapabilities →
+>    42 个必选 getFunction 缺失清单` 全打到 **stdout**，由快照写 `DEBUG/live-hwc-probe.txt`，
+>    **完全绕过 logd**（这是唯一能拿到原因的通道）；
+> 4. `persist.sys.disable_rescue=true`（写进 `prop.default` 同一个 append 位置）——
+>    system_server 每 5 秒崩一次已被 `PackageWatchdog` 当成 boot loop，
+>    `RescueParty` 已升到 `RESET_SETTINGS_TRUSTED_DEFAULTS`，再往上就是恢复出厂清 `/data`。
+>
+> **下一卡先看** `DEBUG/live-hwc-probe.txt`：卡在 `1.` = 模块找不到（看 dlerror）；
+> `2.` 非 0 = DRM 打不开（errno 直接说）；`5. missing>0` = `initDispatch` 缺函数，按名字补。
+> 再看 `live-hwc21-run.txt`（`exit=124` = 服务活着）与 `live-props.txt` 里的
+> `init.svc.vendor.hwcomposer-2-1`。
+>
+> **工程纪律（这一轮踩的）**：WSL 会被别的项目重启（`/root/avium` 在跑 `systemimage -j6`），
+> 长构建必须 `setsid nohup` 并用 `/proc/uptime` 判断是不是"卡住"；
+> root 构建要 `export CCACHE_DIR=/root/.ccache`。
+
 > # ★ 2026-11-13 12:3x：镜像没错，卡卡在 `/dev/block/by-name/super`
 >
 > **先更正上一轮的结论**：我说"super 分区全零 = 镜像没写进去"，**是误判**。

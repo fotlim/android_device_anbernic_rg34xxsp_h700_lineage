@@ -14,6 +14,9 @@
 #     ln -sfn '<checkout>' /root/repo
 #     bash /root/repo/tools/build-init-first-stage.sh
 set -e
+# `m ... | tail -25` hides a failed build behind tail's exit status (boot b30feba9
+# shipped the previous init.android because of it). Same fix as the other builders.
+set -o pipefail
 
 SRC=/root/android/lineage
 REPO=${REPO:-/root/repo}
