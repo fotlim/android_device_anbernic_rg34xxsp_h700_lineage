@@ -230,6 +230,12 @@ logcat -d -b all -s vold -s Vold -s StorageManagerService -s UserController \
 # the same way init saw, and its stderr is the only place a linker error shows.
 timeout 5 /vendor/bin/hw/dsh-hwcprobe > $CARD/DEBUG/live-hwc-probe.txt 2>&1
 echo "exit=$?" >> $CARD/DEBUG/live-hwc-probe.txt
+# sd93: SwiftShader vs minigbm. SurfaceFlinger dies inside
+# sw::Renderer::executeTask(int)+324 the first time it composites a layer, and
+# the probe walks the stack in the order that separates the two causes. 20 s:
+# the JIT compile of the two shaders is the slow part on a Cortex-A53.
+timeout 20 /vendor/bin/hw/dsh-glprobe > $CARD/DEBUG/live-gl-probe.txt 2>&1
+echo "exit=$?" >> $CARD/DEBUG/live-gl-probe.txt
 timeout 5 /vendor/bin/hw/android.hardware.graphics.composer@2.1-service > $CARD/DEBUG/live-hwc21-run.txt 2>&1
 echo "exit=$?" >> $CARD/DEBUG/live-hwc21-run.txt
 timeout 3 /vendor/bin/hw/android.hardware.graphics.composer@2.2-service > $CARD/DEBUG/live-hwc-run.txt 2>&1

@@ -1,0 +1,16 @@
+cc_binary {
+    name: "dsh-glprobe",
+    vendor: true,
+    relative_install_path: "hw",
+    srcs: ["probe.c"],
+    shared_libs: [
+        "libEGL",
+        "libGLESv2",
+        "liblog",
+        "libnativewindow",
+    ],
+    cflags: [
+        "-Wall",
+        "-Wno-unused-parameter",
+    ],
+}

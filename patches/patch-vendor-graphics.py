@@ -212,6 +212,20 @@ EXTRA_ENTRIES = [
     {"vendor-overlay/lib64/hw/memtrack.default.so",
      "/vendor/lib64/hw/memtrack.default.so", false},
 """),
+    # NOTE: keep new entries LAST.  The insert loop below puts every entry it
+    # adds at the end of the array, so an entry placed mid-list makes an
+    # incremental run and a full replay produce different layouts -- which is
+    # what tools/verify-patch-chain.sh reported ("+7 lines at 488, -7 at 502")
+    # the first time dsh-glprobe was added in the middle.
+    ("/vendor/bin/hw/dsh-glprobe",
+     """    // sd93: does SwiftShader itself work on this SoC, or is the memory we hand
+    // it through minigbm the problem? SurfaceFlinger dies in
+    // sw::Renderer::executeTask(int)+324 the first time it is asked to
+    // composite a layer (boot 35526bea), and both causes need opposite fixes.
+    // See patches/gl-probe/probe.c and the live snapshot's live-gl-probe.txt.
+    {"vendor-overlay/bin/hw/dsh-glprobe",
+     "/vendor/bin/hw/dsh-glprobe", true},
+"""),
 ]
 
 if "PublishVendorGraphics" in text:
