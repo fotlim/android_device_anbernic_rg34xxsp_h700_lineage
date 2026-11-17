@@ -113,6 +113,37 @@ getprop > $CARD/DEBUG/live-allprops.txt 2>>$LOG
   echo "===== boot/display properties ====="
   getprop | grep -E 'boot|display|surfaceflinger|hwc|gralloc|sf\.'
 } > $CARD/DEBUG/live-display-state.txt 2>>$LOG
+# sd85: the boot deadlock. WindowManagerService.checkBootAnimationCompleteLocked()
+# polls SystemService.isRunning("bootanim") every 50 ms and refuses to continue
+# while it answers running; in boot 9300494a bootanimation (pid 452) sat in
+# binder_thread_read forever -- its animation thread had already exited (0 layers,
+# FramebufferSurface frame-counter 0, flips 0) while main() stayed in
+# joinThreadPool(), which Thread::run() cannot detect. So enableScreenAfterBoot
+# never ran, sys.boot_completed was never set, and SystemUI/Launcher never started.
+#
+# These captures answer *why* the animation thread died, and whether a home
+# activity exists at all, without another round of guessing.
+{
+  echo "===== debug.sf.nobootanimation ====="; getprop debug.sf.nobootanimation
+  echo "===== init.svc.bootanim ====="; getprop init.svc.bootanim
+  echo "===== resolve HOME ====="
+  cmd package resolve-activity --brief -a android.intent.action.MAIN \
+      -c android.intent.category.HOME 2>&1
+  echo "===== query HOME ====="
+  cmd package query-activities --brief -a android.intent.action.MAIN \
+      -c android.intent.category.HOME 2>&1 | head -20
+  echo "===== launcher packages ====="
+  pm list packages 2>/dev/null | grep -iE 'launcher|systemui|setupwizard'
+  echo "===== dumpsys activity activities (head) ====="
+  timeout 10 dumpsys activity activities 2>&1 | head -60
+} > $CARD/DEBUG/live-home-state.txt 2>>$LOG
+# Run the animation by hand and keep its own logs: readyToRun() failures are only
+# visible as ALOG output, and the in-boot ones have already rotated out of the
+# ring buffer by snapshot time.
+timeout 8 /system/bin/bootanimation > $CARD/DEBUG/live-bootanim-run.txt 2>&1
+echo "exit=$?" >> $CARD/DEBUG/live-bootanim-run.txt
+logcat -d -b main -b system -s BootAnimation -v threadtime 2>/dev/null \
+    | tail -c 65536 > $CARD/DEBUG/live-bootanim-log.txt 2>>$LOG
 # sd70 起 vendor.hwcomposer-2-2 每轮退出 status 1，而且它自己的 log 完全没进
 # logcat。sd74：先记环境（设备节点、库、ro.hardware*、vndk 目录），再**前台**
 # 跑一次这个 HAL（timeout 3 s），把 stdout/stderr 与退出码一起落盘：
