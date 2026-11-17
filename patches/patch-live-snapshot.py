@@ -44,13 +44,40 @@ LOG=/metadata/dsh/snapshot.log
 CARD=/mnt/dshcard
 mkdir -p $CARD /metadata/dsh 2>/dev/null
 echo "snapshot: start" > $LOG
+# sd92: SystemUI declares dangerous (runtime) permissions and a fresh /data has
+# granted none of them. Boot 01900a61 ends like this, twelve times:
+#   FATAL EXCEPTION: main
+#   Process: com.android.systemui
+#   Unable to create service com.android.systemui.keyguard.KeyguardService:
+#     InflateException: Binary XML file line #64 in
+#     com.android.systemui:layout/super_notification_shade: uid=10046 needs
+#     permission android.permission.READ_CONTACTS to read
+#     lock_screen_owner_info_enabled for user 0
+# No privapp allowlist can fix that one -- it is a dangerous permission, not a
+# privileged one -- so grant the set SystemUI plausibly reads. The grant is
+# persistent in /data; this matters only until /data is next wiped, which is
+# what the sd91-shaped default-permissions XML is for.
+for perm in READ_CONTACTS READ_PROFILE READ_EXTERNAL_STORAGE GET_ACCOUNTS ACCESS_COARSE_LOCATION; do
+    i=0
+    while [ $i -lt 40 ]; do
+        if pm grant com.android.systemui android.permission.$perm >/dev/null 2>&1; then
+            echo "snapshot: granted $perm" >> $LOG
+            break
+        fi
+        i=$((i+1))
+        sleep 2
+    done
+    if [ $i -ge 40 ]; then
+        echo "snapshot: could NOT grant $perm" >> $LOG
+    fi
+done
 sleep 45
 if ! mount -t vfat -o rw /dev/block/mmcblk0p1 $CARD 2>>$LOG; then
     echo "snapshot: cannot mount the boot partition" >> $LOG
     exit 0
 fi
 mkdir -p $CARD/DEBUG 2>>$LOG
-for f in fix.log probe.log public.libraries.txt; do
+for f in fix.log probe.log public.libraries.txt snapshot.log; do
     [ -f /metadata/dsh/$f ] && cp /metadata/dsh/$f $CARD/DEBUG/live-$f 2>>$LOG
 done
 # The first stage writes this one at the metadata root, not under dsh/ (boot
