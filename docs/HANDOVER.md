@@ -1,4 +1,4 @@
-# 交接文档（2026-11-11 20:30）
+﻿# 交接文档（2026-11-11 20:30）
 
 给接手的同事。目标：**读完就知道现在卡在哪、已经排除过什么、下一步该动哪一行**，不用重走弯路。
 
@@ -7,6 +7,40 @@
 ---
 
 ## 0. 一句话现状
+
+> # ★ 2026-11-17 13:1x（sd85）：**死锁点是 `bootanim`，不是显示**
+>
+> boot `9300494a` 实测：DRM `card1-DSI-1 = connected / enabled / dpms On`、720x480；
+> `/proc/fb = sun4i-drmdrmfb`；SF 有内建屏且 `powerMode=On`；binder 服务 **163**；
+> system_server 长驻。但 `dumpsys SurfaceFlinger` 同时写着 0 个 HW 层、
+> `frame-counter=0`、`flips=0`、三个 framebuffer slot 全 FREE、`No Last HW vsync`
+> —— **一帧都没提交**，而 `bootanimation.zip` 确实在（1,942,738 B）。
+>
+> 死锁链（源码已核）：
+> 1. `WindowManagerService.checkBootAnimationCompleteLocked():3511` 每 50 ms 轮询
+>    `SystemService.isRunning("bootanim")`，只要 running 就继续等；
+> 2. `bootanim`（pid 452）卡在 `binder_thread_read`：动画线程已在 `readyToRun()`
+>    失败退出，而 `main()` 只看到 `Thread::run()` 返回 OK
+>    （`system/core/libutils/Threads.cpp:718` 明说它只表示线程创建成功），
+>    于是 `joinThreadPool()` 永久阻塞，init 里这个服务永不结束；
+> 3. ⇒ `enableScreenAfterBoot` 不跑 ⇒ `sys.boot_completed` 永不设置 ⇒
+>    SystemUI / Launcher 从未启动（`ps` 里两者都没有，`mFocusedApp=null`）。
+>    旁证：`service.bootanim.exit` 一直为 0，而 `bootFinished()` 在这棵树里没有调用点。
+>
+> **sd85 修法（不重编 framework）**：`patches/patch-skip-bootanim.py` 往
+> `prop.default` 加 `debug.sf.nobootanimation=1` ⇒ `bootAnimationDisabled()` 为真 ⇒
+> `main()` 立刻 return 0 ⇒ 服务 stopped ⇒ WM 下一个 tick 放行。
+> 同时 `patch-live-snapshot.py` 增加 `live-home-state.txt`（HOME 解析、launcher 包、
+> `dumpsys activity activities`）和手动跑 `bootanimation` 的
+> `live-bootanim-run.txt` / `live-bootanim-log.txt`，把动画线程的死因留证。
+>
+> **状态**：补丁已提交 `6fed25f`，**尚未编译** —— WSL 被另一个项目占用，
+> `ext4.vhdx` 报 `ERROR_SHARING_VIOLATION`，按约定没有执行 `wsl --shutdown`。
+> WSL 空闲后：`dsh_step1.sh` → `dsh_pack.sh` → 写卡。
+>
+> **另一个风险**：`E WindowManager: No home screen found for Intent {act=MAIN cat=[HOME]}`。
+> `com.android.launcher3` 的包在，但 HOME 解析失败；`live-home-state.txt` 会给真实结果，
+> 再决定是补 launcher 还是让 SetupWizard 顶替。
 
 > # ★ 2026-11-17 12:4x（sd84）：**PF_KEY 已修、163 个服务、system_server 活着**；现在只查“为什么不出帧”
 >
