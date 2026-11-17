@@ -46,6 +46,44 @@ PRODUCT_COPY_FILES += \
 
 DEVICE_PACKAGE_OVERLAYS += $(DEVICE_PATH)/overlay
 
+# ---------------------------------------------------------------------------
+# sd87: 补上 handheld_system*.mk 才有的那批系统应用
+# ---------------------------------------------------------------------------
+# 本产品的继承链是 core_64_bit -> base -> common_full_tablet_wifionly，
+# 从来没经过 build/make/target/product/handheld_system.mk 和
+# handheld_system_ext.mk，于是下面这些模块一个都没装：
+#
+#   SystemUI      —— handheld_system_ext.mk:29。**缺它是致命的**：
+#                    WindowManagerService.performEnableScreen() 有一条
+#                    "Don't enable the screen until all existing windows have
+#                    been drawn"，等的是系统装饰窗口（状态栏）；状态栏属于
+#                    SystemUI，它不在就没有任何窗口能满足，于是
+#                    mActivityManager.bootAnimationComplete() 永远不调用，
+#                    ActivityManagerService.finishBooting() 在
+#                    "if (!mBootAnimationComplete) { mCallFinishBooting = true; return; }"
+#                    处早退，sys.boot_completed 不设置、UserController 的
+#                    finishUserBoot 不跑、用户 0 停在 STATE_BOOTING，
+#                    resolveHomeActivity() 于是返回 null（"No home screen found"）。
+#                    boot 450b1a1c / ad81325c 的完整证据见开发日志 §54。
+#   FusedLocation —— handheld_system.mk:51。sd81 之前是用 initrd 里十六进制
+#                    内嵌进 init 硬塞的（patches/patch-fused-location-embed.py），
+#                    现在从产品里正常安装，那个补丁要一起退掉，否则同一个包会有
+#                    两个 APK。
+#   InputDevices / KeyChain / Telecom —— 同属 handheld_system.mk，
+#                    分别是输入设备、密钥链、电话的 system server app；
+#                    缺 InputDevices 时键盘/手柄的 InputManager 侧也会缺。
+#
+# 只列需要的模块，不继承整个 handheld_system*.mk：那两个 mk 还会塞 Telephony/
+# MmsService/vr 等一堆东西，和 common_full_tablet_wifionly 的
+# PRODUCT_PROPERTY_OVERRIDES 有重叠（例如 ro.carrier），继承会撞重复定义。
+PRODUCT_PACKAGES += \
+    SystemUI \
+    FusedLocation \
+    InputDevices \
+    KeyChain \
+    Telecom
+
+
 # HAL 声明。没有 DEVICE_MANIFEST_FILE，这些 HAL 即使编出来也不会被注册，
 # SurfaceFlinger 会一直等 composer，表现就是开机动画不动。
 DEVICE_MANIFEST_FILE += $(DEVICE_PATH)/manifest.xml
