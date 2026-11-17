@@ -8,6 +8,30 @@
 
 ## 0. 一句话现状
 
+> # ★ 2026-11-17 12:4x（sd84）：**PF_KEY 已修、163 个服务、system_server 活着**；现在只查“为什么不出帧”
+>
+> boot `9300494a`：
+> * 不再有 `create PF_KEY socket failed` / `map swap synchronize_rcu() failed`；
+> * 不再有 system_server FATAL；
+> * binder 服务 **163**（上一卡因重启风暴只有 25）；
+> * `system_server` 长活，`surfaceflinger` / `vendor.hwcomposer-2-1` / `bootanim` 都 running；
+> * kmsg 有 `SurfaceFlinger: Setting power mode 2 on display 0`，
+>   早期也有 `Ignoring VSYNC request while display is disconnected`。
+>
+> ⇒ `black, releasing the panel to Android` 只是 debug-init 刷黑后的遗留文字；
+> 现在剩下的问题是**画面没有实际呈现**，不是服务仍死在早期启动。
+>
+> **sd84 只加取证**（未改显示行为）：快照新增
+> `live-sf-dump.txt`（dumpsys SurfaceFlinger）、`live-display-dump.txt`、
+> `live-activity-top.txt`、`live-window-dump.txt`、`live-allprops.txt`、
+> `live-display-state.txt`（DRM connector status/enabled/dpms/modes、/proc/fb、
+> bootanimation.zip、boot/display 属性）。
+> 卡：`G:\initrd.img` 1,481,220 B sha256 `94f326d7…`，`G:\Image` 保持
+> `fa57280f…`。上一卡证据归档在 `F:\rg34xxsp\debug-archive-9300494a\`。
+>
+> **下一卡先看** SF dump 里的 display/VSYNC/HWComposer 状态，以及 Display dump
+> 是否注册 `Built-in Screen`，不再凭 `bootanim=running` 猜是否出帧。
+
 > # ★ 2026-11-17 12:2x（sd83）：APK 与 phase 600 已过；新崩溃根因是 **内核没开 PF_KEYv2**
 >
 > boot `4f480d77` 兑现 sd82：

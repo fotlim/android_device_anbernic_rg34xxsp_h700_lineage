@@ -88,6 +88,31 @@ getprop 2>/dev/null | grep -E 'init\\.svc\\.|boot_completed|dev\\.bootcomplete|s
 ps -A 2>/dev/null | grep -E 'zygote|system_server|surfaceflinger|bootanim|netd|installd|audioserver|media' > $CARD/DEBUG/live-ps.txt 2>>$LOG
 # 已注册的 binder 服务：system_server 卡在哪个 startService，这张表比日志直接
 service list 2>/dev/null > $CARD/DEBUG/live-services.txt 2>>$LOG
+# sd84: boot 9300494a has 163 services and a long-lived system_server, but the
+# panel still shows debug-init's last text. `bootanim=running` only proves the
+# process exists, not that a frame was presented. Capture the framework's actual
+# display state instead of guessing from logcat (whose early SF lines rotate out).
+timeout 12 dumpsys SurfaceFlinger > $CARD/DEBUG/live-sf-dump.txt 2>&1
+timeout 12 dumpsys display > $CARD/DEBUG/live-display-dump.txt 2>&1
+timeout 12 dumpsys activity top > $CARD/DEBUG/live-activity-top.txt 2>&1
+timeout 12 dumpsys window > $CARD/DEBUG/live-window-dump.txt 2>&1
+getprop > $CARD/DEBUG/live-allprops.txt 2>>$LOG
+{
+  echo "===== DRM connectors ====="
+  for d in /sys/class/drm/card*-*; do
+      [ -d "$d" ] || continue
+      echo "--- $d"
+      for f in status enabled dpms modes; do
+          [ -f "$d/$f" ] && { echo "[$f]"; cat "$d/$f"; }
+      done
+  done
+  echo "===== /proc/fb ====="; cat /proc/fb 2>&1
+  echo "===== boot animation media ====="
+  ls -l /system/media /system/media/bootanimation.zip \
+        /product/media/bootanimation.zip 2>&1
+  echo "===== boot/display properties ====="
+  getprop | grep -E 'boot|display|surfaceflinger|hwc|gralloc|sf\.'
+} > $CARD/DEBUG/live-display-state.txt 2>>$LOG
 # sd70 起 vendor.hwcomposer-2-2 每轮退出 status 1，而且它自己的 log 完全没进
 # logcat。sd74：先记环境（设备节点、库、ro.hardware*、vndk 目录），再**前台**
 # 跑一次这个 HAL（timeout 3 s），把 stdout/stderr 与退出码一起落盘：
