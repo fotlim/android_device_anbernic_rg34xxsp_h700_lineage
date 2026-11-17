@@ -35,6 +35,16 @@ fi
 
 echo "=== applying patches (idempotent) ==="
 bash "$REPO/patches/apply.sh" "$SRC"
+
+# sd82: first_stage_init.cpp includes dsh-fused-location-apk.h, which is generated
+# from the built APK. Regenerate it here so a fresh replay always compiles.
+APK=$SRC/out/target/product/rg34xxsp/system/priv-app/FusedLocation/FusedLocation.apk
+if [ -f "$APK" ]; then
+	python3 "$REPO/tools/embed-fused-location-apk.py"
+else
+	echo "!! $APK missing; run tools/build-fused-location.sh first" >&2
+	exit 1
+fi
 echo "=== diff summary ==="
 git -C "$SRC/system/core" diff --stat -- init/first_stage_init.cpp
 

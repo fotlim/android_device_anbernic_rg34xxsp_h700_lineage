@@ -8,6 +8,33 @@
 
 ## 0. 一句话现状
 
+> # ★ 2026-11-17 12:1x（sd82）：APK 进不了旧 root ⇒ **改成把 FusedLocation.apk 编进 init**
+>
+> boot `1967557b`：服务数 25 → **40**，但 phase 600 那条还在。关键证据：
+> ```
+> gfx: overlay /system/priv-app rc=0 errno=0 (ok)
+> gfx: system-overlay/priv-app/FusedLocation/FusedLocation.apk is not on the ramdisk: 2
+> ```
+> 同一个 dirfd、同一份 initrd 上，9 个 `vendor-overlay/…` 全部 copied ok，
+> 只有 `system-overlay/…` ENOENT。而归档**逐字节正确**：
+> `gzip -dc | cpio -i` 能解出该 APK 且 sha256 `c9e2ee86…` 与源一致。
+> （`vendor-overlay` 同时存在于内核内建 initramfs，所以“旧 root 里看得见”这件事
+>  并不能证明外置 initrd 的每一条都被解开。）
+>
+> **sd82 修法**：不再依赖 ramfs —— `tools/embed-fused-location-apk.py` 生成
+> `system/core/init/dsh-fused-location-apk.h`（hex，16,798 B → 33,596 字符），
+> `patches/patch-fused-location-embed.py` 让 `PublishSystemApp()` 解码后直接写
+> `/system/priv-app/FusedLocation/FusedLocation.apk`，并把写入字节数与源 sha256
+> 打进发布日志。`build-init-first-stage.sh` 会自动重生成头文件。
+>
+> **卡已写好**：`G:\initrd.img` 1,480,722 B sha256 `8bdbb379…`，
+> `init.android` 2,159,832 B `51578381…`（+32,528 B 就是嵌入的 APK）。
+> 补丁链 1701 行、字节可复现。上一卡证据归档在
+> `F:\rg34xxsp\debug-archive-1967557b\`。
+>
+> **下一卡第 1 条判读**：`live-first-stage-publish.txt` 里应出现
+> `sysapp: wrote 16798/16798 bytes to /system/priv-app/… (source sha256 c9e2ee86…)`。
+
 > # ★ 2026-11-17 10:2x（sd81）：**wpa 桩成了 → 推进到 phase 600**；新阻塞是缺 `FusedLocation`
 >
 > 两次开机（`5230a870`、`ec9f8a19`）兑现了上一轮的判断：
