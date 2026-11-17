@@ -8,6 +8,37 @@
 
 ## 0. 一句话现状
 
+> # ★ 2026-11-17 12:2x（sd83）：APK 与 phase 600 已过；新崩溃根因是 **内核没开 PF_KEYv2**
+>
+> boot `4f480d77` 兑现 sd82：
+> ```
+> sysapp: wrote 16798/16798 bytes to /system/priv-app/FusedLocation/FusedLocation.apk
+>   (source sha256 c9e2ee86…)
+> ```
+> `Unable to find a direct boot aware fused location provider` 已消失。
+> 新的 system_server 死因：
+> ```
+> FATAL EXCEPTION IN SYSTEM PROCESS: android.bg
+> ServiceSpecificException: map swap synchronize_rcu() failed (code 97)
+> E BpfUtils: create PF_KEY socket failed: Address family not supported by protocol
+> ```
+> `system/bpf/libbpf_android/BpfUtils.cpp` 的 `synchronizeKernelRCU()` 用
+> `socket(AF_KEY, SOCK_RAW, PF_KEY_V2)` 再 close 的 hack；本机
+> `# CONFIG_NET_KEY is not set` ⇒ `EAFNOSUPPORT(97)` ⇒ netd 经 binder 抛异常 ⇒
+> `StatsPullAtomService` 的 handler 线程杀掉 system_server。
+>
+> **已修并上卡**：`kernel/fragment.config` 与 `.config` 补
+> `CONFIG_NET_KEY=y`、`CONFIG_NETFILTER_XT_MATCH_BPF=y`
+> （后者修同轮的 `iptables-restore: Couldn't find match 'bpf'`）。
+> `G:\Image` = 35,764,232 B sha256 `fa57280f…`；
+> `G:\initrd.img` 保持 sd82 = 1,480,722 B `8bdbb379…`。
+> `System.map` 有 `pfkey_create`/`pfkey_release` 与 `bpf_mt_init6`。
+>
+> **下一卡先看**：logcat 还有没有 `create PF_KEY socket failed` /
+> `map swap synchronize_rcu() failed`，以及 `StatsPullAtomService` 的 android.bg FATAL。
+>
+> **上一卡证据**：`F:\rg34xxsp\debug-archive-4f480d77\`。
+
 > # ★ 2026-11-17 12:1x（sd82）：APK 进不了旧 root ⇒ **改成把 FusedLocation.apk 编进 init**
 >
 > boot `1967557b`：服务数 25 → **40**，但 phase 600 那条还在。关键证据：

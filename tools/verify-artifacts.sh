@@ -27,7 +27,7 @@ LIST=(
 	/root/initramfs-embed/vendor-overlay/lib64/hw/memtrack.default.so
 	/root/initramfs-embed/vendor-overlay/lib64/hw/android.hardware.memtrack@1.0-impl.so
 	/mnt/f/rg34xxsp/initrd.img
-	/root/artifacts/Image.sd70
+	/root/artifacts/Image.sd83
 	/root/android/lineage/out/target/product/rg34xxsp/system.img
 	/root/android/lineage/out/target/product/rg34xxsp/super.img
 	/root/android/lineage/out/target/product/rg34xxsp/vendor.img
