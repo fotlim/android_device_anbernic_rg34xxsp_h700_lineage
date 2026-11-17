@@ -39,6 +39,16 @@ this mount: debug-init copies both APKs into /dshsysapp/ in the RAM rootfs
 while /mnt is still its own, and this code reads them from there.  The mount
 path below is kept only as a fallback for a build without that staging.
 
+Boot 2d61c94a closed that gap and opened a new one: debug-init's staging worked
+(`dshsysapp: staged /mnt/SystemUI.apk -> /dshsysapp/SystemUI.apk (11932626
+bytes)`, `2 app(s) staged`), yet the first stage still logged
+`sysapp: /dshsysapp/SystemUI.apk missing (errno=2)`.  Reason: this code runs
+*after* `SwitchRoot("/first_stage_ramdisk")`, so "/" is the system image and the
+ramdisk -- where debug-init wrote -- survives only as the `DIR*` opened before
+the switch.  sd90 opens the staged APKs with `openat(dfd, ...)` instead of by
+path, which is exactly how PublishRamdiskFstab and the vendor-overlay copies
+already reach the ramdisk.
+
 Both apps are carried on the card now, because they both have to be there:
 
   * SystemUI      -> /system_ext/priv-app/SystemUI/SystemUI.apk  (handheld_system_ext.mk)
@@ -118,12 +128,22 @@ static bool MountCardBoot(char* mountpoint, size_t len) {
     return false;
 }
 
-static bool CopyAppFromCard(const char* boot, const char* rel, const char* dir,
-                            const char* path) {
-    char src[192];
-    snprintf(src, sizeof(src), "%s%s", boot, rel);
-    if (access(src, F_OK) != 0) {
-        pubnote("sysapp: %s missing (errno=%d)", src, errno);
+// src is relative to dirfd when dirfd >= 0, and an absolute path otherwise.
+//
+// The relative form exists because of SwitchRoot(): by the time this code runs,
+// "/" is already the system image and the ramdisk that debug-init wrote into is
+// reachable only through the DIR* opened before the switch -- that is the same
+// `dfd` PublishRamdiskFstab uses. Boot 2d61c94a proved the difference: the
+// staging itself had worked,
+//   dshsysapp: staged /mnt/SystemUI.apk -> /dshsysapp/SystemUI.apk (11932626 bytes)
+//   dshsysapp: staged /mnt/FusedLocation.apk -> /dshsysapp/FusedLocation.apk (16798 bytes)
+// but the first stage then logged
+//   sysapp: /dshsysapp/FusedLocation.apk missing (errno=2)
+//   sysapp: /dshsysapp/SystemUI.apk missing (errno=2)
+// because that path does not exist in the new root any more.
+static bool CopyAppAt(int dirfd, const char* src, const char* dir, const char* path) {
+    if (dirfd >= 0 ? faccessat(dirfd, src, F_OK, 0) != 0 : access(src, F_OK) != 0) {
+        pubnote("sysapp: %s missing (dirfd=%d errno=%d)", src, dirfd, errno);
         return false;
     }
     if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
@@ -132,9 +152,11 @@ static bool CopyAppFromCard(const char* boot, const char* rel, const char* dir,
     }
     chmod(dir, 0755);
 
-    int in = open(src, O_RDONLY | O_CLOEXEC);
+    int in = dirfd >= 0 ? openat(dirfd, src, O_RDONLY | O_CLOEXEC)
+                        : open(src, O_RDONLY | O_CLOEXEC);
     if (in < 0) {
-        pubnote("sysapp: open %s failed: %d (%s)", src, errno, strerror(errno));
+        pubnote("sysapp: open %s failed (dirfd=%d): %d (%s)", src, dirfd, errno,
+                strerror(errno));
         return false;
     }
     int out = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -169,7 +191,7 @@ static bool CopyAppFromCard(const char* boot, const char* rel, const char* dir,
     return ok;
 }
 
-void PublishSystemApp(int /*dfd*/) {
+void PublishSystemApp(int dfd) {
     if (!OverlayDir("/system/priv-app", "/dev/sysapp_upper", "/dev/sysapp_work")) {
         pubnote("sysapp: overlay of /system/priv-app failed");
         return;
@@ -187,27 +209,27 @@ void PublishSystemApp(int /*dfd*/) {
 
     char boot[64];
 
-    // sd89: /dshsysapp first.  debug-init stages the APKs there while the card
-    // is still its own mount; mounting the card from here comes back EBUSY
-    // (boot b5c8841d: `mount ... rc=-1 errno=16`) because the kmsg follower
-    // keeps a second mount namespace holding the FAT superblock.
-    bool have_fused = CopyAppFromCard("/dshsysapp", "/FusedLocation.apk",
-                                      "/system/priv-app/FusedLocation",
-                                      "/system/priv-app/FusedLocation/FusedLocation.apk");
-    bool have_sysui = CopyAppFromCard("/dshsysapp", "/SystemUI.apk",
-                                      "/system_ext/priv-app/SystemUI",
-                                      "/system_ext/priv-app/SystemUI/SystemUI.apk");
+    // sd90: read the staged APKs through `dfd`, the ramdisk handle, not through
+    // a path.  debug-init put them there before the handover; SwitchRoot()
+    // then removed that path from the namespace.
+    bool have_fused = CopyAppAt(dfd, "dshsysapp/FusedLocation.apk",
+                                "/system/priv-app/FusedLocation",
+                                "/system/priv-app/FusedLocation/FusedLocation.apk");
+    bool have_sysui = CopyAppAt(dfd, "dshsysapp/SystemUI.apk",
+                                "/system_ext/priv-app/SystemUI",
+                                "/system_ext/priv-app/SystemUI/SystemUI.apk");
     if (have_fused && have_sysui) return;
 
-    // Fallback for a build without debug-init staging (or a missing APK there).
+    // Fallback: the card itself.  Normally EBUSY (errno 16) here, because the
+    // kmsg follower keeps a second mount namespace holding the FAT superblock.
     if (!MountCardBoot(boot, sizeof(boot))) return;
     if (!have_fused) {
-        CopyAppFromCard(boot, "/FusedLocation.apk", "/system/priv-app/FusedLocation",
-                        "/system/priv-app/FusedLocation/FusedLocation.apk");
+        CopyAppAt(-1, "/mnt/dshboot/FusedLocation.apk", "/system/priv-app/FusedLocation",
+                  "/system/priv-app/FusedLocation/FusedLocation.apk");
     }
     if (!have_sysui) {
-        CopyAppFromCard(boot, "/SystemUI.apk", "/system_ext/priv-app/SystemUI",
-                        "/system_ext/priv-app/SystemUI/SystemUI.apk");
+        CopyAppAt(-1, "/mnt/dshboot/SystemUI.apk", "/system_ext/priv-app/SystemUI",
+                  "/system_ext/priv-app/SystemUI/SystemUI.apk");
     }
     umount(boot);
 }
