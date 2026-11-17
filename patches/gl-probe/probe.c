@@ -1,60 +1,56 @@
-﻿/*
- * dsh-glprobe -- is SwiftShader itself broken on this SoC, or is it our
- * gralloc/EGLImage path?
+/*
+ * dsh-glprobe -- which half of the graphics stack is broken on this SoC?
  *
- * Boot 35526bea is the first one where anything ever asked SurfaceFlinger to
- * composite a layer (SystemUI's keyguard finally started, because sd92 granted
- * it READ_CONTACTS). The screen then went black because SurfaceFlinger dies
- * deterministically in the same place, eight times in a row:
+ * Boot d9d8722a is the second boot in which anything asks SurfaceFlinger to
+ * composite (SystemUI's keyguard starts now that sd92 granted it READ_CONTACTS),
+ * and the screen stays black because two *independent* things die:
  *
- *   F libc : Fatal signal 11 (SIGSEGV), code 2 (SEGV_ACCERR), fault addr ...
- *            in tid 1358 (surfaceflinger), pid 932 (surfaceflinger)
- *   F DEBUG: #00 pc 000000000000034c  <anonymous:f265bb3af000>
- *   F DEBUG: #01 pc 00000000003b31d4  /vendor/lib64/egl/libGLESv2_swiftshader.so
- *            (sw::Renderer::executeTask(int)+324)
+ *   1. SurfaceFlinger, in SwiftShader's renderer thread, nine times:
+ *        F libc : Fatal signal 11 (SIGSEGV), code 2 (SEGV_ACCERR),
+ *                 fault addr 0xeba9adad2000 (page-aligned) / 0xe246ebc86a04
+ *        #00 pc 0x34c  <anonymous:f265bb3af000>
+ *        #01 pc 0x3b31d4 /vendor/lib64/egl/libGLESv2_swiftshader.so
+ *                       (sw::Renderer::executeTask(int)+324)
+ *   2. composer@2.1-service, right after SF dies:
+ *        #00 HwcHalImpl<...>::vsyncHook(void*, unsigned long, long)+4
+ *        #01 VSyncWorker::Routine()+324   (hwcomposer.drm_minigbm.so)
+ *        fault addr 0x0, x0 = 0, "Cause: null pointer dereference"
+ *      The vendor HWC delivered a vsync with callbackData == NULL. Its own
+ *      source (external/drm_hwcomposer/drm/vsyncworker.cpp:188) guards
+ *      `if (callback)`, so this is the *registered* hook being invoked after the
+ *      composer dropped it -- a consequence of SF dying first, not the cause.
  *
- * and the renderer is SwiftShader, not a GPU driver:
+ * sd93's first run settled half of (1): steps 1-3 below all pass on the
+ * hardware, exit=0. EGL initialises, a pbuffer clears and reads back red, the
+ * shaders compile, and a triangle goes through the very executeTask path SF
+ * dies in. So SwiftShader is not simply broken; what SF does that those steps
+ * do not is:
  *
- *   I RenderEngine: renderer  : Google SwiftShader
- *   I RenderEngine: version   : OpenGL ES 3.0 SwiftShader 4.1.0.7
+ *   * use EGL_KHR_fence_sync (SF waits on fences between layers);
+ *   * run several contexts and renderer tasks at the same time (SF's
+ *     RenderEngine feeds SwiftShader's marl fibers from several threads);
+ *   * churn the JIT -- SF builds a program per shader family, draws, deletes;
+ *   * hand SwiftShader *gralloc* buffers as FBO attachments and as textures.
  *
- * SEGV_ACCERR at a data address while running JIT code has two very different
- * explanations, and they need opposite fixes:
+ * The first three are cheap to imitate here; the fourth needs libandroid's
+ * AHardwareBuffer or libgui's GraphicBuffer, and neither has a vendor variant
+ * in this tree (soong: "dependency libandroid of dsh-glprobe missing variant"),
+ * which is recorded in docs/HANDOVER.md. Steps 4-6 below therefore test
+ * threading, fences and JIT churn, and the note at the end says what is still
+ * untested and how to test it.
  *
- *   (a) SwiftShader's own renderer/JIT is broken here -- its fibers need a
- *       stack, its JIT needs executable memory, and ARMv8 cache maintenance
- *       must actually work. Then the fix is a different GL backend (Mesa's
- *       panfrost on the real Mali-G31) or a different SwiftShader build.
- *   (b) SwiftShader is fine and the memory handed to it through
- *       EGL_ANDROID_image_native_buffer / minigbm is not writable or not
- *       mapped the way it assumes. Then the fix is in gralloc.minigbm.
+ * Every step prints before doing it, so the last line of live-gl-probe.txt
+ * names the killer; the exit code says whether the process survived at all.
  *
- * So this probe walks the stack in the cheapest possible order and prints
- * every step before doing it, so the last line of live-gl-probe.txt is the
- * step that killed it:
- *
- *   1. eglInitialize / eglQueryString           (no buffers involved at all)
- *   2. pbuffer + context + glClear + readback   (SwiftShader draws into its
- *                                                own memory, no gralloc)
- *   3. a real shader program + a triangle       (forces JIT compilation and
- *                                                the executeTask path that
- *                                                crashes SF)
- *   4. the same shader into an FBO whose colour attachment is a GRALLOC
- *      buffer imported as an EGLImage            (only if 1-3 pass)
- *
- * Step 4 is deliberately last: it is the only one that can blame gralloc, so
- * its outcome only matters once 1-3 are known good.
- *
- * Run by the live snapshot (patches/patch-live-snapshot.py) as
- *   timeout 20 /vendor/bin/hw/dsh-glprobe > DEBUG/live-gl-probe.txt 2>&1
+ * Run by the live snapshot (patches/patch-live-snapshot.py):
+ *   timeout 25 /vendor/bin/hw/dsh-glprobe > DEBUG/live-gl-probe.txt 2>&1
  */
 
-#include <fcntl.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include <EGL/egl.h>
@@ -104,43 +100,51 @@ static const char* gl_str(GLenum name) {
 static const char kVert[] =
     "attribute vec2 pos;\n"
     "void main() { gl_Position = vec4(pos, 0.0, 1.0); }\n";
-static const char kFrag[] =
+
+/* A plain fill program and a texture-reading one, so step 6 can build two
+ * different shader families the way SF's RenderEngine does. */
+static const char kFill[] =
     "precision mediump float;\n"
-    "void main() { gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+    "uniform vec4 color;\n"
+    "void main() { gl_FragColor = color; }\n";
+static const char kShade[] =
+    "precision mediump float;\n"
+    "varying vec2 v;\n"
+    "void main() { gl_FragColor = vec4(v.x, v.y, 0.5, 1.0); }\n";
 
-/* Compile the two shaders, draw one triangle, return the centre pixel. */
-static int draw_triangle(int size, unsigned char out[4]) {
-    GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-    const GLchar* src;
-    if (!vs || !fs) {
-        say("    FAILED: glCreateShader returned 0 (err 0x%x)", glGetError());
-        return -1;
-    }
-    src = kVert;
-    glShaderSource(vs, 1, &src, NULL);
-    src = kFrag;
-    glShaderSource(fs, 1, &src, NULL);
-    glCompileShader(vs);
-    glCompileShader(fs);
-
+static GLuint compile(GLenum type, const char* src, const char* what) {
+    GLuint s = glCreateShader(type);
     GLint ok = 0;
-    glGetShaderiv(vs, GL_COMPILE_STATUS, &ok);
-    say("    vertex shader compiled=%d", ok);
-    glGetShaderiv(fs, GL_COMPILE_STATUS, &ok);
-    say("    fragment shader compiled=%d", ok);
+    if (!s) {
+        FAIL("glCreateShader(%s) returned 0", what);
+        return 0;
+    }
+    glShaderSource(s, 1, (const GLchar* const*)&src, NULL);
+    glCompileShader(s);
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) FAIL("%s shader did not compile (0x%x)", what, glGetError());
+    return ok ? s : 0;
+}
 
-    GLuint prog = glCreateProgram();
+static GLuint make_program(const char* frag, const char* vs_src) {
+    GLuint vs = compile(GL_VERTEX_SHADER, vs_src, "vertex");
+    GLuint fs = compile(GL_FRAGMENT_SHADER, frag, "fragment");
+    GLuint prog;
+    GLint ok = 0;
+    if (!vs || !fs) return 0;
+    prog = glCreateProgram();
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
     glBindAttribLocation(prog, 0, "pos");
     glLinkProgram(prog);
     glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-    say("    program linked=%d (err 0x%x)", ok, glGetError());
-    if (!ok) return -1;
-    glUseProgram(prog);
+    if (!ok) say("    program linked=%d (err 0x%x)", ok, glGetError());
+    return ok ? prog : 0;
+}
 
+static void draw_tri(GLuint prog, int size) {
     static const GLfloat tri[] = { -0.8f, -0.8f, 0.8f, -0.8f, 0.0f, 0.8f };
+    glUseProgram(prog);
     glViewport(0, 0, size, size);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, tri);
     glEnableVertexAttribArray(0);
@@ -148,23 +152,64 @@ static int draw_triangle(int size, unsigned char out[4]) {
     glClear(GL_COLOR_BUFFER_BIT);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glFinish();
-    say("    glDrawArrays + glFinish survived");
-
-    memset(out, 0, 4);
-    glReadPixels(size / 2, size / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
-    say("    centre pixel = %02x %02x %02x %02x (want green 00 ff 00 ff)",
-        out[0], out[1], out[2], out[3]);
-    return 0;
 }
 
+/* ---------------------------------------------------------------- step 5 */
+
+struct thread_arg {
+    EGLDisplay dpy;
+    EGLConfig cfg;
+    int draws;
+    int ok;
+};
+
+static void* draw_thread(void* p) {
+    struct thread_arg* a = (struct thread_arg*)p;
+    const EGLint pb[] = { EGL_WIDTH, 64, EGL_HEIGHT, 64, EGL_NONE };
+    const EGLint ca[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+    EGLSurface s;
+    EGLContext c;
+    GLuint prog;
+    int i;
+
+    eglBindAPI(EGL_OPENGL_ES_API);
+    s = eglCreatePbufferSurface(a->dpy, a->cfg, pb);
+    c = eglCreateContext(a->dpy, a->cfg, EGL_NO_CONTEXT, ca);
+    if (s == EGL_NO_SURFACE || c == EGL_NO_CONTEXT ||
+        !eglMakeCurrent(a->dpy, s, s, c)) {
+        say("    thread: surface=%p ctx=%p makeCurrent failed (err %s)",
+            (void*)s, (void*)c, egl_err());
+        return NULL;
+    }
+    prog = make_program(kFill, kVert);
+    if (!prog) return NULL;
+    glUniform4f(glGetUniformLocation(prog, "color"), 0.0f, 1.0f, 0.0f, 1.0f);
+    for (i = 0; i < a->draws; i++) draw_tri(prog, 64);
+    a->ok = 1;
+    say("    thread: %d draws survived", a->draws);
+    eglMakeCurrent(a->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(a->dpy, c);
+    eglDestroySurface(a->dpy, s);
+    return NULL;
+}
+
+/* ---------------------------------------------------------------- main */
+
 int main(void) {
+    EGLDisplay dpy;
+    EGLConfig cfg = NULL;
+    EGLSurface surf = EGL_NO_SURFACE;
+    EGLContext ctx = EGL_NO_CONTEXT;
+    GLuint prog;
+    unsigned char px[4];
+    EGLint vmaj = 0, vmin = 0, n = 0;
+
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     STEP(1, "eglInitialize and eglQueryString (no buffers, no gralloc)");
-    EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     say("    eglGetDisplay = %p (err %s)", (void*)dpy, egl_err());
     if (dpy == EGL_NO_DISPLAY) return 1;
-    EGLint vmaj = 0, vmin = 0;
     if (!eglInitialize(dpy, &vmaj, &vmin)) {
         FAIL("eglInitialize (err %s)", egl_err());
         return 1;
@@ -172,41 +217,45 @@ int main(void) {
     OK("EGL %d.%d", vmaj, vmin);
     say("    vendor  = %s", eglQueryString(dpy, EGL_VENDOR));
     say("    version = %s", eglQueryString(dpy, EGL_VERSION));
-    say("    client APIs = %s", eglQueryString(dpy, EGL_CLIENT_APIS));
-    say("    extensions = %s", eglQueryString(dpy, EGL_EXTENSIONS));
+    /* Client extensions are only reported for EGL_NO_DISPLAY; the native-buffer
+     * ones live there, which is why they looked absent in the sd93 run. */
+    say("    client extensions = %s",
+        eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS));
 
     STEP(2, "pbuffer + context + glClear + glReadPixels");
-    const EGLint cfg_attr[] = {
-        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
-        EGL_NONE,
-    };
-    EGLConfig cfg = NULL;
-    EGLint n = 0;
-    if (!eglChooseConfig(dpy, cfg_attr, &cfg, 1, &n) || n < 1) {
-        FAIL("eglChooseConfig (n=%d err %s)", n, egl_err());
-        return 1;
+    {
+        const EGLint cfg_attr[] = {
+            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+            EGL_NONE,
+        };
+        if (!eglChooseConfig(dpy, cfg_attr, &cfg, 1, &n) || n < 1) {
+            FAIL("eglChooseConfig (n=%d err %s)", n, egl_err());
+            return 1;
+        }
     }
     OK("config %p", (void*)cfg);
-    const EGLint pb_attr[] = { EGL_WIDTH, 64, EGL_HEIGHT, 64, EGL_NONE };
-    EGLSurface surf = eglCreatePbufferSurface(dpy, cfg, pb_attr);
-    if (surf == EGL_NO_SURFACE) {
-        FAIL("eglCreatePbufferSurface (err %s)", egl_err());
-        return 1;
-    }
-    OK("pbuffer %p", (void*)surf);
-    eglBindAPI(EGL_OPENGL_ES_API);
-    const EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-    EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctx_attr);
-    if (ctx == EGL_NO_CONTEXT) {
-        FAIL("eglCreateContext (err %s)", egl_err());
-        return 1;
-    }
-    OK("context %p", (void*)ctx);
-    if (!eglMakeCurrent(dpy, surf, surf, ctx)) {
-        FAIL("eglMakeCurrent (err %s)", egl_err());
-        return 1;
+    {
+        const EGLint pb_attr[] = { EGL_WIDTH, 64, EGL_HEIGHT, 64, EGL_NONE };
+        const EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+        surf = eglCreatePbufferSurface(dpy, cfg, pb_attr);
+        if (surf == EGL_NO_SURFACE) {
+            FAIL("eglCreatePbufferSurface (err %s)", egl_err());
+            return 1;
+        }
+        OK("pbuffer %p", (void*)surf);
+        eglBindAPI(EGL_OPENGL_ES_API);
+        ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctx_attr);
+        if (ctx == EGL_NO_CONTEXT) {
+            FAIL("eglCreateContext (err %s)", egl_err());
+            return 1;
+        }
+        OK("context %p", (void*)ctx);
+        if (!eglMakeCurrent(dpy, surf, surf, ctx)) {
+            FAIL("eglMakeCurrent (err %s)", egl_err());
+            return 1;
+        }
     }
     OK("current");
     say("    GL_VENDOR   = %s", gl_str(GL_VENDOR));
@@ -216,29 +265,133 @@ int main(void) {
     glClear(GL_COLOR_BUFFER_BIT);
     glFinish();
     say("    after glClear+glFinish (process alive)");
-    unsigned char px[4] = { 0, 0, 0, 0 };
     glReadPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
     say("    pixel = %02x %02x %02x %02x (want red ff 00 00 ff)",
         px[0], px[1], px[2], px[3]);
 
-    STEP(3, "shader program + triangle (this is the executeTask path SF dies in)");
-    if (draw_triangle(64, px) != 0) {
-        FAIL("triangle");
+    STEP(3, "shader program + triangle (the executeTask path SF dies in)");
+    prog = make_program(kFill, kVert);
+    if (!prog) {
+        FAIL("triangle program");
         return 1;
     }
+    glUniform4f(glGetUniformLocation(prog, "color"), 0.0f, 1.0f, 0.0f, 1.0f);
+    draw_tri(prog, 64);
+    say("    glDrawArrays + glFinish survived");
+    memset(px, 0, 4);
+    glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    say("    centre pixel = %02x %02x %02x %02x (want green 00 ff 00 ff)",
+        px[0], px[1], px[2], px[3]);
     OK("triangle drawn and read back");
 
-    STEP(4, "same triangle into an FBO backed by a minigbm graphic buffer");
-    /*
-     * Deliberately NOT implemented yet: it needs gralloc.minigbm's
-     * get_handle() layout and an EGLImage import, and there is no point
-     * writing that until steps 1-3 are known to survive on the hardware.
-     * The snapshot prints this line so the next dump says which question is
-     * still open.
-     */
-    say("    skipped: run this step only if steps 1-3 passed");
+    /* ------------------------------------------------ step 4: fence sync */
+    STEP(4, "EGL_KHR_fence_sync, the mechanism SF uses between layers");
+    {
+        PFNEGLCREATESYNCKHRPROC create_sync =
+            (PFNEGLCREATESYNCKHRPROC)eglGetProcAddress("eglCreateSyncKHR");
+        PFNEGLCLIENTWAITSYNCKHRPROC wait_sync =
+            (PFNEGLCLIENTWAITSYNCKHRPROC)eglGetProcAddress("eglClientWaitSyncKHR");
+        PFNEGLDESTROYSYNCKHRPROC destroy_sync =
+            (PFNEGLDESTROYSYNCKHRPROC)eglGetProcAddress("eglDestroySyncKHR");
+        if (!create_sync || !wait_sync || !destroy_sync) {
+            FAIL("fence entry points missing (%p %p %p)", (void*)create_sync,
+                 (void*)wait_sync, (void*)destroy_sync);
+        } else {
+            int i;
+            for (i = 0; i < 20; i++) {
+                EGLSyncKHR sync = create_sync(dpy, EGL_SYNC_FENCE_KHR, NULL);
+                if (sync == EGL_NO_SYNC_KHR) {
+                    FAIL("eglCreateSyncKHR #%d (err %s)", i, egl_err());
+                    return 1;
+                }
+                glFlush();
+                if (wait_sync(dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR,
+                              1000000) == EGL_TIMEOUT_EXPIRED_KHR) {
+                    FAIL("fence #%d timed out", i);
+                    destroy_sync(dpy, sync);
+                    return 1;
+                }
+                destroy_sync(dpy, sync);
+            }
+            OK("20 fences created, flushed and waited");
+        }
+    }
+
+    /* ------------------------------------------------ step 5: two threads */
+    STEP(5, "two threads, two contexts, 200 triangles each (SF's renderer is MT)");
+    {
+        pthread_t t1, t2;
+        struct thread_arg a1, a2;
+        memset(&a1, 0, sizeof(a1));
+        memset(&a2, 0, sizeof(a2));
+        a1.dpy = a2.dpy = dpy;
+        a1.cfg = a2.cfg = cfg;
+        a1.draws = a2.draws = 200;
+        /* Release the main context first: this is the closest cheap imitation
+         * of RenderEngine handing work to SwiftShader's fibers from elsewhere. */
+        eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (pthread_create(&t1, NULL, draw_thread, &a1) != 0) {
+            FAIL("pthread_create 1");
+            return 1;
+        }
+        if (pthread_create(&t2, NULL, draw_thread, &a2) != 0) {
+            FAIL("pthread_create 2");
+            return 1;
+        }
+        pthread_join(t1, NULL);
+        pthread_join(t2, NULL);
+        say("    thread results: %d / %d (both must be 1)", a1.ok, a2.ok);
+        if (!a1.ok || !a2.ok) {
+            FAIL("a thread did not finish");
+            return 1;
+        }
+        OK("step 5 survived");
+    }
+
+    /* ------------------------------------------------ step 6: JIT churn */
+    STEP(6, "8 fresh contexts, alternating two shader families (JIT churn)");
+    {
+        const char* frags[2];
+        int c;
+        frags[0] = kFill;
+        frags[1] = kShade;
+        for (c = 0; c < 8; c++) {
+            const EGLint pb[] = { EGL_WIDTH, 32, EGL_HEIGHT, 32, EGL_NONE };
+            const EGLint ca[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+            EGLSurface s = eglCreatePbufferSurface(dpy, cfg, pb);
+            EGLContext k = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ca);
+            GLuint p;
+            int d;
+            if (s == EGL_NO_SURFACE || k == EGL_NO_CONTEXT ||
+                !eglMakeCurrent(dpy, s, s, k)) {
+                FAIL("context %d (surface %p ctx %p err %s)", c, (void*)s,
+                     (void*)k, egl_err());
+                return 1;
+            }
+            p = make_program(frags[c % 2], kVert);
+            if (!p) {
+                FAIL("program %d", c);
+                return 1;
+            }
+            glUniform4f(glGetUniformLocation(p, "color"), 1.0f, 0.0f, 0.0f, 1.0f);
+            for (d = 0; d < 10; d++) draw_tri(p, 32);
+            say("    context %d: 10 draws ok", c);
+            glDeleteProgram(p);
+            eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(dpy, k);
+            eglDestroySurface(dpy, s);
+        }
+        OK("step 6 survived");
+    }
+
     say("\n=== probe done, nothing crashed ===");
+    say("still untested: gralloc buffers as FBO attachments / textures. That needs");
+    say("AHardwareBuffer or GraphicBuffer, and neither has a vendor variant in this");
+    say("tree (soong: dependency libandroid of dsh-glprobe missing variant). If");
+    say("steps 4-6 all pass, the minigbm import path is the remaining suspect.");
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (ctx != EGL_NO_CONTEXT) eglDestroyContext(dpy, ctx);
+    if (surf != EGL_NO_SURFACE) eglDestroySurface(dpy, surf);
     eglTerminate(dpy);
     return 0;
 }

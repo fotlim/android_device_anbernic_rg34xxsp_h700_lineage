@@ -1,4 +1,4 @@
-cc_binary {
+﻿cc_binary {
     name: "dsh-glprobe",
     vendor: true,
     relative_install_path: "hw",

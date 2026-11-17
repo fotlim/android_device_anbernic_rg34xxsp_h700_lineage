@@ -234,7 +234,7 @@ echo "exit=$?" >> $CARD/DEBUG/live-hwc-probe.txt
 # sw::Renderer::executeTask(int)+324 the first time it composites a layer, and
 # the probe walks the stack in the order that separates the two causes. 20 s:
 # the JIT compile of the two shaders is the slow part on a Cortex-A53.
-timeout 20 /vendor/bin/hw/dsh-glprobe > $CARD/DEBUG/live-gl-probe.txt 2>&1
+timeout 25 /vendor/bin/hw/dsh-glprobe > $CARD/DEBUG/live-gl-probe.txt 2>&1
 echo "exit=$?" >> $CARD/DEBUG/live-gl-probe.txt
 timeout 5 /vendor/bin/hw/android.hardware.graphics.composer@2.1-service > $CARD/DEBUG/live-hwc21-run.txt 2>&1
 echo "exit=$?" >> $CARD/DEBUG/live-hwc21-run.txt
