@@ -49,6 +49,16 @@ the switch.  sd90 opens the staged APKs with `openat(dfd, ...)` instead of by
 path, which is exactly how PublishRamdiskFstab and the vendor-overlay copies
 already reach the ramdisk.
 
+sd91: with both APKs finally in place (boot 2cc41b35: two `sysapp: copied ...
+ok` lines, and the location crash gone), PackageManagerService then refused
+SystemUI -- `Signature|privileged permissions not in privapp-permissions
+whitelist`, six system_server retries.  The allowlist
+`system_ext/etc/permissions/com.android.systemui.xml` exists in the build but
+the card's system_ext image predates SystemUI, so this patch publishes it too,
+through an overlay of /system_ext/etc.  patches/patch-privapp-log.py adds the
+matching `ro.control_privapp_permissions=log` so a gap in that XML cannot abort
+the boot again.
+
 Both apps are carried on the card now, because they both have to be there:
 
   * SystemUI      -> /system_ext/priv-app/SystemUI/SystemUI.apk  (handheld_system_ext.mk)
@@ -200,12 +210,20 @@ void PublishSystemApp(int dfd) {
         pubnote("sysapp: overlay of /system_ext/priv-app failed");
         return;
     }
+    // sd91: the privapp allowlist has to land in /system_ext/etc/permissions too.
+    if (!OverlayDir("/system_ext/etc", "/dev/sysextetc_upper", "/dev/sysextetc_work")) {
+        pubnote("sysapp: overlay of /system_ext/etc failed");
+        return;
+    }
     chmod("/system/priv-app", 0755);
     chmod("/dev/sysapp_upper", 0755);
     chmod("/dev/sysapp_work", 0755);
     chmod("/system_ext/priv-app", 0755);
     chmod("/dev/sysext_upper", 0755);
     chmod("/dev/sysext_work", 0755);
+    chmod("/system_ext/etc", 0755);
+    chmod("/dev/sysextetc_upper", 0755);
+    chmod("/dev/sysextetc_work", 0755);
 
     char boot[64];
 
@@ -218,7 +236,15 @@ void PublishSystemApp(int dfd) {
     bool have_sysui = CopyAppAt(dfd, "dshsysapp/SystemUI.apk",
                                 "/system_ext/priv-app/SystemUI",
                                 "/system_ext/priv-app/SystemUI/SystemUI.apk");
-    if (have_fused && have_sysui) return;
+    // sd91: without this, PackageManagerService refuses SystemUI outright with
+    // "Signature|privileged permissions not in privapp-permissions whitelist".
+    // The file is in the build (system_ext/etc/permissions/com.android.systemui.xml,
+    // 4,434 B) but the card's system_ext image predates SystemUI, so it is not
+    // on the device.
+    bool have_allowlist = CopyAppAt(dfd, "dshsysapp/com.android.systemui.xml",
+                                    "/system_ext/etc/permissions",
+                                    "/system_ext/etc/permissions/com.android.systemui.xml");
+    if (have_fused && have_sysui && have_allowlist) return;
 
     // Fallback: the card itself.  Normally EBUSY (errno 16) here, because the
     // kmsg follower keeps a second mount namespace holding the FAT superblock.
@@ -230,6 +256,10 @@ void PublishSystemApp(int dfd) {
     if (!have_sysui) {
         CopyAppAt(-1, "/mnt/dshboot/SystemUI.apk", "/system_ext/priv-app/SystemUI",
                   "/system_ext/priv-app/SystemUI/SystemUI.apk");
+    }
+    if (!have_allowlist) {
+        CopyAppAt(-1, "/mnt/dshboot/com.android.systemui.xml", "/system_ext/etc/permissions",
+                  "/system_ext/etc/permissions/com.android.systemui.xml");
     }
     umount(boot);
 }

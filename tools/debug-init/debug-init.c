@@ -2310,7 +2310,8 @@ static void ramoops_marker(FILE *m)
  */
 static int stage_system_apps(void)
 {
-	static const char *const names[] = { "SystemUI.apk", "FusedLocation.apk" };
+	static const char *const names[] = { "SystemUI.apk", "FusedLocation.apk",
+					    "com.android.systemui.xml" };
 	char buf[65536];
 	int files = 0;
 	size_t i;
@@ -2351,7 +2352,7 @@ static int stage_system_apps(void)
 		say("dshsysapp: staged %s -> %s (%zu bytes)\n", src, dst, total);
 		files++;
 	}
-	say("dshsysapp: %d app(s) staged for the first stage\n", files);
+	say("dshsysapp: %d file(s) staged for the first stage\n", files);
 	return files;
 }
 
