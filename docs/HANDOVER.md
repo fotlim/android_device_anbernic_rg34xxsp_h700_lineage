@@ -34,9 +34,14 @@
 > `dumpsys activity activities`）和手动跑 `bootanimation` 的
 > `live-bootanim-run.txt` / `live-bootanim-log.txt`，把动画线程的死因留证。
 >
-> **状态**：补丁已提交 `6fed25f`，**尚未编译** —— WSL 被另一个项目占用，
-> `ext4.vhdx` 报 `ERROR_SHARING_VIOLATION`，按约定没有执行 `wsl --shutdown`。
-> WSL 空闲后：`dsh_step1.sh` → `dsh_pack.sh` → 写卡。
+> **已上卡（sd85）**：WSL 17:40 释放后重编一次通过。
+> `G:\initrd.img` 1,482,154 B sha256 `68fef9e0…`；`init.android` 2,164,280 B `38ee3ec0…`；
+> `G:\Image` 保持 sd83 `fa57280f…`。补丁链 1758 行、字节可复现。
+> 上一卡证据归档在 `F:\rg34xxsp\debug-archive-96c20bd0\`（40 个文件）。
+>
+> **下一卡先看**：`live-props.txt` 的 `sys.boot_completed` 是否第一次出现 1；
+> `live-home-state.txt` 的 `resolve-activity` 结果（HOME 到底能不能解析）；
+> `live-bootanim-run.txt` / `live-bootanim-log.txt`（动画线程当初为什么死）。
 >
 > **另一个风险**：`E WindowManager: No home screen found for Intent {act=MAIN cat=[HOME]}`。
 > `com.android.launcher3` 的包在，但 HOME 解析失败；`live-home-state.txt` 会给真实结果，
