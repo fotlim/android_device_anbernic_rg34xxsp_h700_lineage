@@ -261,6 +261,18 @@ getprop > $CARD/DEBUG/live-allprops-late.txt 2>>$LOG
 ps -A 2>/dev/null | grep -E 'systemui|launcher|system_server|surfaceflinger' > $CARD/DEBUG/live-ps-late.txt 2>>$LOG
 timeout 12 dumpsys window > $CARD/DEBUG/live-window-late.txt 2>&1
 timeout 12 dumpsys SurfaceFlinger > $CARD/DEBUG/live-sf-late.txt 2>&1
+# sd101: the boot never finishes even though the display is ready and the decor
+# windows are drawn. DisplayContent.shouldWaitForSystemDecorWindowsOnBoot() has
+#     if (!mWmService.mSystemBooted && !haveBootMsg) return true;
+# so a TYPE_BOOT_PROGRESS window must exist while mSystemBooted is still false.
+# `debug.sf.nobootanimation=1` may have removed exactly that window. Capture the
+# wakefulness and the policy state so the next card answers it directly.
+timeout 12 dumpsys power > $CARD/DEBUG/live-power-late.txt 2>&1
+{ echo "===== boot-progress / animation windows ====="
+  timeout 12 dumpsys window windows 2>/dev/null | grep -E 'Window #|Boot|boot|mSystemBooted|mAwake|mShowingBootMessages|Splash'
+  echo "===== window policy wakefulness ====="
+  timeout 12 dumpsys window policy 2>/dev/null | grep -E 'mAwake|mScreenOn|mSystemBooted|mShowingBootMessages|mKeyguardDrawComplete|mWindowManagerDrawComplete'
+} > $CARD/DEBUG/live-bootwin-late.txt 2>&1
 sync
 echo "snapshot: wrote $(ls $CARD/DEBUG/live-* 2>/dev/null | wc -l) files" >> $LOG
 umount $CARD 2>>$LOG
