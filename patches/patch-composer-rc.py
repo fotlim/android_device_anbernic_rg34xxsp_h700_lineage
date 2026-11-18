@@ -42,7 +42,7 @@ const char kComposer21Rc[] =
     "service vendor.hwcomposer-2-1 /vendor/bin/hw/android.hardware.graphics.composer@2.1-service\n"
     "    interface android.hardware.graphics.composer@2.1::IComposer default\n"
     "    class hal animation\n"
-    "    user system\n"
+    "    user root\n"
     "    group graphics drmrpc\n"
     "    capabilities SYS_NICE\n"
     "    onrestart restart surfaceflinger\n";
@@ -79,7 +79,15 @@ with open(PATH, encoding="utf-8") as f:
     text = f.read()
 
 if "kComposer21Rc" in text:
-    print("already patched (composer 2.1 rc is published), nothing to do")
+    # Already inserted: regenerate the consts so edits here take effect (sd107
+    # needed `user system` -> `user root`). The block starts at its marker and
+    # ends where the function it precedes begins.
+    start = text.index("// sd75: SurfaceFlinger is a composer@2.1 client")
+    stop = text.index(FUNC_ANCHOR)
+    text = text[:start] + CONSTS + text[stop:]
+    with open(PATH, "w", encoding="utf-8") as f:
+        f.write(text)
+    print("regenerated composer rc consts in", PATH)
     sys.exit(0)
 
 if FUNC_ANCHOR not in text:

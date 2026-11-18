@@ -72,6 +72,22 @@ static const char kMesaRc[] =
     "    write /sys/class/vtconsole/vtcon3/bind 0\n"
     "\n";
 
+// sd107: the minigbm allocator opens card1 first, so the kernel makes it the
+// DRM master. patches/patch-gralloc-drop-master.py makes it drop that right
+// after open, but drmDropMaster() needs CAP_SYS_ADMIN and the stock rc runs it
+// as `system`, so the drop is refused and master stays taken -- the composer's
+// drmSetMaster() then gets EBUSY forever and every atomic commit is -EACCES.
+// Running the allocator as root lets the drop succeed.
+static const char kAllocatorRc[] =
+    "service vendor.graphics.allocator-4-0 /vendor/bin/hw/android.hardware.graphics.allocator@4.0-service.minigbm\n"
+    "    interface android.hardware.graphics.allocator@4.0::IAllocator default\n"
+    "    class hal animation\n"
+    "    user root\n"
+    "    group graphics drmrpc\n"
+    "    capabilities SYS_NICE\n"
+    "    onrestart restart surfaceflinger\n"
+    "    writepid /dev/cpuset/system-background/tasks\n";
+
 void PublishMesa(int dfd) {
     // Self-diagnosis: show what the ramdisk really holds before copying.
     {
@@ -174,7 +190,9 @@ else:
 # The rc that exports LIBGL_DRIVERS_PATH has to be written somewhere the first
 # stage already writes rc files: /vendor/etc/init. PublishTextFile is declared
 # above this point.
-RC_CALL = '    PublishTextFile("/vendor/etc/init/96-mesa.rc", kMesaRc, 0644);\n'
+RC_CALL = ('    PublishTextFile("/vendor/etc/init/96-mesa.rc", kMesaRc, 0644);\n'
+           '    PublishTextFile("/vendor/etc/init/android.hardware.graphics.allocator@4.0-service.minigbm.rc",\n'
+           '                    kAllocatorRc, 0644);\n')
 if RC_CALL not in text:
     text = text.replace("    pubnote(\"mesa: rc exporting LIBGL_DRIVERS_PATH\");\n",
                         "    pubnote(\"mesa: rc exporting LIBGL_DRIVERS_PATH\");\n" + RC_CALL, 1)
