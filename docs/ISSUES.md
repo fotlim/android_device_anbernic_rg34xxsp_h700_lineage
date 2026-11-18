@@ -109,6 +109,7 @@
 | I-工具-08 | PowerShell 写中文/多行文件被 ANSI 或数组展平搞坏 | `HANDOVER.md` 曾被压成一行；`.ps1` 里中文引号报错 | PS 5.1 默认 ANSI；`Set-Content -NoNewline` 对数组行为特殊 | 用 Python `io.open(..., encoding="utf-8", newline="\\n")` 写；或 `[System.IO.File]::WriteAllLines` + UTF8 无 BOM | ✅ 已解决 | — |
 | I-工具-09 | initrd 里的新子目录文件在 first stage 报 `missing (dirfd=4 errno=2)` | `dd077509`：`vendor-overlay/lib64/egl/*.so`、`lib64/dri/*.so` 全 missing，而同层 `lib64/libglapi.so` 拷成功 | `tools/make-initrd.py` 的 `build()` 只写给定条目、**不生成父目录项**；内核解包器只在父目录已存在时才建文件。`lib64/hw` 之类能work是因为它们随内核内置 initramfs 已存在 | `build()` 自动补齐缺失祖先目录（`040755`，去重、按序写） | ✅ 已解决 | sd97 二卡；`live-first-stage-publish` 应无 `missing` |
 | I-工具-10 | 工作区迁移后路径变了 | `迁移说明_20261118.md` §2.7 | 仓库从 `default-workspace\03_WSA与安卓\anbernic-rg34xxsp` 移到 `rg34xxsp开发日志\anbernic-rg34xxsp`；WSL `/root/repo` 已同步改指 | 一律走 `/root/repo`（软链）或新路径；`docs/` 内引用按新路径理解 | ✅ 已知 | — |
+| I-工具-11 | 改了 `external/drm_hwcomposer` 并 `m hwcomposer.drm_minigbm`，product 里的 .so 却没变 | `out/target/product/.../vendor/lib64/hw/hwcomposer.drm_minigbm.so` 不含新字符串，但 `out/soong/.intermediates/.../android_vendor.30_arm64_*_shared/*.so` 含 | 该模块有 **prebuilt 覆盖**（构建日志 `target Prebuilt: hwcomposer.drm_minigbm`），从 product 目录拷会拿到 prebuilt | overlay 改从 soong 中间产物拷（`grep -a "Became DRM"` 校验） | ✅ 已解决 | sd102 |
 
 ---
 
