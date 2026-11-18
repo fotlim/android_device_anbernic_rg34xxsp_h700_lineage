@@ -31,8 +31,9 @@ for p in patch-mount-data-rc.py patch-framework-logs-rc.py \
          patch-devprobe.py patch-service-rc.py patch-composer-rc.py \
          patch-disable-rescue.py patch-hwc-drm-device.py patch-wifi-stub-rc.py \
          patch-wifi-feature.py patch-wpa-supplicant-stub.py \
-         patch-system-app-overlay.py patch-skip-bootanim.py \
-         patch-privapp-log.py patch-live-snapshot.py; do
+         patch-system-app-overlay.py patch-mesa-publish.py \
+         patch-skip-bootanim.py patch-privapp-log.py \
+         patch-live-snapshot.py; do
 	if [ -f "$HERE/$p" ]; then
 		python3 "$HERE/$p" || { echo "$p: FAILED"; exit 1; }
 	fi

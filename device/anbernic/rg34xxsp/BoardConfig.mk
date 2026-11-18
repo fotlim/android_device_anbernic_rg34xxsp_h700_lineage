@@ -45,6 +45,28 @@ TARGET_SUPPORTS_32_BIT_APPS := true
 TARGET_BOARD_PLATFORM := sun50i_h700
 TARGET_BOOTLOADER_BOARD_NAME := sun50i_h700
 
+# ---------------------------------------------------------------------------
+# 图形后端：mesa + panfrost（2026-11-18，sd97）
+# ---------------------------------------------------------------------------
+# 背景：SwiftShader 这条临时后端在 boot bbb58a26 上被证明**采样不了 minigbm 的
+# dma-buf 缓冲区**（自建探针：往 gralloc 里渲染正确，采样同一块纹理读回全黑，
+# CPU 写过的那个直接 SIGSEGV），而 SurfaceFlinger 每帧都要采样每一层 —— 所以
+# 屏幕永远黑，SF 每次合成必崩。见 docs/ISSUES.md 的 I-图形-01/02/03。
+#
+# 这棵树里已经带了 **mesa 20.3.4**（external/mesa3d）和 src/gallium/drivers/panfrost，
+# 而且它的 Android.mk 只要 BOARD_GPU_DRIVERS 非空就会产出 libGLES_mesa。
+# 关键：mesa 20.3 对 libdrm 的要求是 **2.4.89**（meson.build 里按驱动取最高值），
+# 本树的 libdrm 是 2.4.99 —— 满足。之前 HANDOVER 里写的"必须先升到 2.4.109"
+# 是 **mesa 23** 的要求，20.3 不需要，panfrost_drm.h 也已经在
+# bionic/libc/kernel/uapi/drm/ 和 external/mesa3d/include/drm-uapi/ 里各有一份。
+#
+# 注意：mesa 的 gallium DRI 默认目录被写死成 /vendor/lib64/dri（见
+# external/mesa3d/Android.bp 的 mesa_common_defaults），所以驱动模块要落在
+# /vendor/lib64/dri，EGL 要能找到 "mesa" 后端（ro.hardware.egl=mesa）。
+BOARD_GPU_DRIVERS := panfrost
+# mesa 的 Android 胶水按这个值挑 egl/mapi 的实现（11 = Android 11）。
+MESA_ANDROID_MAJOR_VERSION := 11
+
 # No vendor bootloader lives in a partition image: U-Boot (sunxi SPL + TF-A
 # bl31) is written raw at 8 KiB into the boot medium, exactly like Anbernic's
 # stock image and ROCKNIX do it.

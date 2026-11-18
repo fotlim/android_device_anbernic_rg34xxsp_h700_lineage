@@ -130,3 +130,15 @@ PRODUCT_BUILD_PROP_OVERRIDES += \
 #
 # Revisit when moving to a newer Lineage whose matrix knows modern kernels.
 PRODUCT_OTA_ENFORCE_VINTF_KERNEL_REQUIREMENTS := false
+
+# ---------------------------------------------------------------------------
+# 图形后端（sd97）：external/mesa3d 的 Android.mk 会检查这一条
+# ---------------------------------------------------------------------------
+# 它的第一段就是：
+#
+#   ifeq ($(filter $(MESA_TOP),$(PRODUCT_SOONG_NAMESPACES)),)
+#     $(error external/mesa3d must be in PRODUCT_SOONG_NAMESPACES.)
+#
+# 也就是说，只要 BOARD_GPU_DRIVERS 非空（我们在 BoardConfig.mk 里设成 panfrost），
+# 这个命名空间就必须声明，否则 kati 在 include 阶段直接中止。
+PRODUCT_SOONG_NAMESPACES += external/mesa3d
