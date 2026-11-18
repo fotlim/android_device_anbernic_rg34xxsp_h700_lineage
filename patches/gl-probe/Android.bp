@@ -1,8 +1,15 @@
-﻿cc_binary {
+// Two graphics probes. The extension prototypes in gl2ext.h / eglext.h are
+// behind GL_GLEXT_PROTOTYPES / EGL_EGLEXT_PROTOTYPES, and neither is defined by
+// default: without them the calls are implicit declarations, and this tree
+// builds with -Werror,-Wimplicit-function-declaration.
+cc_binary {
     name: "dsh-glprobe",
     vendor: true,
     relative_install_path: "hw",
     srcs: ["probe.c"],
+    include_dirs: [
+        "frameworks/native/opengl/include",
+    ],
     shared_libs: [
         "libEGL",
         "libGLESv2",
@@ -12,5 +19,33 @@
     cflags: [
         "-Wall",
         "-Wno-unused-parameter",
+        "-DGL_GLEXT_PROTOTYPES",
+        "-DEGL_EGLEXT_PROTOTYPES",
+    ],
+}
+
+// sd95: the gralloc import test cannot be a vendor binary -- AHardwareBuffer
+// lives in libandroid and this tree has no vendor variant of it, so this one is
+// a system binary, published to /system/bin by
+// patches/patch-system-app-overlay.py and run by the live snapshot.
+cc_binary {
+    name: "dsh-glprobe2",
+    srcs: ["probe_ahb.c"],
+    // A system module does not inherit the EGL/GLES headers the way the vendor
+    // variant above does, so name the directory explicitly.
+    include_dirs: [
+        "frameworks/native/opengl/include",
+    ],
+    shared_libs: [
+        "libEGL",
+        "libGLESv2",
+        "libandroid",
+        "liblog",
+    ],
+    cflags: [
+        "-Wall",
+        "-Wno-unused-parameter",
+        "-DGL_GLEXT_PROTOTYPES",
+        "-DEGL_EGLEXT_PROTOTYPES",
     ],
 }

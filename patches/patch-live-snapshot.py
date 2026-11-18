@@ -236,6 +236,11 @@ echo "exit=$?" >> $CARD/DEBUG/live-hwc-probe.txt
 # the JIT compile of the two shaders is the slow part on a Cortex-A53.
 timeout 25 /vendor/bin/hw/dsh-glprobe > $CARD/DEBUG/live-gl-probe.txt 2>&1
 echo "exit=$?" >> $CARD/DEBUG/live-gl-probe.txt
+# sd95: the gralloc import test. /system/bin because AHardwareBuffer is in
+# libandroid and this tree has no vendor variant of it. This is the one step the
+# vendor probe could not reach, and the only remaining suspect for SF's crashes.
+timeout 25 /system/bin/dsh-glprobe2 > $CARD/DEBUG/live-ahb-probe.txt 2>&1
+echo "exit=$?" >> $CARD/DEBUG/live-ahb-probe.txt
 timeout 5 /vendor/bin/hw/android.hardware.graphics.composer@2.1-service > $CARD/DEBUG/live-hwc21-run.txt 2>&1
 echo "exit=$?" >> $CARD/DEBUG/live-hwc21-run.txt
 timeout 3 /vendor/bin/hw/android.hardware.graphics.composer@2.2-service > $CARD/DEBUG/live-hwc-run.txt 2>&1

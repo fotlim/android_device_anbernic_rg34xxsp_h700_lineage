@@ -109,8 +109,7 @@ static const char kFill[] =
     "void main() { gl_FragColor = color; }\n";
 static const char kShade[] =
     "precision mediump float;\n"
-    "varying vec2 v;\n"
-    "void main() { gl_FragColor = vec4(v.x, v.y, 0.5, 1.0); }\n";
+    "void main() { gl_FragColor = vec4(gl_FragCoord.x * 0.01, 0.2, 0.5, 1.0); }\n";
 
 static GLuint compile(GLenum type, const char* src, const char* what) {
     GLuint s = glCreateShader(type);
@@ -183,6 +182,7 @@ static void* draw_thread(void* p) {
     }
     prog = make_program(kFill, kVert);
     if (!prog) return NULL;
+    glUseProgram(prog);  /* uniforms apply to the bound program, so bind first */
     glUniform4f(glGetUniformLocation(prog, "color"), 0.0f, 1.0f, 0.0f, 1.0f);
     for (i = 0; i < a->draws; i++) draw_tri(prog, 64);
     a->ok = 1;
@@ -275,6 +275,7 @@ int main(void) {
         FAIL("triangle program");
         return 1;
     }
+    glUseProgram(prog);  /* uniforms apply to the bound program, so bind first */
     glUniform4f(glGetUniformLocation(prog, "color"), 0.0f, 1.0f, 0.0f, 1.0f);
     draw_tri(prog, 64);
     say("    glDrawArrays + glFinish survived");
@@ -373,6 +374,7 @@ int main(void) {
                 FAIL("program %d", c);
                 return 1;
             }
+            glUseProgram(p);
             glUniform4f(glGetUniformLocation(p, "color"), 1.0f, 0.0f, 0.0f, 1.0f);
             for (d = 0; d < 10; d++) draw_tri(p, 32);
             say("    context %d: 10 draws ok", c);

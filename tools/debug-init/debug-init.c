@@ -2311,7 +2311,8 @@ static void ramoops_marker(FILE *m)
 static int stage_system_apps(void)
 {
 	static const char *const names[] = { "SystemUI.apk", "FusedLocation.apk",
-					    "com.android.systemui.xml" };
+					    "com.android.systemui.xml",
+					    "dsh-glprobe2" };
 	char buf[65536];
 	int files = 0;
 	size_t i;

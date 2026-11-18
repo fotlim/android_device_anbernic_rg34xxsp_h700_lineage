@@ -244,7 +244,22 @@ void PublishSystemApp(int dfd) {
     bool have_allowlist = CopyAppAt(dfd, "dshsysapp/com.android.systemui.xml",
                                     "/system_ext/etc/permissions",
                                     "/system_ext/etc/permissions/com.android.systemui.xml");
-    if (have_fused && have_sysui && have_allowlist) return;
+    // sd95: the gralloc-import probe. It cannot be a vendor binary (AHardwareBuffer
+    // lives in libandroid, which has no vendor variant here), so it lives in
+    // /system/bin and needs an overlay of its own -- /system is read-only.
+    bool have_probe = false;
+    if (OverlayDir("/system/bin", "/dev/sysbin_upper", "/dev/sysbin_work")) {
+        chmod("/system/bin", 0755);
+        chmod("/dev/sysbin_upper", 0755);
+        chmod("/dev/sysbin_work", 0755);
+        have_probe = CopyAppAt(dfd, "dshsysapp/dsh-glprobe2", "/system/bin",
+                               "/system/bin/dsh-glprobe2");
+        // CopyAppAt leaves 0644 (files); this one has to be executable.
+        if (have_probe) chmod("/system/bin/dsh-glprobe2", 0755);
+    } else {
+        pubnote("sysapp: overlay of /system/bin failed, no glprobe2");
+    }
+    if (have_fused && have_sysui && have_allowlist && have_probe) return;
 
     // Fallback: the card itself.  Normally EBUSY (errno 16) here, because the
     // kmsg follower keeps a second mount namespace holding the FAT superblock.
@@ -260,6 +275,11 @@ void PublishSystemApp(int dfd) {
     if (!have_allowlist) {
         CopyAppAt(-1, "/mnt/dshboot/com.android.systemui.xml", "/system_ext/etc/permissions",
                   "/system_ext/etc/permissions/com.android.systemui.xml");
+    }
+    if (!have_probe) {
+        CopyAppAt(-1, "/mnt/dshboot/dsh-glprobe2", "/system/bin",
+                  "/system/bin/dsh-glprobe2");
+        chmod("/system/bin/dsh-glprobe2", 0755);
     }
     umount(boot);
 }
