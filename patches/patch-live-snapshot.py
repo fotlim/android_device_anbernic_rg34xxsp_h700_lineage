@@ -271,6 +271,8 @@ timeout 12 dumpsys power > $CARD/DEBUG/live-power-late.txt 2>&1
 # sd104: the composer's drmSetMaster() still fails EBUSY. Record who actually
 # holds DRM master and whether the fbcon is still bound.
 { echo "===== vtconsole ====="
+  mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+  echo "===== /sys/kernel/debug/dri ====="; ls -la /sys/kernel/debug/dri 2>&1
   for d in /sys/class/vtconsole/*; do
       [ -e "$d/name" ] || continue
       echo "$d name=$(cat "$d/name" 2>&1) bind=$(cat "$d/bind" 2>&1)"
@@ -307,6 +309,9 @@ timeout 12 dumpsys power > $CARD/DEBUG/live-power-late.txt 2>&1
   echo "=== fresh composer after unbind ==="
   timeout 6 /vendor/bin/hw/android.hardware.graphics.composer@2.1-service 2>&1
   echo "exit=$?"
+  echo "=== its logcat (hwc-drm / HWComposer) ==="
+  logcat -d -b all -s hwc-drm-device -s hwc-drm-two -s hwc-drm-display-compositor \
+         -s HWComposer -v threadtime 2>/dev/null | tail -20
 } > $CARD/DEBUG/live-drm-retry.txt 2>&1
 { echo "===== boot-progress / animation windows ====="
   timeout 12 dumpsys window windows 2>/dev/null | grep -E 'Window #|Boot|boot|mSystemBooted|mAwake|mShowingBootMessages|Splash'
