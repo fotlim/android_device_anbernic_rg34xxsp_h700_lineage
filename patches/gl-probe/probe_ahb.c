@@ -237,6 +237,28 @@ static GLuint image_to_texture(EGLImageKHR img, GLuint* out_fbo) {
     TRY("glEGLImageTargetTexture2DOES");
     glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)img);
     say("    bound as texture (err 0x%x)", glGetError());
+    /*
+     * sd98: an imported texture that ends up as a *mipmap* target is
+     * incomplete -- GLES then samples it as (0,0,0,1), i.e. black, without any
+     * error. The first version only set filters in some steps, so part of the
+     * "black" evidence may be this. Set them here, for every import, and print
+     * the format and completeness so the log tells us which it is.
+     */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    {
+        /* GLES2 has no glGetTexLevelParameteriv, so verify what it does expose:
+         * the filter state (an imported texture left as a mipmap target is
+         * incomplete and samples as black with no GL error) and the error flag
+         * after each step. */
+        GLint minf = 0, magf = 0;
+        glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &minf);
+        glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &magf);
+        say("    min filter 0x%x (0x2600=NEAREST OK, 0x2703=NEAREST_MIPMAP_LINEAR = incomplete),"
+            " mag 0x%x, err 0x%x", minf, magf, glGetError());
+    }
     if (out_fbo != NULL) {
         GLuint fbo = 0;
         TRY("glGenFramebuffers + attach the image");
@@ -519,6 +541,71 @@ int main(void) {
         }
         if (rc == 0) OK("step 6 survived");
         else FAIL("step 6 did not finish");
+    }
+
+    /* ------------------------------------- step 7: a buffer with NO GPU usage */
+    STEP(7, "sample a buffer allocated without any GPU usage flag (linear/dumb)");
+    {
+        AHardwareBuffer* lb =
+            make_ahb(64, 64,
+                     AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN |
+                     AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+                     "cpu-only buffer 64x64");
+        if (lb == NULL) {
+            say("    (no buffer: gralloc refused a CPU-only allocation)");
+        } else {
+            AHardwareBuffer_Desc d;
+            void* base = NULL;
+            int fd = -1;
+            int lrc;
+            uint32_t row;
+            EGLImageKHR img;
+            GLuint tex = 0;
+            GLuint prog;
+
+            AHardwareBuffer_describe(lb, &d);
+            TRY("AHardwareBuffer_lock(CPU_WRITE)");
+            lrc = AHardwareBuffer_lock(lb, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, NULL,
+                                       &base);
+            say("    lock rc=%d base=%p stride=%u", lrc, base, d.stride);
+            if (lrc != 0 || base == NULL) {
+                AHardwareBuffer_release(lb);
+                FAIL("cannot map a CPU-only buffer");
+                return 1;
+            }
+            for (row = 0; row < d.height; row++) {
+                uint32_t* line = (uint32_t*)((char*)base + (size_t)row * d.stride * 4);
+                uint32_t x;
+                for (x = 0; x < d.width; x++)
+                    line[x] = (x < d.width / 2) ? 0xff0000ffu : 0xffff0000u;
+            }
+            TRY("AHardwareBuffer_unlock");
+            AHardwareBuffer_unlock(lb, &fd);
+            if (fd >= 0) close(fd);
+
+            img = image_from_ahb(dpy, lb);
+            if (img == EGL_NO_IMAGE_KHR) {
+                say("    (this allocation cannot be imported as an EGLImage at all)");
+                AHardwareBuffer_release(lb);
+            } else {
+                tex = image_to_texture(img, NULL);
+                prog = make_program(kTex);
+                if (prog) {
+                    TRY("sample it (if this is correct, GPU-usage buffers are the problem)");
+                    draw_sampling(prog, tex, 64);
+                    memset(px, 0, 4);
+                    glReadPixels(16, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                    say("    left half  = %02x %02x %02x %02x (want red ff 00 00 ff)",
+                        px[0], px[1], px[2], px[3]);
+                    glReadPixels(48, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                    say("    right half = %02x %02x %02x %02x (want blue ff ff 00 00)",
+                        px[0], px[1], px[2], px[3]);
+                }
+                glDeleteTextures(1, &tex);
+                eglDestroyImageKHR(dpy, img);
+                AHardwareBuffer_release(lb);
+            }
+        }
     }
 
     say("\n=== probe done (rc=%d) ===", rc);
