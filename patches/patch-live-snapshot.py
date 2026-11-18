@@ -268,6 +268,46 @@ timeout 12 dumpsys SurfaceFlinger > $CARD/DEBUG/live-sf-late.txt 2>&1
 # `debug.sf.nobootanimation=1` may have removed exactly that window. Capture the
 # wakefulness and the policy state so the next card answers it directly.
 timeout 12 dumpsys power > $CARD/DEBUG/live-power-late.txt 2>&1
+# sd104: the composer's drmSetMaster() still fails EBUSY. Record who actually
+# holds DRM master and whether the fbcon is still bound.
+{ echo "===== vtconsole ====="
+  for d in /sys/class/vtconsole/*; do
+      [ -e "$d/name" ] || continue
+      echo "$d name=$(cat "$d/name" 2>&1) bind=$(cat "$d/bind" 2>&1)"
+  done
+  echo "===== fuser /dev/dri/card1 ====="
+  fuser -v /dev/dri/card1 2>&1
+  echo "===== drm clients (debugfs) ====="
+  for f in /sys/kernel/debug/dri/*/clients; do
+      [ -e "$f" ] || continue
+      echo "--- $f"; cat "$f" 2>&1
+  done
+  echo "===== drm master holders (comm) ====="
+  for f in /sys/kernel/debug/dri/*/name; do
+      [ -e "$f" ] || continue
+      echo "$f = $(cat "$f" 2>&1)"
+  done
+} > $CARD/DEBUG/live-drm-owner.txt 2>&1
+# sd104: on-card experiment. Try unbinding every vtconsole right now (we are
+# root here) and then start a fresh composer in the foreground: if it prints
+# "Became DRM master" the fix is confirmed without another flash/boot cycle; if
+# it still says EBUSY, live-drm-owner.txt already names the holder.
+{ echo "=== vtconsole names/bind before ==="
+  for i in 0 1 2 3; do
+      f=/sys/class/vtconsole/vtcon$i
+      [ -e "$f/bind" ] && echo "vtcon$i name=$(cat "$f/name" 2>&1)"
+  done
+  echo "=== unbind attempt (all vtcons) ==="
+  for i in 0 1 2 3; do
+      f=/sys/class/vtconsole/vtcon$i/bind
+      if [ -e "$f" ]; then
+          echo 0 > "$f" 2>&1 && echo "vtcon$i <- 0 ok" || echo "vtcon$i <- 0 FAILED"
+      fi
+  done
+  echo "=== fresh composer after unbind ==="
+  timeout 6 /vendor/bin/hw/android.hardware.graphics.composer@2.1-service 2>&1
+  echo "exit=$?"
+} > $CARD/DEBUG/live-drm-retry.txt 2>&1
 { echo "===== boot-progress / animation windows ====="
   timeout 12 dumpsys window windows 2>/dev/null | grep -E 'Window #|Boot|boot|mSystemBooted|mAwake|mShowingBootMessages|Splash'
   echo "===== window policy wakefulness ====="

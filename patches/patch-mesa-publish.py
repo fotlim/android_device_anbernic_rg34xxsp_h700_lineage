@@ -66,8 +66,10 @@ static const char kMesaRc[] =
     "    # Device or resource busy\") and every atomic commit is still -EACCES.\n"
     "    # Unbinding the vtconsole makes fbdev release the device. Doing it at\n"
     "    # early-init means it happens before the composer service starts.\n"
-    "    write /sys/class/vtconsole/vtcon1/bind 0\n"
     "    write /sys/class/vtconsole/vtcon0/bind 0\n"
+    "    write /sys/class/vtconsole/vtcon1/bind 0\n"
+    "    write /sys/class/vtconsole/vtcon2/bind 0\n"
+    "    write /sys/class/vtconsole/vtcon3/bind 0\n"
     "\n";
 
 void PublishMesa(int dfd) {
