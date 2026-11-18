@@ -495,11 +495,11 @@ int main(void) {
         draw_sampling(prog, tex, 64);
         TRY("glReadPixels");
         memset(px, 0, 4);
-        glReadPixels(16, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-        say("    left half  = %02x %02x %02x %02x (want red ff 00 00 ff)", px[0],
+        glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        say("    centre     = %02x %02x %02x %02x (sampled from the CPU-written buffer)", px[0],
             px[1], px[2], px[3]);
-        glReadPixels(80, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-        say("    right half = %02x %02x %02x %02x (want blue ff ff 00 00)", px[0],
+        glReadPixels(32, 20, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        say("    above      = %02x %02x %02x %02x", px[0],
             px[1], px[2], px[3]);
         glDeleteTextures(1, &tex);
         eglDestroyImageKHR(dpy, img);
@@ -594,12 +594,11 @@ int main(void) {
                     TRY("sample it (if this is correct, GPU-usage buffers are the problem)");
                     draw_sampling(prog, tex, 64);
                     memset(px, 0, 4);
-                    glReadPixels(16, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-                    say("    left half  = %02x %02x %02x %02x (want red ff 00 00 ff)",
+                    glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                    say("    centre     = %02x %02x %02x %02x (sampled from the CPU-only buffer)",
                         px[0], px[1], px[2], px[3]);
-                    glReadPixels(48, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-                    say("    right half = %02x %02x %02x %02x (want blue ff ff 00 00)",
-                        px[0], px[1], px[2], px[3]);
+                    glReadPixels(32, 20, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                    say("    above      = %02x %02x %02x %02x", px[0], px[1], px[2], px[3]);
                 }
                 glDeleteTextures(1, &tex);
                 eglDestroyImageKHR(dpy, img);
