@@ -50,6 +50,35 @@ CODE = r'''// sd97: publish mesa + panfrost into /vendor (patches/patch-mesa-pub
 // declared. Everything comes out of the initrd's vendor-overlay/, i.e. through
 // the ramdisk handle dfd -- /vendor itself is read-only and stale.
 void PublishMesa(int dfd) {
+    // sd97c: report what the ramdisk actually contains before copying. Boot
+    // 6ccdec45 turned "missing (errno=2 ENOENT)" into "missing (errno=20
+    // ENOTDIR)" once make-initrd.py started emitting parent directory entries,
+    // so *something* in the path is not a directory -- and the sibling
+    // vendor-overlay/lib64/libglapi.so still copied. Print the type of every
+    // component instead of guessing:
+    //   040755 + errno 0 = a directory, 0100644 = a regular file, errno != 0 = absent
+    {
+        static const char* kCheck[] = {
+            "vendor-overlay",
+            "vendor-overlay/lib64",
+            "vendor-overlay/lib64/hw",
+            "vendor-overlay/mesa_egl.so",
+            "vendor-overlay/mesa_glesv2.so",
+            "vendor-overlay/mesa_panfrost_dri.so",
+            "vendor-overlay/libglapi.so",
+        };
+        for (const char* p : kCheck) {
+            struct stat st;
+            int rc = fstatat(dfd, p, &st, 0);
+            if (rc == 0) {
+                pubnote("mesa: %s = mode 0%o size %lld", p, st.st_mode,
+                        static_cast<long long>(st.st_size));
+            } else {
+                pubnote("mesa: %s stat failed: %d (%s)", p, errno, strerror(errno));
+            }
+        }
+    }
+
     // /vendor/lib64 first: the overlay makes the directory writable, which is
     // what lets us create /vendor/lib64/dri inside the upper layer and then
     // mount a second overlay on top of it.
@@ -82,16 +111,22 @@ void PublishMesa(int dfd) {
     chmod("/dev/vg_dri_upper", 0755);
     chmod("/dev/vg_dri_work", 0755);
 
-    CopyAppAt(dfd, "vendor-overlay/lib64/libglapi.so", "/vendor/lib64",
+    CopyAppAt(dfd, "vendor-overlay/libglapi.so", "/vendor/lib64",
               "/vendor/lib64/libglapi.so");
-    // Mesa's libGLES_mesa.so under the swiftshader names: the loader looks up
-    // libEGL_<ro.hardware.egl>.so and ro.hardware.egl is "swiftshader".
-    CopyAppAt(dfd, "vendor-overlay/lib64/egl/libEGL_swiftshader.so", "/vendor/lib64/egl",
+    // sd97c: sources are FLAT files under vendor-overlay/. New ramdisk
+    // subdirectories (vendor-overlay/lib64/egl, .../dri) came back ENOTDIR(20)
+    // even after make-initrd.py started emitting parent directory entries,
+    // while this sibling vendor-overlay/lib64/libglapi.so copied fine, so the
+    // ramdisk is not behaving like a filesystem we control. Flat sources under
+    // an existing directory sidestep it entirely.
+    //
+    // Destinations keep the names the loader asks for: libEGL_<ro.hardware.egl>.so
+    // and <driver>_dri.so.
+    CopyAppAt(dfd, "vendor-overlay/mesa_egl.so", "/vendor/lib64/egl",
               "/vendor/lib64/egl/libEGL_swiftshader.so");
-    CopyAppAt(dfd, "vendor-overlay/lib64/egl/libGLESv2_swiftshader.so", "/vendor/lib64/egl",
+    CopyAppAt(dfd, "vendor-overlay/mesa_glesv2.so", "/vendor/lib64/egl",
               "/vendor/lib64/egl/libGLESv2_swiftshader.so");
-    // gallium_dri.so renamed to the driver name mesa will ask for.
-    CopyAppAt(dfd, "vendor-overlay/lib64/dri/panfrost_dri.so", "/vendor/lib64/dri",
+    CopyAppAt(dfd, "vendor-overlay/mesa_panfrost_dri.so", "/vendor/lib64/dri",
               "/vendor/lib64/dri/panfrost_dri.so");
 }
 
