@@ -241,6 +241,12 @@ echo "exit=$?" >> $CARD/DEBUG/live-gl-probe.txt
 # vendor probe could not reach, and the only remaining suspect for SF's crashes.
 timeout 25 /system/bin/dsh-glprobe2 > $CARD/DEBUG/live-ahb-probe.txt 2>&1
 echo "exit=$?" >> $CARD/DEBUG/live-ahb-probe.txt
+# sd96: capture logcat AGAIN, after the probes. sd95's AHB probe died with
+# exit=139 and left no backtrace anywhere, because the logcat above was copied
+# before the probe ran. This slice is where the tombstone lands -- and if it
+# shows sw::Renderer::executeTask(int) like SurfaceFlinger's own crash, the
+# attribution is airtight.
+logcat -d -b main -b system -b crash -v threadtime 2>/dev/null | tail -c 262144 > $CARD/DEBUG/live-logcat-after.txt 2>>$LOG
 timeout 5 /vendor/bin/hw/android.hardware.graphics.composer@2.1-service > $CARD/DEBUG/live-hwc21-run.txt 2>&1
 echo "exit=$?" >> $CARD/DEBUG/live-hwc21-run.txt
 timeout 3 /vendor/bin/hw/android.hardware.graphics.composer@2.2-service > $CARD/DEBUG/live-hwc-run.txt 2>&1
