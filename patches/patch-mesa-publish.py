@@ -109,6 +109,10 @@ void PublishMesa(int dfd) {
     // The gallium driver itself; found via LIBGL_DRIVERS_PATH below.
     CopyAppAt(dfd, "vendor-overlay/mesa_panfrost_dri.so", "/vendor/lib64/hw",
               "/vendor/lib64/hw/panfrost_dri.so");
+    // sd102: the composer rebuilt with drmSetMaster(). Without it every
+    // drmModeAtomicCommit returns -EACCES and the panel keeps the console.
+    CopyAppAt(dfd, "vendor-overlay/lib64/hw/hwcomposer.drm_minigbm.so", "/vendor/lib64/hw",
+              "/vendor/lib64/hw/hwcomposer.drm_minigbm.so");
 
     pubnote("mesa: rc exporting LIBGL_DRIVERS_PATH");
 }

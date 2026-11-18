@@ -47,6 +47,10 @@ else
 	echo "external/minigbm: applied"
 fi
 
+# sd102: drm_hwcomposer must take DRM master (see patches/patch-drm-master.py).
+cd "$TREE"
+python3 "$HERE/patch-drm-master.py" || { echo "patch-drm-master.py: FAILED"; exit 1; }
+
 echo "done -- rebuild with:"
 echo "  m init_first_stage gralloc.minigbm \\"
 echo "    android.hardware.graphics.mapper@4.0-impl.minigbm \\"

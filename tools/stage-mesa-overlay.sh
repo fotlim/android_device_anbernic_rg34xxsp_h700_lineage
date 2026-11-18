@@ -32,11 +32,15 @@ cp -f "$OUT/egl/libGLES_mesa.so" "$OV/mesa_egl.so"
 cp -f "$OUT/egl/libGLES_mesa.so" "$OV/mesa_glesv2.so"
 cp -f "$OUT/dri/gallium_dri.so"  "$OV/mesa_panfrost_dri.so"
 cp -f "$OUT/libglapi.so"         "$OV/libglapi.so"
+# sd102: the patched composer (takes DRM master). It goes into
+# /vendor/lib64/hw, which the gfx patch already made writable.
+mkdir -p "$OV/lib64/hw"
+cp -f "$OUT/hw/hwcomposer.drm_minigbm.so" "$OV/lib64/hw/hwcomposer.drm_minigbm.so"
 
-chmod 644 "$OV/mesa_egl.so" "$OV/mesa_glesv2.so" "$OV/mesa_panfrost_dri.so" "$OV/libglapi.so"
+chmod 644 "$OV/mesa_egl.so" "$OV/mesa_glesv2.so" "$OV/mesa_panfrost_dri.so" "$OV/libglapi.so" "$OV/lib64/hw/hwcomposer.drm_minigbm.so"
 
 echo "=== staged into the initrd overlay (flat) ==="
 ls -l "$OV"
 echo "=== gzip estimate ==="
 echo "panfrost_dri.so: $(stat -c%s "$OV/mesa_panfrost_dri.so") B raw, $(gzip -c "$OV/mesa_panfrost_dri.so" | wc -c) B gzip"
-sha256sum "$OV/mesa_egl.so" "$OV/mesa_glesv2.so" "$OV/mesa_panfrost_dri.so" "$OV/libglapi.so"
+sha256sum "$OV/mesa_egl.so" "$OV/mesa_glesv2.so" "$OV/mesa_panfrost_dri.so" "$OV/libglapi.so" "$OV/lib64/hw/hwcomposer.drm_minigbm.so"
