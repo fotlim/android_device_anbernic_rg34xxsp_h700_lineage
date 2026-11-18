@@ -1,41 +1,41 @@
 #!/usr/bin/env python3
-"""sd97: publish mesa + panfrost into /vendor, the fast route.
+"""sd97d: publish mesa + panfrost WITHOUT touching /vendor/lib64 itself.
 
-Why: boot bbb58a26 closed the SwiftShader question. Its own probe showed that
-rendering *into* a minigbm buffer works and reads back correctly, but sampling
-one reads back all black, and sampling a CPU-written one segfaults -- and
-SurfaceFlinger samples every layer every frame. So `ro.hardware.egl=swiftshader`
-cannot ever draw the UI, no matter how well the rest of the stack works.
+Boot a1e0aab9 finally got mesa running:
 
-The replacement is already in the tree: external/mesa3d is mesa 20.3.4 with
-src/gallium/drivers/panfrost, and its Android.mk builds libGLES_mesa.so plus
-gallium_dri.so as soon as BOARD_GPU_DRIVERS is non-empty (see
-device/anbernic/rg34xxsp/BoardConfig.mk). mesa 20.3 wants libdrm >= 2.4.89 and
-this tree has 2.4.99, so the "must be >= 2.4.109 first" note in HANDOVER only
-ever applied to mesa 23.
+    GLES: Panfrost, Mali G31 (Panfrost), OpenGL ES 2.0 Mesa 20.3.4
+    live-ahb-probe.txt: all six steps passed, exit=0   (step 5 used to SIGSEGV)
 
-What this patch does: the vendor image on the card is stale (built before mesa
-existed), so the libraries cannot simply be installed into it. They travel in
-the initrd's vendor overlay instead -- the same mechanism that already ships
-gralloc.minigbm, the composer 2.1 service and the memtrack stub -- and this code
-copies them into three overlays:
+so the crash is gone. Two problems remain, and this patch fixes the regression it
+caused:
 
-    /vendor/lib64            libglapi.so   (mesa's own, needed by both)
-    /vendor/lib64/egl        libEGL_swiftshader.so / libGLESv2_swiftshader.so
-    /vendor/lib64/dri        panfrost_dri.so  (== gallium_dri.so, renamed)
+1. REGRESSION. sd97 mounted an overlay on /vendor/lib64 so it could create
+   /vendor/lib64/dri inside the upper layer. /vendor/lib64/hw already had its
+   own overlay mounted from the gfx patch, i.e. a mountpoint inside a lower
+   layer -- which overlayfs does not support. Result: /vendor/lib64/hw became
+   invisible, and both passthrough HALs that load through hw_get_module died:
 
-The egl files are mesa's libGLES_mesa.so shipped *under the swiftshader names*
-on purpose. The EGL loader picks its driver by dlopening
-/vendor/lib64/egl/libEGL_<ro.hardware.egl>.so, and ro.hardware.egl lives in
-/vendor/build.prop = "swiftshader"; ro.* properties are write-once, so
-overriding the file is more reliable than fighting the property. It also
-displaces the 16 MB SwiftShader, which is the point.
+       health@2.1-service:  Check failed: passthrough != nullptr
+                            Cannot find passthrough implementation of health 2.1
+                            HAL for instance default          (abort, every 5 s)
+       system_server main:  memtrack_proc_get -> getRawServiceInternal ...
+                            (ANR at ActivityManagerService.<init>, 75 s restart loop)
 
-Cost on the card: gallium_dri.so is 9.6 MB raw but 3.3 MB gzipped, so the initrd
-goes from 1.5 MB to about 4.9 MB. The boot FAT partition has 12 MB free.
+   Fix: do not overlay /vendor/lib64 at all. Everything that used to need it
+   goes into /vendor/lib64/hw instead -- that directory is *already* overlaid by
+   patches/patch-vendor-graphics.py and is therefore writable, and it is in the
+   vendor linker namespace's search path, which is where libglapi.so will be
+   found from (libGLES_mesa.so has it as DT_NEEDED).
 
-If panfrost works, the durable fix is to rebuild the vendor image with mesa in
-it (docs/ISSUES.md I-图形-03) and drop this patch entirely.
+2. Still open: sampling a minigbm buffer returns black (probe steps 4 and 5
+   read 00 00 00 ff). Not a crash any more, so it is a real format/import
+   question now, tracked as I-图形-05.
+
+Driver lookup: mesa's DRI2 loader honours the LIBGL_DRIVERS_PATH env var
+(src/egl/drivers/dri2/egl_dri2.c:807, search_path_vars), falling back to the
+compile-time DEFAULT_DRIVER_DIR=/vendor/lib64/dri. Since /vendor/lib64/dri
+cannot be created on a read-only /vendor, this publishes a tiny rc that exports
+the path at early-init, before surfaceflinger starts.
 """
 
 import sys
@@ -45,18 +45,25 @@ PATH = "/root/android/lineage/system/core/init/first_stage_init.cpp"
 MARKER = "// sd97: publish mesa"
 END = "// sd97-end"
 
-CODE = r'''// sd97: publish mesa + panfrost into /vendor (patches/patch-mesa-publish.py).
-// Inserted right after the sd88 block so CopyAppAt()/OverlayDir() are already
-// declared. Everything comes out of the initrd's vendor-overlay/, i.e. through
-// the ramdisk handle dfd -- /vendor itself is read-only and stale.
+CODE = r'''// sd97: publish mesa + panfrost (patches/patch-mesa-publish.py).
+// Sources are FLAT files in vendor-overlay/ because new ramdisk subdirectories
+// come back ENOTDIR (see docs/ISSUES.md I-工具-09/11).
+//
+// NOTHING here overlays /vendor/lib64: doing that hid /vendor/lib64/hw -- which
+// already has its own overlay -- and killed both passthrough HALs (health
+// aborted, memtrack made system_server ANR in ActivityManagerService.<init>).
+// Instead the shared objects land in /vendor/lib64/hw, which the gfx patch
+// already makes writable and which the vendor linker namespace searches.
+static const char kMesaRc[] =
+    "on early-init\n"
+    "    # sd97: mesa's loader falls back to DEFAULT_DRIVER_DIR=/vendor/lib64/dri,\n"
+    "    # which cannot exist on the read-only /vendor. It honours this env var\n"
+    "    # instead (src/egl/drivers/dri2/egl_dri2.c:807).\n"
+    "    export LIBGL_DRIVERS_PATH /vendor/lib64/hw\n"
+    "\n";
+
 void PublishMesa(int dfd) {
-    // sd97c: report what the ramdisk actually contains before copying. Boot
-    // 6ccdec45 turned "missing (errno=2 ENOENT)" into "missing (errno=20
-    // ENOTDIR)" once make-initrd.py started emitting parent directory entries,
-    // so *something* in the path is not a directory -- and the sibling
-    // vendor-overlay/lib64/libglapi.so still copied. Print the type of every
-    // component instead of guessing:
-    //   040755 + errno 0 = a directory, 0100644 = a regular file, errno != 0 = absent
+    // Self-diagnosis: show what the ramdisk really holds before copying.
     {
         static const char* kCheck[] = {
             "vendor-overlay",
@@ -79,62 +86,38 @@ void PublishMesa(int dfd) {
         }
     }
 
-    // /vendor/lib64 first: the overlay makes the directory writable, which is
-    // what lets us create /vendor/lib64/dri inside the upper layer and then
-    // mount a second overlay on top of it.
-    if (!OverlayDir("/vendor/lib64", "/dev/vg_root_upper", "/dev/vg_root_work")) {
-        pubnote("mesa: overlay of /vendor/lib64 failed");
-        return;
-    }
-    chmod("/vendor/lib64", 0755);
-    chmod("/dev/vg_root_upper", 0755);
-    chmod("/dev/vg_root_work", 0755);
-
-    // The stale vendor image has no dri/ directory at all.
-    if (mkdir("/vendor/lib64/dri", 0755) != 0 && errno != EEXIST) {
-        pubnote("mesa: mkdir /vendor/lib64/dri failed: %d (%s)", errno,
-                strerror(errno));
-    }
-
+    // /vendor/lib64/egl exists in the vendor image (it held libEGL_swiftshader),
+    // so it can be overlaid without touching its parent.
     if (!OverlayDir("/vendor/lib64/egl", "/dev/vg_egl_upper", "/dev/vg_egl_work")) {
         pubnote("mesa: overlay of /vendor/lib64/egl failed");
-        return;
-    }
-    if (!OverlayDir("/vendor/lib64/dri", "/dev/vg_dri_upper", "/dev/vg_dri_work")) {
-        pubnote("mesa: overlay of /vendor/lib64/dri failed");
         return;
     }
     chmod("/vendor/lib64/egl", 0755);
     chmod("/dev/vg_egl_upper", 0755);
     chmod("/dev/vg_egl_work", 0755);
-    chmod("/vendor/lib64/dri", 0755);
-    chmod("/dev/vg_dri_upper", 0755);
-    chmod("/dev/vg_dri_work", 0755);
 
-    CopyAppAt(dfd, "vendor-overlay/libglapi.so", "/vendor/lib64",
-              "/vendor/lib64/libglapi.so");
-    // sd97c: sources are FLAT files under vendor-overlay/. New ramdisk
-    // subdirectories (vendor-overlay/lib64/egl, .../dri) came back ENOTDIR(20)
-    // even after make-initrd.py started emitting parent directory entries,
-    // while this sibling vendor-overlay/lib64/libglapi.so copied fine, so the
-    // ramdisk is not behaving like a filesystem we control. Flat sources under
-    // an existing directory sidestep it entirely.
-    //
-    // Destinations keep the names the loader asks for: libEGL_<ro.hardware.egl>.so
-    // and <driver>_dri.so.
+    // Mesa's libGLES_mesa.so shipped under the swiftshader names: the loader
+    // dlopens libEGL_<ro.hardware.egl>.so and ro.hardware.egl is "swiftshader".
     CopyAppAt(dfd, "vendor-overlay/mesa_egl.so", "/vendor/lib64/egl",
               "/vendor/lib64/egl/libEGL_swiftshader.so");
     CopyAppAt(dfd, "vendor-overlay/mesa_glesv2.so", "/vendor/lib64/egl",
               "/vendor/lib64/egl/libGLESv2_swiftshader.so");
-    CopyAppAt(dfd, "vendor-overlay/mesa_panfrost_dri.so", "/vendor/lib64/dri",
-              "/vendor/lib64/dri/panfrost_dri.so");
+    // libglapi.so is libGLES_mesa.so's DT_NEEDED; /vendor/lib64/hw is in the
+    // vendor namespace search path, so it resolves from there.
+    CopyAppAt(dfd, "vendor-overlay/libglapi.so", "/vendor/lib64/hw",
+              "/vendor/lib64/hw/libglapi.so");
+    // The gallium driver itself; found via LIBGL_DRIVERS_PATH below.
+    CopyAppAt(dfd, "vendor-overlay/mesa_panfrost_dri.so", "/vendor/lib64/hw",
+              "/vendor/lib64/hw/panfrost_dri.so");
+
+    pubnote("mesa: rc exporting LIBGL_DRIVERS_PATH");
 }
 
 // sd97-end
 
 '''
 
-CALL_ANCHOR = "    PublishSystemApp(dfd);\n"
+CALL_ANCHOR = "    PublishVendorGraphics(dfd);\n"
 
 
 def strip(text):
@@ -154,11 +137,17 @@ if removed:
 
 if CALL_ANCHOR not in text:
     sys.exit("anchor for the call insert not found")
-if "    PublishMesa(dfd);\n" not in text:
-    text = text.replace(CALL_ANCHOR, CALL_ANCHOR + "    PublishMesa(dfd);\n", 1)
 
-# Insert the function after the sd88 block's end sentinel, so CopyAppAt is in
-# scope; fall back to the PublishRamdiskFstab anchor if that block is missing.
+# PublishMesa must run AFTER PublishVendorGraphics: it copies into
+# /vendor/lib64/hw, which that function overlays. Insert it right after, and
+# keep it after PublishSystemApp for a stable, reproducible order.
+if "    PublishMesa(dfd);\n" not in text:
+    anchor = "    PublishSystemApp(dfd);\n"
+    if anchor in text:
+        text = text.replace(anchor, anchor + "    PublishMesa(dfd);\n", 1)
+    else:
+        text = text.replace(CALL_ANCHOR, CALL_ANCHOR + "    PublishMesa(dfd);\n", 1)
+
 ANCHOR88 = "// sd88-end\n"
 ANCHOR_FN = "void PublishRamdiskFstab(DIR* ramdisk) {"
 if ANCHOR88 in text:
@@ -167,6 +156,14 @@ elif ANCHOR_FN in text:
     text = text.replace(ANCHOR_FN, CODE + ANCHOR_FN, 1)
 else:
     sys.exit("no anchor for the function insert")
+
+# The rc that exports LIBGL_DRIVERS_PATH has to be written somewhere the first
+# stage already writes rc files: /vendor/etc/init. PublishTextFile is declared
+# above this point.
+RC_CALL = '    PublishTextFile("/vendor/etc/init/96-mesa.rc", kMesaRc, 0644);\n'
+if RC_CALL not in text:
+    text = text.replace("    pubnote(\"mesa: rc exporting LIBGL_DRIVERS_PATH\");\n",
+                        "    pubnote(\"mesa: rc exporting LIBGL_DRIVERS_PATH\");\n" + RC_CALL, 1)
 
 with open(PATH, "w", encoding="utf-8") as f:
     f.write(text)
