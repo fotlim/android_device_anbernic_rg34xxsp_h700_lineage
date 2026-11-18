@@ -60,9 +60,11 @@
 | I-图形-02 | 自建探针复现：往 gralloc 里渲染 OK，采样 gralloc 纹理坏 | `bbb58a26` `live-ahb-probe.txt`：step2 渲染进 720×480 AHB 读回 `00 ff 00 ff` ✅；step3 采样普通 GL 纹理 `ff 00 00 ff` ✅；**step4 采样 GPU 写过的 AHB 读回 `00 00 00 ff`（全黑）**；**step5 采样 CPU 写过的 AHB 在 `glFinish` 处 `exit=139`** | SwiftShader 的 Android EGL 按**模拟器/goldfish**那套"可 CPU 映射的 shadow 内存"实现：渲染时写自己的影子（所以读回对），采样 dma-buf 时影子是空的（全黑），CPU 动过内存后崩。没有属性开关能修 | 换后端（panfork-mesa） | 🟡 已定位待修 | sd96；§64 |
 | I-图形-03 | `ro.hardware.egl=swiftshader` 是临时后端 | `live-sf-dump.txt`：`EGL implementation : 1.4 SwiftShader 4.1.0.7`、`GL_RENDERER = Google SwiftShader` | 项目从一开始就用 SwiftShader 顶住（`device.mk`/`vendor.prop` 注释写明），真路线是 panfork-mesa 吃 Mali-G31 | 待做：libdrm 2.4.99→≥2.4.109 + `panfrost_drm.h`；引入 mesa 23.0.0-devel（`android/` meson 交叉构建）；`ro.hardware.egl=mesa` | 🟡 已定位待修（未开工） | 需构建窗口 + 全卡重刷 |
 | I-图形-04 | composer@2.1-service 的 vsync 线程空指针崩溃 | `d9d8722a`/`35526bea`：`#00 HwcHalImpl<…>::vsyncHook(void*, unsigned long, long)+4`，`fault addr 0x0`，`x0=0`，`Cause: null pointer dereference` | 厂商 HWC 用 `callbackData == NULL` 调 vsync 钩子。`external/drm_hwcomposer/drm/vsyncworker.cpp:188` 有 `if (callback)` 保护，说明是 composer 已注销后 HWC 又调了一次 —— **是 SF 先死的后果** | 先跟着 I-图形-01 一起解决；若 SF 稳定后仍出现，再查 HWC 注销时序 | 🟡 已定位（判定为后果） | — |
-| I-图形-05 | HWC 服务一启动就 exit 1，无任何 ALOG | 更早的卡：`hwcomposer.drm_minigbm.so` dlopen 后 1 ms 内退出 | SF 是 **composer@2.1 客户端**，镜像里只有 2.2 服务，且 2.2 的 rc 没有 `interface` 行 → 2.1 查询永远找不到 | 编 `android.hardware.graphics.composer@2.1-service` + rc 带 `interface android.hardware.graphics.composer@2.1::IComposer default`；2.2 rc 置空 | ✅ 已解决 | sd8x |
-| I-图形-06 | `hwc-resource-manager: Failed to initialize any displays` | 更早的卡 | `hwc.drm.device` 指向 `card0`=panfrost（无 connector）；真实显示在 `card1`=sun4i-drm（DSI-1 + HDMI-A-1） | `prop.default` 加 `hwc.drm.device=/dev/dri/card1` | ✅ 已解决 | sd8x |
-| I-图形-07 | gralloc/mapper/allocator 在纯 minigbm 下缺 health/memtrack 等 passthrough 实现 | 更早的卡 | 镜像只带了部分 HAL impl | vendor overlay 发布 9 个 .so / 可执行文件（gralloc.minigbm、mapper@4.0、allocator@4.0、health@2.1、memtrack 等） | ✅ 已解决 | `live-first-stage-publish` 里 9 条 copied |
+| I-图形-05 | mesa+panfrost 下采样 minigbm 缓冲区读回**全黑**（不再崩） | `a1e0aab9` `live-ahb-probe.txt`：step 4 读回 `00 00 00 ff`、step 5 左右两半都是 `00 00 00 ff`；`live-sf-dump.txt` 里 `0 Layers`、`flips=0`、`frame-counter=0` | 待查：EGLImage import 后纹理里没有实际数据（格式/modifier 不匹配，或 minigbm 分配的是 dumb/linear 而 panfrost 按 tiled 读）。注意 minigbm 日志 `render_node_scan: using /dev/dri/card1`（显示控制器）而不是 `renderD128`（panfrost 渲染节点） | 未修 | sd97 三卡 `a1e0aab9` |
+| I-图形-06 | `/vendor/lib64` overlay 会隐藏 `/vendor/lib64/hw`，弄死 passthrough HAL | `6ccdec45`/`a1e0aab9`：health@2.1 `Abort message: Check failed: passthrough != nullptr / Cannot find passthrough implementation of health 2.1 HAL`（每 5 s，26 次）；`p11.txt` 的 ANR 栈 `memtrack_proc_get -> getRawServiceInternal -> ActivityManagerService.<init>`，system_server 每 ~75 s 重启（ps 里 pid 递增） | overlayfs 不支持「lower 层里有挂载点」：`/vendor/lib64/hw` 先被 overlay，再造 `/vendor/lib64` 的 overlay，于是 hw 的内容对新 overlay 不可见 | sd97d 不再 overlay `/vendor/lib64`，mesa 的 .so 全放 `/vendor/lib64/hw`，用 rc `export LIBGL_DRIVERS_PATH /vendor/lib64/hw` 指路 | 🟡 已修待验证 | `34d6cb9` |
+| I-图形-07 | HWC 服务一启动就 exit 1，无任何 ALOG | 更早的卡：`hwcomposer.drm_minigbm.so` dlopen 后 1 ms 内退出 | SF 是 **composer@2.1 客户端**，镜像里只有 2.2 服务，且 2.2 的 rc 没有 `interface` 行 → 2.1 查询永远找不到 | 编 `android.hardware.graphics.composer@2.1-service` + rc 带 `interface android.hardware.graphics.composer@2.1::IComposer default`；2.2 rc 置空 | ✅ 已解决 | sd8x |
+| I-图形-08 | `hwc-resource-manager: Failed to initialize any displays` | 更早的卡 | `hwc.drm.device` 指向 `card0`=panfrost（无 connector）；真实显示在 `card1`=sun4i-drm（DSI-1 + HDMI-A-1） | `prop.default` 加 `hwc.drm.device=/dev/dri/card1` | ✅ 已解决 | sd8x |
+| I-图形-09 | gralloc/mapper/allocator 在纯 minigbm 下缺 health/memtrack 等 passthrough 实现 | 更早的卡 | 镜像只带了部分 HAL impl | vendor overlay 发布 9 个 .so / 可执行文件（gralloc.minigbm、mapper@4.0、allocator@4.0、health@2.1、memtrack 等） | ✅ 已解决 | `live-first-stage-publish` 里 9 条 copied |
 
 ---
 
@@ -122,7 +124,7 @@
 
 ## 7. 当前卡点与下一步（2026-11-18）
 
-**唯一阻塞项**：I-图形-02/03 —— SwiftShader 无法采样 minigbm 缓冲区，必须换 panfork-mesa。
+**当前状态（2026-11-18 晚）**：panfork-mesa 已能用（`GLES: Panfrost, Mali G31`，SF 不再崩溃），剩下两条：I-图形-05（采样 gralloc 读回全黑）与 I-图形-06（`/vendor/lib64` overlay 的回归，已改）。
 
 开工清单（需要 WSL 构建窗口 + 一次全卡重刷）：
 
