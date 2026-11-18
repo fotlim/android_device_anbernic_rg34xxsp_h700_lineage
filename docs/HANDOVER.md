@@ -777,7 +777,8 @@ LineageOS 18.1 在 RG34XXSP 上已经**跑到 Android 第二阶段 init 的 `pos
 ## 2. 仓库与工作树（注意：路径已变）
 
 ```
-仓库      C:\Users\LinOcean\Documents\deepseek-harness\default-workspace\03_WSA与安卓\anbernic-rg34xxsp
+仓库      C:\Users\LinOcean\Documents\deepseek-harness\rg34xxsp开发日志\anbernic-rg34xxsp
+          （2026-11-18 从 default-workspace\03_WSA与安卓\ 迁出；WSL /root/repo 已同步指向此处）
 Android   WSL /root/android/lineage            （AOSP 树，super.img 就在这里出）
 内核树    WSL /root/rg34xxsp-kernel/linux      （Linux 7.1.2 + ROCKNIX 补丁；**/tmp/lk-rocknix 已不存在**）
 initramfs WSL /root/initramfs-embed            （init = debug-init，init.android = 真 init，vendor-overlay/ = 图形模块）

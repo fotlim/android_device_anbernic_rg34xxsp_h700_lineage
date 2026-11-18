@@ -51,10 +51,39 @@ def newc_entry(ino, name, data, mode, mtime=0, uid=0, gid=0):
 
 
 def build(entries):
-    """entries: list of (archive_path, data, mode)"""
+    """entries: list of (archive_path, data, mode)
+
+    Emits a directory entry for every missing ancestor, in order.
+
+    Why this is not optional: the kernel's initramfs unpacker creates a file
+    only if its parent directory already exists in the rootfs. Because the
+    external initrd is unpacked into the same rootfs as the kernel's built-in
+    one, a path that already exists there works by accident -- that is why
+    vendor-overlay/lib64/hw/... was fine for months -- while a *new* subtree
+    fails with ENOENT at open(). Boot dd077509 is exactly that: lib64/egl/ and
+    lib64/dri/ did not exist in the built-in cpio, mesa's three files were
+    never unpacked, and the first stage logged
+
+        sysapp: vendor-overlay/lib64/egl/libEGL_swiftshader.so missing (dirfd=4 errno=2)
+
+    while the sibling vendor-overlay/lib64/libglapi.so, whose parent does
+    exist, copied fine.
+    """
     blob = b""
     ino = 1
+    seen = set()
+    ordered = []
     for path, data, mode in entries:
+        parts = path.split("/")
+        for i in range(1, len(parts)):
+            d = "/".join(parts[:i])
+            if d and d not in seen:
+                seen.add(d)
+                ordered.append((d, b"", 0o040755))
+        if path not in seen:
+            seen.add(path)
+            ordered.append((path, data, mode))
+    for path, data, mode in ordered:
         blob += newc_entry(ino, path, data, mode)
         ino += 1
     blob += newc_entry(ino, "TRAILER!!!", b"", 0)
