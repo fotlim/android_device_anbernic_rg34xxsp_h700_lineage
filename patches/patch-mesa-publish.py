@@ -60,6 +60,14 @@ static const char kMesaRc[] =
     "    # which cannot exist on the read-only /vendor. It honours this env var\n"
     "    # instead (src/egl/drivers/dri2/egl_dri2.c:807).\n"
     "    export LIBGL_DRIVERS_PATH /vendor/lib64/hw\n"
+    "    # sd103: the fbdev console (fb0, sun4i-drmdrmfb) owns the CRTC and holds\n"
+    "    # the DRM master, so the composer's drmSetMaster() fails with EBUSY\n"
+    "    # (boot 7bd253be: \"Failed to set DRM master on /dev/dri/card1:\n"
+    "    # Device or resource busy\") and every atomic commit is still -EACCES.\n"
+    "    # Unbinding the vtconsole makes fbdev release the device. Doing it at\n"
+    "    # early-init means it happens before the composer service starts.\n"
+    "    write /sys/class/vtconsole/vtcon1/bind 0\n"
+    "    write /sys/class/vtconsole/vtcon0/bind 0\n"
     "\n";
 
 void PublishMesa(int dfd) {
