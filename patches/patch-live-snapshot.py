@@ -251,6 +251,16 @@ timeout 5 /vendor/bin/hw/android.hardware.graphics.composer@2.1-service > $CARD/
 echo "exit=$?" >> $CARD/DEBUG/live-hwc21-run.txt
 timeout 3 /vendor/bin/hw/android.hardware.graphics.composer@2.2-service > $CARD/DEBUG/live-hwc-run.txt 2>&1
 echo "exit=$?" >> $CARD/DEBUG/live-hwc-run.txt
+# sd100: panfork's first frames are slow on a Cortex-A53 -- SystemUI logged
+# "OpenGLRenderer: Davey! duration=900ms / 1271ms" -- so a 2-3 minute window can
+# simply be too early. Sample again at ~5 minutes: if sys.boot_completed appears
+# here, the boot works and was only slow; if it is still absent, enable_screen is
+# genuinely stuck and the window/sf dumps below say what it waits for.
+sleep 170
+getprop > $CARD/DEBUG/live-allprops-late.txt 2>>$LOG
+ps -A 2>/dev/null | grep -E 'systemui|launcher|system_server|surfaceflinger' > $CARD/DEBUG/live-ps-late.txt 2>>$LOG
+timeout 12 dumpsys window > $CARD/DEBUG/live-window-late.txt 2>&1
+timeout 12 dumpsys SurfaceFlinger > $CARD/DEBUG/live-sf-late.txt 2>&1
 sync
 echo "snapshot: wrote $(ls $CARD/DEBUG/live-* 2>/dev/null | wc -l) files" >> $LOG
 umount $CARD 2>>$LOG
