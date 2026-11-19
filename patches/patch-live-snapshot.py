@@ -313,6 +313,32 @@ timeout 12 dumpsys power > $CARD/DEBUG/live-power-late.txt 2>&1
   logcat -d -b all -s hwc-drm-device -s hwc-drm-two -s hwc-drm-display-compositor \
          -s HWComposer -v threadtime 2>/dev/null | tail -20
 } > $CARD/DEBUG/live-drm-retry.txt 2>&1
+# sd109: the graphics stack now works, but the boot never completes because
+# user 0 stays in State BOOTING (no sys.user.0.ce_available), resolveHomeActivity
+# filters Home out, no activity ever resumes, so checkFinishBootingLocked never
+# fires. Record the user-data state and try the obvious unlocking steps in place.
+{ echo "=== /data top ==="; ls -la /data 2>&1 | head -20
+  echo "=== /data/system/users ==="; ls -la /data/system/users 2>&1
+  echo "=== /data/user ==="; ls -la /data/user 2>&1
+  echo "=== ce props ==="; getprop | grep -E 'ce_available|sys\.user|vold\.decrypt'
+  echo "=== before: boot_completed / window ==="
+  getprop sys.boot_completed; getprop dev.bootcomplete
+  dumpsys window 2>/dev/null | grep -E 'mSystemBooted|mAwake|mCurrentFocus'
+  dumpsys user 2>/dev/null | grep -E 'State:|Unlock'
+  echo "=== try: setprop sys.user.0.ce_available true ==="
+  setprop sys.user.0.ce_available true; echo "rc=$?"
+  echo "=== try: am unlock-user 0 ==="
+  am unlock-user 0 2>&1; echo "rc=$?"
+  echo "=== try: cmd user start-user 0 ==="
+  cmd user start-user 0 2>&1; echo "rc=$?"
+  echo "=== try: am start HOME ==="
+  am start -a android.intent.action.MAIN -c android.intent.category.HOME 2>&1; echo "rc=$?"
+  sleep 10
+  echo "=== after: boot_completed / window / user ==="
+  getprop sys.boot_completed; getprop dev.bootcomplete
+  dumpsys window 2>/dev/null | grep -E 'mSystemBooted|mAwake|mCurrentFocus'
+  dumpsys user 2>/dev/null | grep -E 'State:|Unlock'
+} > $CARD/DEBUG/live-user-try.txt 2>&1
 { echo "===== boot-progress / animation windows ====="
   timeout 12 dumpsys window windows 2>/dev/null | grep -E 'Window #|Boot|boot|mSystemBooted|mAwake|mShowingBootMessages|Splash'
   echo "===== window policy wakefulness ====="

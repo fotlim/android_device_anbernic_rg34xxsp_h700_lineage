@@ -79,15 +79,7 @@ with open(PATH, encoding="utf-8") as f:
     text = f.read()
 
 if "kComposer21Rc" in text:
-    # Already inserted: regenerate the consts so edits here take effect (sd107
-    # needed `user system` -> `user root`). The block starts at its marker and
-    # ends where the function it precedes begins.
-    start = text.index("// sd75: SurfaceFlinger is a composer@2.1 client")
-    stop = text.index(FUNC_ANCHOR)
-    text = text[:start] + CONSTS + text[stop:]
-    with open(PATH, "w", encoding="utf-8") as f:
-        f.write(text)
-    print("regenerated composer rc consts in", PATH)
+    print("already patched (composer 2.1 rc is published), nothing to do")
     sys.exit(0)
 
 if FUNC_ANCHOR not in text:
