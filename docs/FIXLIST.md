@@ -27,7 +27,10 @@
 - **现象/证据**：真实 UI 渲染时 `panfrost ... js fault, status=DATA_INVALID_FAULT/IMPRECISE_FAULT`（每 boot 几十~几百次）。SwiftShader 软渲染则在 `sw::Renderer::executeTask` 崩 SurfaceFlinger。
 - **影响**：**几乎所有 App 与游戏都走硬件加速渲染**，现在只有我们的"CPU Canvas 桌面"能画。浏览器、图片、视频、游戏全部黑屏/闪退。**这是这台掌机"能不能真正用（尤其玩游戏）"的总闸。**
 - **修复思路**：Mesa/panfrost 版本或内核 panfrost 驱动与 G31 不匹配，或 gralloc(minigbm) 给 GPU 的缓冲/命令流有误。方向：① 升级/对齐 Mesa 与内核 panfrost；② 核对 minigbm↔panfrost 的 buffer 导入(format/stride/modifier)；③ 作为兜底，评估"全局强制软件渲染(框架层)"——能画但慢。
+- **进展（sd128）**：已试最便宜的"UAPI 对齐"——给 Mesa 20.3.4 的 `drm-uapi/panfrost_drm.h` 补上内核 7.1.2 要的 `jm_ctx_handle`/`pad`（40→48 字节）。**实测无效**（`js fault` 151→489），说明不是结构错位，而是 **Mesa 20.3.4 为 G31 生成的作业数据本身非法**（Mesa 太老）。真修需**升级 Mesa**。
+- **有利条件**：本机 `/root/avium/external/mesa3d` 是 **Mesa 25.3.0-devel**（G31/panfrost 成熟），可作移植源；外网/apt 亦可取新版。但 20→25 跨度大（libdrm/soong/NIR 联动），需多轮、有编译风险。
 - **工作量**：大（多轮，可能涉及重编 Mesa / 内核）。
+
 
 ### P0-2 模拟外置存储 /storage/emulated 挂不上（MediaProvider FUSE ANR）
 - **现象/证据**：`ExternalStorageServiceImpl → Timeout executing service → ANR (循环)`；`vold: Mounting emulated fuse volume` 后会话超时。物理卡/ext4 都正常。
