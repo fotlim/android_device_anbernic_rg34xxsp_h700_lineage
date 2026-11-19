@@ -98,6 +98,9 @@ done
 sleep 25
 screencap -p /metadata/dsh/screen.png 2>>$LOG
 echo "skip-suw: screencap done rc=$?" >> $LOG
+# sd126: capture Android's view of the input devices (is the gamepad seen? what
+# sources/keys? is our uinput mouse present?) to diagnose the dead gamepad.
+dumpsys input > /metadata/dsh/dumpsys-input.txt 2>>$LOG
 # sd116: record the gamepad input device ...
 cat /proc/bus/input/devices > /metadata/dsh/input-devices.txt 2>>$LOG
 echo "skip-suw: done" >> $LOG

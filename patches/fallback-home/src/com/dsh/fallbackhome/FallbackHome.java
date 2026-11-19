@@ -70,6 +70,12 @@ public class FallbackHome extends Activity {
         mGrid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
         mAdapter = new AppAdapter();
         mGrid.setAdapter(mAdapter);
+        // sd126: make the grid keyboard/gamepad navigable: focus + a visible
+        // selection highlight; DPAD moves the selection (GridView built-in), and
+        // dispatchKeyEvent() below turns BUTTON_A/B / ENTER into a click.
+        mGrid.setSelector(new android.graphics.drawable.ColorDrawable(0x884FC3F7));
+        mGrid.setFocusable(true);
+        mGrid.setFocusableInTouchMode(true);
         mGrid.setOnItemClickListener((parent, view, position, id) -> {
             if (position < 0 || position >= mApps.size()) return;
             ResolveInfo ri = mApps.get(position);
@@ -100,6 +106,31 @@ public class FallbackHome extends Activity {
     protected void onResume() {
         super.onResume();
         refresh();
+        if (mGrid.getVisibility() == View.VISIBLE) {
+            mGrid.requestFocus();
+            if (mGrid.getSelectedItemPosition() < 0 && mAdapter.getCount() > 0) {
+                mGrid.setSelection(0);
+            }
+        }
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent e) {
+        int kc = e.getKeyCode();
+        if (e.getAction() == android.view.KeyEvent.ACTION_DOWN) {
+            if (kc == android.view.KeyEvent.KEYCODE_BUTTON_A
+                    || kc == android.view.KeyEvent.KEYCODE_BUTTON_B
+                    || kc == android.view.KeyEvent.KEYCODE_ENTER
+                    || kc == android.view.KeyEvent.KEYCODE_DPAD_CENTER) {
+                int pos = mGrid.getSelectedItemPosition();
+                if (pos < 0) pos = 0;
+                if (pos < mApps.size()) {
+                    mGrid.performItemClick(null, pos, mAdapter.getItemId(pos));
+                    return true;
+                }
+            }
+        }
+        return super.dispatchKeyEvent(e);
     }
 
     @Override

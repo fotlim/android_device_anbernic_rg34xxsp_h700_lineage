@@ -288,6 +288,18 @@ void PublishSystemApp(int dfd) {
     bool have_treb = CopyAppAt(dfd, "dshsysapp/TrebuchetQuickStep.apk",
                                "/system_ext/priv-app/TrebuchetQuickStep",
                                "/system_ext/priv-app/TrebuchetQuickStep/TrebuchetQuickStep.apk");
+    // sd127: remap the gamepad (A=enter, B=back, start=home) by overlaying the
+    // keylayout, so the no-touch UI is fully navigable in any focused app.
+    if (OverlayDir("/vendor/usr/keylayout", "/dev/keylayout_upper", "/dev/keylayout_work")) {
+        chmod("/vendor/usr/keylayout", 0755);
+        chmod("/dev/keylayout_upper", 0755);
+        chmod("/dev/keylayout_work", 0755);
+        CopyAppAt(dfd, "dshsysapp/Vendor_484b_Product_14df.kl",
+                  "/vendor/usr/keylayout",
+                  "/vendor/usr/keylayout/Vendor_484b_Product_14df.kl");
+    } else {
+        pubnote("sysapp: overlay of /vendor/usr/keylayout failed");
+    }
     if (have_fused && have_sysui && have_allowlist && have_probe && have_fallback) return;
 
     // Fallback: the card itself.  Normally EBUSY (errno 16) here, because the

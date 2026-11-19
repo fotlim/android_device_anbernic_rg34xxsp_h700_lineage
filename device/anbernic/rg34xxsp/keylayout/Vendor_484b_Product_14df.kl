@@ -1,21 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Key layout for the Anbernic RG34XXSP built-in gamepad.
+# Key layout for the Anbernic RG34XX-SP built-in gamepad.
 # Kernel-side name: "H700 Gamepad", bus 0x19, vendor 0x484b, product 0x14df
 # (driver: rocknix-singleadc-joypad, 17 keys, 4 axes, PWM2 rumble).
 #
-# Kernel reports BTN_* codes already, so this file maps them 1:1 onto Android
-# key codes and declares the analog axes.
-#
+# sd127: remapped for a no-touchscreen Android UI so any focused app is usable:
+#   A     -> DPAD_CENTER   (select / enter)
+#   B     -> BACK          (leave the app)
+#   X     -> MENU
+#   Select-> APP_SWITCH    (recents)
+#   Start -> HOME
+# The d-pad stays DPAD_*; the analog sticks are declared so games still see axes.
 
-# --- face buttons -----------------------------------------------------------
-# Mapping follows the *printed labels* on the shell (Nintendo-style layout,
-# which is what the kernel DTS encodes): A = EAST (PA0), B = SOUTH (PA1),
-# X = NORTH (PA3), Y = WEST (PA2).
-key 305   BUTTON_A        # BTN_EAST   (A,  PA0)
-key 304   BUTTON_B        # BTN_SOUTH  (B,  PA1)
-key 307   BUTTON_X        # BTN_NORTH  (X,  PA3)
-key 308   BUTTON_Y        # BTN_WEST   (Y,  PA2)
+# --- face buttons (printed labels, Nintendo layout) -------------------------
+key 305   DPAD_CENTER   # BTN_EAST   (A,  PA0)  -> select/enter
+key 304   BACK          # BTN_SOUTH  (B,  PA1)  -> back
+key 307   MENU          # BTN_NORTH  (X,  PA3)  -> menu
+key 308   BUTTON_Y      # BTN_WEST   (Y,  PA2)  -> Y (games)
 
 # --- shoulders / triggers ---------------------------------------------------
 key 310   BUTTON_L1        # BTN_TL  (L1, PA10)
@@ -24,8 +25,8 @@ key 312   BUTTON_L2        # BTN_TL2 (L2, PA11)
 key 313   BUTTON_R2        # BTN_TR2 (R2, PA7)
 
 # --- system buttons ---------------------------------------------------------
-key 314   BUTTON_SELECT    # BTN_SELECT (Select, PA5)
-key 315   BUTTON_START     # BTN_START  (Start,  PA4)
+key 314   APP_SWITCH    # BTN_SELECT (Select, PA5) -> recents
+key 315   HOME          # BTN_START  (Start,  PA4) -> home
 key 316   BUTTON_MODE      # BTN_MODE   (Menu "F", PE3)
 key 317   BUTTON_THUMBL    # BTN_THUMBL (L3, PE8)
 key 318   BUTTON_THUMBR    # BTN_THUMBR (R3, PE9)
@@ -44,7 +45,3 @@ axis 0x00   X
 axis 0x01   Y
 axis 0x03   Z
 axis 0x04   RZ
-
-# If you would rather have Menu behave as BACK (common on Anbernic Android
-# builds), comment out the BUTTON_MODE line above and use:
-# key 316   BACK
