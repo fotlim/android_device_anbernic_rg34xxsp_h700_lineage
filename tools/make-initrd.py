@@ -27,7 +27,22 @@ def newc_entry(ino, name, data, mode, mtime=0, uid=0, gid=0):
     # silently drops an entry whose mode has no type bits. Writing "0755"
     # instead of "0100755" makes the archive unpack without a single error
     # message and without a single byte reaching the rootfs.
-    mode = mode if name == "TRAILER!!!" else (mode | stat.S_IFREG)
+    #
+    # sd111b: but a *directory* entry must keep S_IFDIR and must NOT be OR'ed
+    # with S_IFREG. 0o040755 | 0o100000 == 0o140755, and 0o140755's type field
+    # (0o140000) is S_IFSOCK -- do_name() then mknod()s a *socket node* instead
+    # of mkdir()ing a directory. This went unnoticed for months because the
+    # only dir entries we shipped (vendor-overlay/...) already existed in the
+    # kernel's built-in initramfs, so the bogus mknod just got EEXIST and the
+    # real directory survived. The moment sd111 added a brand-new subtree
+    # (dshsysapp/, to carry DshFallbackHome.apk) the socket node won:
+    #   sysapp: dshsysapp/FusedLocation.apk missing (dirfd=4 errno=20)
+    #   sysapp: dshsysapp/SystemUI.apk missing (dirfd=4 errno=20)  ... ENOTDIR
+    # i.e. /dshsysapp existed but was a socket, so nothing could be staged into
+    # it, SystemUI never landed, and boot fell back to the console screen.
+    # Only synthesise S_IFREG when the caller did not already pick a type.
+    if name != "TRAILER!!!" and not (mode & 0o170000):
+        mode |= stat.S_IFREG
     fields = [
         ino,            # ino
         mode,           # mode
