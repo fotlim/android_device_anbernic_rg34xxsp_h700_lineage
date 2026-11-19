@@ -55,6 +55,11 @@ pm disable-user --user 0 org.lineageos.setupwizard >> $LOG 2>&1
 am force-stop org.lineageos.setupwizard >> $LOG 2>&1
 sleep 1
 am start -a android.intent.action.MAIN -c android.intent.category.HOME -f 0x10000000 >> $LOG 2>&1
+# sd116: no touchscreen; dismiss the swipe keyguard so it drops straight to home.
+wm dismiss-keyguard >> $LOG 2>&1
+# sd116: record the gamepad input device so the joystick-as-mouse daemon can be
+# built against the exact event node / axes next round.
+cat /proc/bus/input/devices > /metadata/dsh/input-devices.txt 2>>$LOG
 echo "skip-suw: done" >> $LOG
 """
 

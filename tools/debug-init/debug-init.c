@@ -2312,6 +2312,7 @@ static int stage_system_apps(void)
 {
 	static const char *const names[] = { "SystemUI.apk", "FusedLocation.apk",
 					    "com.android.systemui.xml",
+					    "TrebuchetQuickStep.apk",
 					    "dsh-glprobe2" };
 	char buf[65536];
 	int files = 0;

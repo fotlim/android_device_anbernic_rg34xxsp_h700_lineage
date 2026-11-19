@@ -278,6 +278,12 @@ void PublishSystemApp(int dfd) {
     } else {
         pubnote("sysapp: overlay of /system/app failed, no fallback home");
     }
+    // sd116: the rebuilt Launcher3 (TrebuchetQuickStep) with the appwidget-NPE
+    // guard. Its package is on /system_ext, whose image is fixed on the card, so
+    // it has to be overlaid like SystemUI.
+    bool have_treb = CopyAppAt(dfd, "dshsysapp/TrebuchetQuickStep.apk",
+                               "/system_ext/priv-app/TrebuchetQuickStep",
+                               "/system_ext/priv-app/TrebuchetQuickStep/TrebuchetQuickStep.apk");
     if (have_fused && have_sysui && have_allowlist && have_probe && have_fallback) return;
 
     // Fallback: the card itself.  Normally EBUSY (errno 16) here, because the
@@ -303,6 +309,11 @@ void PublishSystemApp(int dfd) {
     if (!have_fallback) {
         CopyAppAt(-1, "/mnt/dshboot/DshFallbackHome.apk", "/system/app/DshFallbackHome",
                   "/system/app/DshFallbackHome/DshFallbackHome.apk");
+    }
+    if (!have_treb) {
+        CopyAppAt(-1, "/mnt/dshboot/TrebuchetQuickStep.apk",
+                  "/system_ext/priv-app/TrebuchetQuickStep",
+                  "/system_ext/priv-app/TrebuchetQuickStep/TrebuchetQuickStep.apk");
     }
     umount(boot);
 }

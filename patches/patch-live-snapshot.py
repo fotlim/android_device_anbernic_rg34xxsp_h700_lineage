@@ -77,7 +77,7 @@ if ! mount -t vfat -o rw /dev/block/mmcblk0p1 $CARD 2>>$LOG; then
     exit 0
 fi
 mkdir -p $CARD/DEBUG 2>>$LOG
-for f in fix.log probe.log public.libraries.txt snapshot.log adb-bringup.log skip-suw.log; do
+for f in fix.log probe.log public.libraries.txt snapshot.log adb-bringup.log skip-suw.log input-devices.txt; do
     [ -f /metadata/dsh/$f ] && cp /metadata/dsh/$f $CARD/DEBUG/live-$f 2>>$LOG
 done
 # The first stage writes this one at the metadata root, not under dsh/ (boot
