@@ -1,0 +1,17 @@
+diff --git a/include/drm-uapi/panfrost_drm.h b/include/drm-uapi/panfrost_drm.h
+index ec19db1eead..73418fcc93e 100644
+--- a/include/drm-uapi/panfrost_drm.h
++++ b/include/drm-uapi/panfrost_drm.h
+@@ -68,6 +68,12 @@ struct drm_panfrost_submit {
+ 
+ 	/** A combination of PANFROST_JD_REQ_* */
+ 	__u32 requirements;
++
++	/** Job manager context handle. Zero for the default context. */
++	__u32 jm_ctx_handle;
++
++	/** Padding. Must be zero. */
++	__u32 pad;
+ };
+ 
+ /**
