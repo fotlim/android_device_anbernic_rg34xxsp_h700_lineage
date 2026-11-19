@@ -331,7 +331,8 @@ static int harvest_metadata(void)
 				"fstab.published", "dsh/fix.log",
 				"dsh/seccomp-fix.log", "dsh/timeline.log",
 				"dsh/public.libraries.txt", "dsh/probe.log",
-				"dsh/skip-suw.log", "dsh/input-devices.txt" };
+				"dsh/skip-suw.log", "dsh/input-devices.txt",
+				"dsh/screen.png" };
 	char p[160], dst[160];
 	int i, j, copied = 0, mounted = 0;
 

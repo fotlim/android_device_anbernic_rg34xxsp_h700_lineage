@@ -85,8 +85,12 @@ while [ $i -lt 8 ]; do
     wm dismiss-keyguard >> $LOG 2>&1
     i=$((i+1))
 done
-# sd116: record the gamepad input device so the joystick-as-mouse daemon can be
-# built against the exact event node / axes next round.
+# sd121: grab a screenshot so we can SEE the actual desktop (black empty home?
+# or launcher composited black?). debug-init harvests it to DEBUG next boot.
+sleep 25
+screencap -p /metadata/dsh/screen.png 2>>$LOG
+echo "skip-suw: screencap done rc=$?" >> $LOG
+# sd116: record the gamepad input device ...
 cat /proc/bus/input/devices > /metadata/dsh/input-devices.txt 2>>$LOG
 echo "skip-suw: done" >> $LOG
 """
