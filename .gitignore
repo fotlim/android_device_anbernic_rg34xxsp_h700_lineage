@@ -6,3 +6,10 @@ kernel/dts/*.dtb
 kernel/dts/*.dts.tmp
 # patched kernel worktree
 kernel/linux/
+
+# build / staging noise
+*.img
+*.log
+__pycache__/
+*.pyc
+device/anbernic/rg34xxsp/kernel/Image.sd*

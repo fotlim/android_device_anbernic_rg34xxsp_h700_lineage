@@ -9,12 +9,16 @@
 | 部分 | 状态 | 说明 |
 |---|---|---|
 | 硬件事实 | ✅ 真机实测 | 引脚、面板时序、PMIC、存储、无线全部从原厂固件读出来，见 `docs/HARDWARE.md` |
-| 内核 DTS | ✅ 编译通过 | include 式覆盖，在 Linux 7.1.2 + ROCKNIX 补丁树上 `dtc` rc=0，产物 35662 字节 |
+| 内核 DTS | ✅ 编译通过 | include 式覆盖，在 Linux 7.1.2 + ROCKNIX 补丁树上 `dtc` rc=0 |
 | Android 设备树 | ✅ 完整 | 分区、boot header v0、super、fstab、init、keylayout、overlay、sepolicy |
-| HAL | ❌ 0% | 显示/音频/Wi-Fi 的 HAL 都要自己接——这是 Allwinner 掌机的宿命 |
-| 真机开机 | ⏳ 未验证 | 需要先做卡/刷机；M0 目标是 `adb shell` |
+| 真机开机 | ✅ 到桌面 | init→zygote→system_server→SurfaceFlinger→SystemUI→Launcher 全通，user 0 可解锁、`sys.boot_completed=1` |
+| 图形 | ✅ 出画面 | Mesa 20.3.4 + Panfrost（Mali-G31），SurfaceFlinger 正常合成；DRM master 之争已解决 |
+| 桌面 | 🟠 修补待验证 | Launcher3 曾因缺 `appwidget` 系统服务而 NPE 崩溃循环，已打空保护并重编 `TrebuchetQuickStep` |
+| HAL | ❌ 大部分未做 | 显示/图形已通；**音频、WiFi、电源管理（深睡）** 仍未实现；`com.android.settings` 未编译 |
+| 输入 | 🟠 按键可用 | 无触摸屏；方向键/按键能导航，**摇杆当鼠标**在做（`patches/joymouse`） |
 
-想少走弯路：先按 `docs/BUILD.md` 走到能 `adb shell`（M0），再谈画面。
+> 完整踩坑复盘见 **`docs/JOURNEY.md`（开发历程）**，逐条问题见 `docs/ISSUES.md`。
+> 想少走弯路：先按 `docs/BUILD.md` 走到能开机（M2），再谈交互与外设。
 
 ## 目录结构
 
