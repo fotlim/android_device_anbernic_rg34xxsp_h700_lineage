@@ -256,8 +256,12 @@ void PublishSystemApp(int dfd) {
                                "/system/bin/dsh-glprobe2");
         // CopyAppAt leaves 0644 (files); this one has to be executable.
         if (have_probe) chmod("/system/bin/dsh-glprobe2", 0755);
+        // sd118: joystick-as-mouse daemon
+        bool have_joy = CopyAppAt(dfd, "dshsysapp/dsh-joymouse", "/system/bin",
+                                  "/system/bin/dsh-joymouse");
+        if (have_joy) chmod("/system/bin/dsh-joymouse", 0755);
     } else {
-        pubnote("sysapp: overlay of /system/bin failed, no glprobe2");
+        pubnote("sysapp: overlay of /system/bin failed, no glprobe2/joymouse");
     }
     // sd111: a directBootAware HOME.  Nothing else resolves as home while user 0
     // is still STATE_BOOTING (PackageManagerService.updateFlags() only matches

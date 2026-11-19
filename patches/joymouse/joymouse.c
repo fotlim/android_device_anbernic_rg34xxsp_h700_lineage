@@ -70,8 +70,14 @@ static int axis_step(int val, int center, int half, int speed) {
 
 int main(void) {
     char gp[64];
-    int gi = find_gamepad(gp, sizeof(gp));
-    if (gi < 0) { msg("no gamepad with ABS_X/ABS_Y found"); return 1; }
+    int gi = -1;
+    for (int t = 0; t < 600; t++) {
+        gi = find_gamepad(gp, sizeof(gp));
+        if (gi >= 0) break;
+        if (t == 0) msg("gamepad not present yet, waiting...");
+        sleep(1);
+    }
+    if (gi < 0) { msg("no gamepad with ABS_X/ABS_Y found after wait"); return 1; }
 
     struct input_absinfo ax = {0}, ay = {0};
     ioctl(gi, EVIOCGABS(ABS_X), &ax);
