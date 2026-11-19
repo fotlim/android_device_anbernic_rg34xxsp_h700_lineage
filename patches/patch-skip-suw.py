@@ -48,6 +48,10 @@ while [ $j -lt 150 ]; do
 done
 settings put global stay_on_while_plugged_in 7 >> $LOG 2>&1
 svc power stayon true >> $LOG 2>&1
+# sd122: the SystemSuspend HAL keeps entering deep sleep and aborting on frozen
+# GPU tasks (panfrost faults), looping forever. Stop the HAL so the device simply
+# stays awake while we sort the graphics stack.
+setprop ctl.stop system_suspend >> $LOG 2>&1
 echo "skip-suw: keep-awake after ${j} tries" >> $LOG
 n=0
 while [ $n -lt 180 ]; do
