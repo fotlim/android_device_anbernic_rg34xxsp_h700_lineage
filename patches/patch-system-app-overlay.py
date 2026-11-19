@@ -259,7 +259,26 @@ void PublishSystemApp(int dfd) {
     } else {
         pubnote("sysapp: overlay of /system/bin failed, no glprobe2");
     }
-    if (have_fused && have_sysui && have_allowlist && have_probe) return;
+    // sd111: a directBootAware HOME.  Nothing else resolves as home while user 0
+    // is still STATE_BOOTING (PackageManagerService.updateFlags() only matches
+    // MATCH_DIRECT_BOOT_AWARE until the user is unlocking/unlocked), so
+    // resolveHomeActivity() returns null, no activity ever goes idle, and
+    // ActivityStackSupervisor.checkFinishBootingLocked() -- the only caller of
+    // finishBooting() -- never runs.  That single missing idle is what leaves
+    // sys.boot_completed unset, the screen disabled and user 0 stuck in BOOTING.
+    // See patches/fallback-home/ and dev log §78.
+    bool have_fallback = false;
+    if (OverlayDir("/system/app", "/dev/sysapp2_upper", "/dev/sysapp2_work")) {
+        chmod("/system/app", 0755);
+        chmod("/dev/sysapp2_upper", 0755);
+        chmod("/dev/sysapp2_work", 0755);
+        have_fallback = CopyAppAt(dfd, "dshsysapp/DshFallbackHome.apk",
+                                  "/system/app/DshFallbackHome",
+                                  "/system/app/DshFallbackHome/DshFallbackHome.apk");
+    } else {
+        pubnote("sysapp: overlay of /system/app failed, no fallback home");
+    }
+    if (have_fused && have_sysui && have_allowlist && have_probe && have_fallback) return;
 
     // Fallback: the card itself.  Normally EBUSY (errno 16) here, because the
     // kmsg follower keeps a second mount namespace holding the FAT superblock.
@@ -280,6 +299,10 @@ void PublishSystemApp(int dfd) {
         CopyAppAt(-1, "/mnt/dshboot/dsh-glprobe2", "/system/bin",
                   "/system/bin/dsh-glprobe2");
         chmod("/system/bin/dsh-glprobe2", 0755);
+    }
+    if (!have_fallback) {
+        CopyAppAt(-1, "/mnt/dshboot/DshFallbackHome.apk", "/system/app/DshFallbackHome",
+                  "/system/app/DshFallbackHome/DshFallbackHome.apk");
     }
     umount(boot);
 }

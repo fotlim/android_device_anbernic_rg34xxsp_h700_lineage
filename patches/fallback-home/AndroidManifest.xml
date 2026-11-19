@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  sd111: a directBootAware HOME used only until user 0 is unlocked.
+
+  Why this exists (see docs/ISSUES.md I-启动-黑屏 and dev log section 78):
+
+  PackageManagerService.updateFlags() only matches MATCH_DIRECT_BOOT_AWARE
+  components while the user is still STATE_BOOTING.  Launcher3's launcher is
+  not direct-boot aware, so resolveHomeActivity() returns null, no activity is
+  ever started, no activity ever reports idle, and
+  ActivityStackSupervisor.checkFinishBootingLocked() (the only caller of
+  ActivityManagerService.finishBooting()) never runs.  That leaves
+  sys.boot_completed unset, the screen disabled and user 0 stuck in BOOTING
+  forever.
+
+  AOSP ships exactly this app (FallbackHome in com.android.settings) but this
+  product does not build com.android.settings, so nothing resolves as home
+  during boot.  This is a minimal clone: directBootAware, resolves while the
+  user is locked, shows a blank "Starting" screen, then starts the real
+  launcher and finishes as soon as ACTION_USER_UNLOCKED arrives.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.dsh.fallbackhome">
+
+    <application
+        android:label="Starting"
+        android:directBootAware="true"
+        android:allowBackup="false"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".FallbackHome"
+            android:exported="true"
+            android:directBootAware="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="nosensor"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar">
+            <intent-filter android:priority="-1000">
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

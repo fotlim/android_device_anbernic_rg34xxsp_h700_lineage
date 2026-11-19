@@ -67,6 +67,22 @@ if [ "$PACK_OVERLAY" = 1 ] && [ -d "$OVERLAY" ]; then
 	done < <(find "$OVERLAY" -type f | sort)
 fi
 
+# sd111: APKs the first stage publishes into /system/*-app.  These ride inside
+# the external initrd (unpacked into the same rootfs as the built-in one), so a
+# new system app can be shipped without touching the FAT boot partition or
+# rebuilding Image.  patch-system-app-overlay.py copies them from dshsysapp/ via
+# the ramdisk DIR* (dfd) the first stage opened before SwitchRoot.
+DSHSYSAPP=/root/initramfs-embed/dshsysapp
+if [ -d "$DSHSYSAPP" ]; then
+	echo
+	echo "=== dshsysapp (APKs staged for the first stage) ==="
+	while IFS= read -r f; do
+		rel=${f#"$DSHSYSAPP/"}
+		ADD+=("$f:dshsysapp/$rel:0644")
+		printf '  %-50s %s B\n' "dshsysapp/$rel" "$(stat -c%s "$f")"
+	done < <(find "$DSHSYSAPP" -type f | sort)
+fi
+
 # NOTE: packing a file here does NOT put it on /vendor.  The first stage only
 # publishes the entries named in kVendorGraphicsFiles (see
 # patches/patch-vendor-graphics.py), and PublishTextFile covers the handful of
