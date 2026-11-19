@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
-"""sd112: boot-time shortcut that gets past the LineageOS setup wizard.
+"""sd112/115: boot-time shortcut that gets past the LineageOS setup wizard AND
+keeps the panel awake.
 
-Why (boot 9a3c220d proves it): the wizard itself is healthy, but
-org.lineageos.setupwizard.WifiSetupActivity does
+Why the wizard has to be skipped (boot 9a3c220d proves it): the wizard itself is
+healthy, but org.lineageos.setupwizard.WifiSetupActivity does
 
     startFirstRunActivityForResult(new Intent("android.net.wifi.SETUP_WIFI_NETWORK"), ...)
 
 and that intent is handled by com.android.settings (Settings$WifiSetupActivity),
 which this product does not build. So the wizard dies with
+ActivityNotFoundException right after Locale -> DateTime -> Wifi, and every later
+step in res/raw/lineage_wizard_script.xml also needs Settings activities. Rather
+than stub all of them, once the framework is up we mark the device provisioned
+and drop to the launcher.
 
-    FATAL EXCEPTION: main
-    java.lang.RuntimeException: Unable to start activity
-      ComponentInfo{org.lineageos.setupwizard/.WifiSetupActivity}:
-      android.content.ActivityNotFoundException:
-        No Activity found to handle Intent { act=android.net.wifi.SETUP_WIFI_NETWORK }
+Why keep the screen on (boot 3fdfccdb): this handheld has no touchscreen, so
+there is never any user activity and PowerManager turns the screen off after the
+60 s default. The SystemSuspend HAL then enters deep sleep and cannot freeze
+userspace ("Freezing user space processes aborted ... 172 tasks refusing to
+freeze"), so it aborts and retries once a second -- `PM: suspend entry/exit` in a
+tight loop, which looks exactly like the device blinking then powering off.
+Setting an effectively infinite screen-off timeout and stay-on keeps it awake so
+the panel stays lit while we work on the launcher.
 
-right after Locale -> DateTime -> Wifi, and every later step in
-res/raw/lineage_wizard_script.xml (sim_missing, location_settings,
-biometric_settings, lockscreen_settings, restore) also needs Settings
-activities. Stubbing all of them is a losing game; instead, once the framework
-is up, mark the device provisioned and drop to the launcher. Remove this service
-(and re-enable org.lineageos.setupwizard) once com.android.settings and a real
-WiFi stack exist.
-
-This runs as `class core` for the same reason patch-live-snapshot.py does:
-`late_start` waits for vold.decrypt, which never happens on this device. The
-pm/am/settings invocations are the same ones the live snapshot already performs
-successfully from this same kind of root one-shot.
+Remove this service (and re-enable org.lineageos.setupwizard) once
+com.android.settings, a real WiFi stack and working suspend exist.
 """
 
 import sys
@@ -35,7 +33,6 @@ PATH = "/root/android/lineage/system/core/init/first_stage_init.cpp"
 MARKER = "PublishSkipSuw"
 
 SKIP_SH = """#!/system/bin/sh
-# sd112/114: bring-up shortcut (see patches/patch-skip-suw.py).
 LOG=/metadata/dsh/skip-suw.log
 echo "skip-suw: start" > $LOG
 n=0
@@ -44,6 +41,13 @@ while [ $n -lt 180 ]; do
     n=$((n+1)); sleep 1
 done
 echo "skip-suw: boot_completed after ${n}s" >> $LOG
+# sd115: keep the panel awake. No touch => no user activity => 60s screen-off =>
+# SystemSuspend HAL deep-sleep loop that cannot freeze userspace and retries
+# forever (boot 3fdfccdb). An effectively infinite timeout + stay-on stops it.
+settings put system screen_off_timeout 2147483647 >> $LOG 2>&1
+settings put global stay_on_while_plugged_in 7 >> $LOG 2>&1
+svc power stayon true >> $LOG 2>&1
+# sd112: mark provisioned and drop the crashing wizard, then go to the launcher.
 settings put global device_provisioned 1 >> $LOG 2>&1
 settings put secure user_setup_complete 1 >> $LOG 2>&1
 settings put secure tv_user_setup_complete 1 >> $LOG 2>&1
@@ -51,24 +55,6 @@ pm disable-user --user 0 org.lineageos.setupwizard >> $LOG 2>&1
 am force-stop org.lineageos.setupwizard >> $LOG 2>&1
 sleep 1
 am start -a android.intent.action.MAIN -c android.intent.category.HOME -f 0x10000000 >> $LOG 2>&1
-# sd114: one focused capture at +35s, before the live snapshot mounts the card,
-# so we finally see why com.android.launcher3 flickers (crash stack / ps / focus).
-CARD=/mnt/dshlap
-sleep 35
-mkdir -p $CARD
-if mount -t vfat -o rw /dev/block/mmcblk0p1 $CARD 2>>$LOG; then
-    mkdir -p $CARD/DEBUG
-    logcat -d -b main -b system -b crash -b events -v threadtime 2>/dev/null | tail -c 1048576 > $CARD/DEBUG/lap-logcat.txt
-    ps -A > $CARD/DEBUG/lap-ps.txt 2>&1
-    dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp|mSystemBooted|mAwake|mDisplayEnabled|launcher|Keyguard|mShowingLockscreen' > $CARD/DEBUG/lap-window.txt
-    dumpsys activity activities 2>/dev/null | head -80 > $CARD/DEBUG/lap-activity.txt
-    dumpsys SurfaceFlinger 2>/dev/null | grep -E 'com.android.launcher3|flip|Display|layer' | head -40 > $CARD/DEBUG/lap-sf.txt
-    cp $LOG $CARD/DEBUG/lap-skip-suw.log 2>/dev/null
-    umount $CARD 2>>$LOG
-    echo "skip-suw: captured launcher state to card" >> $LOG
-else
-    echo "skip-suw: launcher capture mount failed" >> $LOG
-fi
 echo "skip-suw: done" >> $LOG
 """
 
@@ -82,7 +68,8 @@ service dsh-skip-suw /system/bin/sh /metadata/dsh/dsh-skip-suw.sh
 
 NEW_CODE = r'''// sd112: mark the device provisioned and drop to the launcher, because
 // org.lineageos.setupwizard's WiFi step needs com.android.settings which this
-// product does not build. See patches/patch-skip-suw.py.
+// product does not build; sd115 also keeps the panel awake so the no-touch
+// device never enters the broken autosuspend loop. See patches/patch-skip-suw.py.
 const char kSkipSuwSh[] =
 %s
 const char kSkipSuwRc[] =
