@@ -339,6 +339,23 @@ timeout 12 dumpsys power > $CARD/DEBUG/live-power-late.txt 2>&1
   dumpsys window 2>/dev/null | grep -E 'mSystemBooted|mAwake|mCurrentFocus'
   dumpsys user 2>/dev/null | grep -E 'State:|Unlock'
 } > $CARD/DEBUG/live-user-try.txt 2>&1
+# sd110: capture the user/AM-side evidence in full, because the whole boot stall
+# is now in UserController: finishUserBoot() (which moves user 0 BOOTING ->
+# RUNNING_LOCKED and then unlocks) is only reached through
+# ActivityStackSupervisor.activityIdleInternal -> finishUserSwitch, i.e. it needs
+# some activity to go idle, and no activity ever resumes while user 0 is locked.
+{ echo "=== event log: uc_* / boot_progress ==="
+  logcat -d -b events -v threadtime 2>/dev/null | grep -E 'uc_|boot_progress|user_'
+  echo "=== ActivityManager / UserController / StorageManagerService ==="
+  logcat -d -b all -v threadtime 2>/dev/null \
+    | grep -E 'UserController|ActivityManager: |StorageManagerService|ActivityTaskManager|UserManagerService|finishUserBoot|finishUserSwitch|startUser|isUserRunning|UNLOCK_USER' \
+    | tail -120
+  echo "=== dumpsys activity (head) ==="
+  dumpsys activity activities 2>/dev/null | head -40
+  echo "=== /data/system/users/0.xml ==="
+  head -c 2000 /data/system/users/0.xml 2>&1
+  echo "=== /data/system/users ==="; ls -la /data/system/users 2>&1
+} > $CARD/DEBUG/live-user-log.txt 2>&1
 { echo "===== boot-progress / animation windows ====="
   timeout 12 dumpsys window windows 2>/dev/null | grep -E 'Window #|Boot|boot|mSystemBooted|mAwake|mShowingBootMessages|Splash'
   echo "===== window policy wakefulness ====="
