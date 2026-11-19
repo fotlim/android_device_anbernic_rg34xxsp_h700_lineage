@@ -101,6 +101,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 
 OUT="${REPO}/rg34xxsp-sd.img"
 TOTAL_GIB=8
+BOOT_MIB=64
 UBOOT="${REPO}/kernel/uboot/H700-DDR3-u-boot-sunxi-with-spl.bin"
 DTB="${REPO}/kernel/dtb/sun50i-h700-anbernic-rg34xx-sp.dtb"
 DTB_V2="${REPO}/kernel/dtb/sun50i-h700-anbernic-rg34xx-sp-v2-panel.dtb"
@@ -121,6 +122,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --out)         OUT="$2"; shift 2 ;;
         --total-gib)   TOTAL_GIB="$2"; shift 2 ;;
+        --boot-mib)    BOOT_MIB="$2"; shift 2 ;;
         --uboot)       UBOOT="$2"; shift 2 ;;
         --dtb)         DTB="$2"; shift 2 ;;
         --kernel)      KERNEL="$2"; shift 2 ;;
@@ -173,10 +175,10 @@ fi
 SECT=512
 MiB=$((1024 * 1024 / SECT))
 
-BOOT_START=$((1 * MiB));      BOOT_SIZE=$((64 * MiB));   BOOT_NAME=boot
-MISC_START=$((65 * MiB));     MISC_SIZE=$((4 * MiB));    MISC_NAME=misc
-META_START=$((69 * MiB));     META_SIZE=$((16 * MiB));   META_NAME=metadata
-SUPER_START=$((85 * MiB));    SUPER_SIZE=$((4 * 1024 * MiB)); SUPER_NAME=super
+BOOT_START=$((1 * MiB));      BOOT_SIZE=$((BOOT_MIB * MiB)); BOOT_NAME=boot
+MISC_START=$((BOOT_START + BOOT_SIZE)); MISC_SIZE=$((4 * MiB));    MISC_NAME=misc
+META_START=$((MISC_START + MISC_SIZE)); META_SIZE=$((16 * MiB));   META_NAME=metadata
+SUPER_START=$((META_START + META_SIZE)); SUPER_SIZE=$((4 * 1024 * MiB)); SUPER_NAME=super
 DATA_START=$((SUPER_START + SUPER_SIZE)); DATA_NAME=userdata
 
 TOTAL_SECT=$((TOTAL_GIB * 1024 * MiB))
