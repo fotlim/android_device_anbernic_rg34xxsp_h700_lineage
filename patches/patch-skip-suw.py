@@ -48,6 +48,10 @@ while [ $j -lt 150 ]; do
 done
 settings put global stay_on_while_plugged_in 7 >> $LOG 2>&1
 svc power stayon true >> $LOG 2>&1
+# sd125: hold a kernel wakelock so the device does not autosuspend. (Stopping the
+# SystemSuspend HAL caused a PowerManager nativeAcquireSuspendBlocker watchdog, so
+# instead keep the wakeup reference held.)
+if [ -e /sys/power/wake_lock ]; then echo dsh-keepawake > /sys/power/wake_lock; echo "skip-suw: wrote /sys/power/wake_lock rc=$?" >> $LOG; else echo "skip-suw: no /sys/power/wake_lock" >> $LOG; fi
 echo "skip-suw: keep-awake after ${j} tries" >> $LOG
 n=0
 while [ $n -lt 180 ]; do

@@ -27,6 +27,7 @@
     <application
         android:label="Starting"
         android:directBootAware="true"
+        android:hardwareAccelerated="false"
         android:allowBackup="false"
         android:supportsRtl="true">
 
