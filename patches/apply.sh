@@ -33,7 +33,7 @@ for p in patch-mount-data-rc.py patch-framework-logs-rc.py \
          patch-wifi-feature.py patch-wpa-supplicant-stub.py \
          patch-system-app-overlay.py patch-mesa-publish.py \
          patch-skip-bootanim.py patch-privapp-log.py \
-         patch-live-snapshot.py patch-skip-suw.py patch-adb-bringup.py; do
+         patch-live-snapshot.py patch-skip-suw.py; do
 	if [ -f "$HERE/$p" ]; then
 		python3 "$HERE/$p" || { echo "$p: FAILED"; exit 1; }
 	fi

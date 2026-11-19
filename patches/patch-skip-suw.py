@@ -35,7 +35,7 @@ PATH = "/root/android/lineage/system/core/init/first_stage_init.cpp"
 MARKER = "PublishSkipSuw"
 
 SKIP_SH = """#!/system/bin/sh
-# sd112: bring-up shortcut (see patches/patch-skip-suw.py).
+# sd112/114: bring-up shortcut (see patches/patch-skip-suw.py).
 LOG=/metadata/dsh/skip-suw.log
 echo "skip-suw: start" > $LOG
 n=0
@@ -51,6 +51,24 @@ pm disable-user --user 0 org.lineageos.setupwizard >> $LOG 2>&1
 am force-stop org.lineageos.setupwizard >> $LOG 2>&1
 sleep 1
 am start -a android.intent.action.MAIN -c android.intent.category.HOME -f 0x10000000 >> $LOG 2>&1
+# sd114: one focused capture at +35s, before the live snapshot mounts the card,
+# so we finally see why com.android.launcher3 flickers (crash stack / ps / focus).
+CARD=/mnt/dshlap
+sleep 35
+mkdir -p $CARD
+if mount -t vfat -o rw /dev/block/mmcblk0p1 $CARD 2>>$LOG; then
+    mkdir -p $CARD/DEBUG
+    logcat -d -b main -b system -b crash -b events -v threadtime 2>/dev/null | tail -c 1048576 > $CARD/DEBUG/lap-logcat.txt
+    ps -A > $CARD/DEBUG/lap-ps.txt 2>&1
+    dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp|mSystemBooted|mAwake|mDisplayEnabled|launcher|Keyguard|mShowingLockscreen' > $CARD/DEBUG/lap-window.txt
+    dumpsys activity activities 2>/dev/null | head -80 > $CARD/DEBUG/lap-activity.txt
+    dumpsys SurfaceFlinger 2>/dev/null | grep -E 'com.android.launcher3|flip|Display|layer' | head -40 > $CARD/DEBUG/lap-sf.txt
+    cp $LOG $CARD/DEBUG/lap-skip-suw.log 2>/dev/null
+    umount $CARD 2>>$LOG
+    echo "skip-suw: captured launcher state to card" >> $LOG
+else
+    echo "skip-suw: launcher capture mount failed" >> $LOG
+fi
 echo "skip-suw: done" >> $LOG
 """
 
