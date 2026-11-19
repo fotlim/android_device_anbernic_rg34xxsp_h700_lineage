@@ -35,6 +35,20 @@ MARKER = "PublishSkipSuw"
 SKIP_SH = """#!/system/bin/sh
 LOG=/metadata/dsh/skip-suw.log
 echo "skip-suw: start" > $LOG
+# sd120: prevent the panel from timing out AS EARLY AS POSSIBLE. On slow boots
+# sys.boot_completed lands at ~100s, well past the 60s screen-off, so setting this
+# only after boot_completed is too late -- the screen has already gone off and the
+# broken suspend loop (175 tasks refusing to freeze) has started. Retry until the
+# SettingsProvider accepts it (available well before boot_completed).
+j=0
+while [ $j -lt 150 ]; do
+    settings put system screen_off_timeout 2147483647 >> $LOG 2>&1
+    [ "$(settings get system screen_off_timeout 2>/dev/null)" = "2147483647" ] && break
+    j=$((j+1)); sleep 2
+done
+settings put global stay_on_while_plugged_in 7 >> $LOG 2>&1
+svc power stayon true >> $LOG 2>&1
+echo "skip-suw: keep-awake after ${j} tries" >> $LOG
 n=0
 while [ $n -lt 180 ]; do
     [ "$(getprop sys.boot_completed)" = "1" ] && break
