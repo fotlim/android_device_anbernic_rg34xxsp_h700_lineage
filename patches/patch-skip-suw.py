@@ -48,10 +48,6 @@ while [ $j -lt 150 ]; do
 done
 settings put global stay_on_while_plugged_in 7 >> $LOG 2>&1
 svc power stayon true >> $LOG 2>&1
-# sd122: the SystemSuspend HAL keeps entering deep sleep and aborting on frozen
-# GPU tasks (panfrost faults), looping forever. Stop the HAL so the device simply
-# stays awake while we sort the graphics stack.
-setprop ctl.stop system_suspend >> $LOG 2>&1
 echo "skip-suw: keep-awake after ${j} tries" >> $LOG
 n=0
 while [ $n -lt 180 ]; do
@@ -79,6 +75,10 @@ am start -a android.intent.action.MAIN -c android.intent.category.HOME -f 0x1000
 # ImageWallpaper component and recycle SystemUI so it runs without a wallpaper.
 pm disable --user 0 com.android.systemui/com.android.systemui.ImageWallpaper >> $LOG 2>&1
 pm disable-user --user 0 com.android.systemui/com.android.systemui.ImageWallpaper >> $LOG 2>&1
+# sd123: use our simple View-based launcher (DshFallbackHome) instead of the
+# Quickstep launcher, whose complex HWUI rendering faults panfrost. Disabling
+# com.android.launcher3 makes DshFallbackHome the default HOME.
+pm disable-user --user 0 com.android.launcher3 >> $LOG 2>&1
 am force-stop com.android.systemui >> $LOG 2>&1
 # sd116/118: no touchscreen; force the swipe keyguard away (retry while SystemUI settles).
 settings put secure lockscreen.disabled 1 >> $LOG 2>&1

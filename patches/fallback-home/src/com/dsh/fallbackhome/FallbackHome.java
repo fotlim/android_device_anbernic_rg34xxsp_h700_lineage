@@ -2,131 +2,178 @@ package com.dsh.fallbackhome;
 
 import android.app.Activity;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.graphics.Color;
+import android.graphics.drawable.Drawable;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.os.UserManager;
 import android.util.Log;
+import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.BaseAdapter;
+import android.widget.FrameLayout;
+import android.widget.GridView;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+
 /**
- * sd111: minimal directBootAware HOME, a clone of AOSP's Settings FallbackHome.
+ * sd123: minimal View-based launcher used as HOME on this port.
  *
- * The product does not build com.android.settings, so during boot nothing
- * resolves as HOME for the still-locked user 0.  Because PackageManagerService
- * only matches MATCH_DIRECT_BOOT_AWARE components until the user is
- * unlocking/unlocked, the non-direct-boot launcher is filtered out and
- * resolveHomeActivity() returns null.  With no activity ever started, no idle
- * callback fires, so ActivityStackSupervisor.checkFinishBootingLocked() never
- * runs and ActivityManagerService.finishBooting() never happens: sys.boot_completed
- * is never set, the screen is never enabled, and user 0 stays BOOTING forever.
- *
- * This activity is directBootAware with a very low HOME priority (-1000), so it
- * is the only HOME candidate while the user is locked.  Once it draws and goes
- * idle it unblocks finishBooting() -> sendBootCompleted() -> finishUserBoot()
- * (which, on a device with ro.crypto.state=unsupported, unlocks user 0
- * immediately).  ACTION_USER_UNLOCKED then lets us hand off to the real
- * launcher and finish().
- *
- * It uses only public APIs on purpose (so it compiles without platform_apis and
- * does not need a privapp allowlist): ACTION_USER_UNLOCKED is spelled out as a
- * string literal because the constant is @SystemApi.
+ * Quickstep's complex HWUI rendering faults the panfrost driver (js
+ * DATA_INVALID_FAULT) and crash-loops the launcher; plain View rendering (like
+ * SystemUI's status bar) works, so this shows a simple grid of launchable apps.
+ * It is also the directBootAware HOME that lets the boot complete while user 0 is
+ * still locked (see patches/fallback-home/AndroidManifest.xml).
  */
 public class FallbackHome extends Activity {
     private static final String TAG = "DshFallbackHome";
     private static final String ACTION_USER_UNLOCKED = "android.intent.action.USER_UNLOCKED";
-    private static final long RECHECK_MS = 2000L;
 
-    private final Handler mHandler = new Handler(Looper.getMainLooper());
-    private boolean mDone;
+    private GridView mGrid;
+    private TextView mHint;
+    private AppAdapter mAdapter;
+    private final List<ResolveInfo> mApps = new ArrayList<>();
 
     private final BroadcastReceiver mReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
+        @Override public void onReceive(Context context, Intent intent) {
             Log.i(TAG, "broadcast " + intent.getAction());
-            maybeFinish();
-        }
-    };
-
-    private final Runnable mRecheck = new Runnable() {
-        @Override
-        public void run() {
-            if (mDone) {
-                return;
-            }
-            maybeFinish();
-            if (!mDone) {
-                mHandler.postDelayed(this, RECHECK_MS);
-            }
+            refresh();
         }
     };
 
     @Override
     protected void onCreate(Bundle icicle) {
         super.onCreate(icicle);
-        TextView tv = new TextView(this);
-        tv.setText("Starting\u2026");
-        tv.setTextSize(28f);
-        tv.setGravity(Gravity.CENTER);
-        tv.setBackgroundColor(0xFF000000);
-        tv.setTextColor(0xFFFFFFFF);
-        setContentView(tv);
 
-        IntentFilter f = new IntentFilter(ACTION_USER_UNLOCKED);
-        f.addAction(Intent.ACTION_BOOT_COMPLETED);
-        registerReceiver(mReceiver, f);
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(0xFF101418);
 
-        mHandler.post(mRecheck);
-        maybeFinish();
+        mGrid = new GridView(this);
+        int pad = dp(8);
+        mGrid.setPadding(pad, dp(40), pad, dp(40));
+        mGrid.setNumColumns(5);
+        mGrid.setHorizontalSpacing(dp(4));
+        mGrid.setVerticalSpacing(dp(12));
+        mGrid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
+        mAdapter = new AppAdapter();
+        mGrid.setAdapter(mAdapter);
+        mGrid.setOnItemClickListener((parent, view, position, id) -> {
+            if (position < 0 || position >= mApps.size()) return;
+            ResolveInfo ri = mApps.get(position);
+            Intent launch = new Intent(Intent.ACTION_MAIN)
+                    .addCategory(Intent.CATEGORY_LAUNCHER)
+                    .setComponent(new ComponentName(ri.activityInfo.packageName, ri.activityInfo.name))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try { startActivity(launch); } catch (RuntimeException e) { Log.w(TAG, "launch failed", e); }
+        });
+        root.addView(mGrid, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        mHint = new TextView(this);
+        mHint.setText("Starting\u2026");
+        mHint.setTextSize(24f);
+        mHint.setTextColor(Color.WHITE);
+        mHint.setGravity(Gravity.CENTER);
+        root.addView(mHint, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        setContentView(root);
+
+        registerReceiver(mReceiver, new IntentFilter(ACTION_USER_UNLOCKED));
+        refresh();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        refresh();
     }
 
     @Override
     protected void onDestroy() {
-        mDone = true;
-        mHandler.removeCallbacksAndMessages(null);
-        try {
-            unregisterReceiver(mReceiver);
-        } catch (IllegalArgumentException ignored) {
-            // receiver may not have been registered if onCreate threw early
-        }
+        try { unregisterReceiver(mReceiver); } catch (IllegalArgumentException ignored) {}
         super.onDestroy();
     }
 
-    private void maybeFinish() {
-        if (mDone) {
-            return;
-        }
+    private void refresh() {
         UserManager um = (UserManager) getSystemService(Context.USER_SERVICE);
-        if (um == null || !um.isUserUnlocked()) {
-            Log.i(TAG, "user not unlocked yet");
+        boolean unlocked = um != null && um.isUserUnlocked();
+        Log.i(TAG, "refresh unlocked=" + unlocked);
+        if (!unlocked) {
+            mHint.setVisibility(View.VISIBLE);
+            mGrid.setVisibility(View.GONE);
             return;
         }
-        Intent home = new Intent(Intent.ACTION_MAIN);
-        home.addCategory(Intent.CATEGORY_HOME);
-        home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        ResolveInfo ri = getPackageManager().resolveActivity(
-                home, PackageManager.MATCH_DEFAULT_ONLY);
-        String pkg = (ri != null && ri.activityInfo != null)
-                ? ri.activityInfo.packageName : null;
-        if (pkg != null && !getPackageName().equals(pkg)) {
-            Log.i(TAG, "user unlocked; handing off to " + ri.activityInfo.name);
-            mDone = true;
-            try {
-                startActivity(home);
-            } catch (RuntimeException e) {
-                Log.w(TAG, "startActivity(real home) failed; staying", e);
-                mDone = false;
-                return;
+        loadApps();
+        mHint.setVisibility(View.GONE);
+        mGrid.setVisibility(View.VISIBLE);
+        mAdapter.notifyDataSetChanged();
+    }
+
+    private void loadApps() {
+        PackageManager pm = getPackageManager();
+        Intent i = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+        List<ResolveInfo> list = pm.queryIntentActivities(i, 0);
+        mApps.clear();
+        for (ResolveInfo ri : list) {
+            if (ri.activityInfo == null) continue;
+            if (getPackageName().equals(ri.activityInfo.packageName)) continue;
+            mApps.add(ri);
+        }
+        Collections.sort(mApps, new Comparator<ResolveInfo>() {
+            @Override public int compare(ResolveInfo a, ResolveInfo b) {
+                CharSequence la = a.loadLabel(pm), lb = b.loadLabel(pm);
+                return la.toString().compareToIgnoreCase(lb.toString());
             }
-            finish();
-        } else {
-            Log.i(TAG, "user unlocked but no other home yet (pkg=" + pkg + ")");
+        });
+        Log.i(TAG, "loadApps count=" + mApps.size());
+    }
+
+    private int dp(int v) {
+        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
+                getResources().getDisplayMetrics());
+    }
+
+    private final class AppAdapter extends BaseAdapter {
+        @Override public int getCount() { return mApps.size(); }
+        @Override public Object getItem(int p) { return mApps.get(p); }
+        @Override public long getItemId(int p) { return p; }
+        @Override public View getView(int position, View convert, ViewGroup parent) {
+            LinearLayout ll = new LinearLayout(FallbackHome.this);
+            ll.setOrientation(LinearLayout.VERTICAL);
+            ll.setGravity(Gravity.CENTER_HORIZONTAL);
+            ll.setPadding(0, dp(4), 0, dp(4));
+            ResolveInfo ri = mApps.get(position);
+            ImageView iv = new ImageView(FallbackHome.this);
+            int s = dp(44);
+            iv.setLayoutParams(new LinearLayout.LayoutParams(s, s));
+            try {
+                Drawable d = ri.loadIcon(getPackageManager());
+                iv.setImageDrawable(d);
+            } catch (Exception ignored) {}
+            TextView tv = new TextView(FallbackHome.this);
+            tv.setTextSize(11f);
+            tv.setTextColor(0xFFE6E6E6);
+            tv.setGravity(Gravity.CENTER);
+            tv.setSingleLine(true);
+            tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            try { tv.setText(ri.loadLabel(getPackageManager())); } catch (Exception ignored) {}
+            ll.addView(iv);
+            ll.addView(tv);
+            return ll;
         }
     }
 }
