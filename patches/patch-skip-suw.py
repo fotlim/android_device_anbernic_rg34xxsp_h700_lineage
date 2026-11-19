@@ -55,12 +55,22 @@ pm disable-user --user 0 org.lineageos.setupwizard >> $LOG 2>&1
 am force-stop org.lineageos.setupwizard >> $LOG 2>&1
 sleep 1
 am start -a android.intent.action.MAIN -c android.intent.category.HOME -f 0x10000000 >> $LOG 2>&1
-# sd116/118: no touchscreen; force the swipe keyguard away.
+# sd119: SystemUI's ImageWallpaper render thread SIGSEGVs on this Panfrost/minigbm
+# stack (Fatal signal 11 fault addr 0x38, null deref, name ImageWallpaper), which
+# crash-loops all of SystemUI and keeps the lock screen bouncing. Disable the
+# ImageWallpaper component and recycle SystemUI so it runs without a wallpaper.
+pm disable --user 0 com.android.systemui/com.android.systemui.ImageWallpaper >> $LOG 2>&1
+pm disable-user --user 0 com.android.systemui/com.android.systemui.ImageWallpaper >> $LOG 2>&1
+am force-stop com.android.systemui >> $LOG 2>&1
+# sd116/118: no touchscreen; force the swipe keyguard away (retry while SystemUI settles).
 settings put secure lockscreen.disabled 1 >> $LOG 2>&1
 settings put global lockscreen.disabled 1 >> $LOG 2>&1
-wm dismiss-keyguard >> $LOG 2>&1
-sleep 3
-wm dismiss-keyguard >> $LOG 2>&1
+i=0
+while [ $i -lt 8 ]; do
+    sleep 3
+    wm dismiss-keyguard >> $LOG 2>&1
+    i=$((i+1))
+done
 # sd116: record the gamepad input device so the joystick-as-mouse daemon can be
 # built against the exact event node / axes next round.
 cat /proc/bus/input/devices > /metadata/dsh/input-devices.txt 2>>$LOG
