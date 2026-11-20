@@ -244,6 +244,12 @@ void PublishSystemApp(int dfd) {
     bool have_allowlist = CopyAppAt(dfd, "dshsysapp/com.android.systemui.xml",
                                     "/system_ext/etc/permissions",
                                     "/system_ext/etc/permissions/com.android.systemui.xml");
+    // sd135: declare FEATURE_APP_WIDGETS so system_server starts AppWidgetService;
+    // otherwise AppWidgetManager is null and Music(Eleven)/launcher crash with an
+    // appwidget NPE (AppWidgetSmall.getAppWidgetIds on null).
+    CopyAppAt(dfd, "dshsysapp/android.software.app_widgets.xml",
+              "/system_ext/etc/permissions",
+              "/system_ext/etc/permissions/android.software.app_widgets.xml");
     // sd95: the gralloc-import probe. It cannot be a vendor binary (AHardwareBuffer
     // lives in libandroid, which has no vendor variant here), so it lives in
     // /system/bin and needs an overlay of its own -- /system is read-only.

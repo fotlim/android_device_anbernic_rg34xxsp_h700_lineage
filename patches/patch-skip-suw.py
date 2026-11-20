@@ -112,6 +112,18 @@ dumpsys input > /metadata/dsh/dumpsys-input.txt 2>>$LOG
   echo "=== /data/anr traces (media/fuse) ==="; ls -l /data/anr 2>&1
   for f in /data/anr/anr_* /data/anr/traces.txt; do [ -f "$f" ] && { echo "--- $f"; grep -nE 'ExternalStorage|FuseDaemon|media.module|fuse|mount|WARNING|Reason' "$f" 2>&1 | head -30; }; done
 } > /metadata/dsh/storage-diag.txt 2>&1
+# sd134: drop a test tune into sdcard and pre-grant storage perms, so storage/music
+# can be exercised without the (GPU-black) runtime-permission dialog. Write to the
+# lower /data/media directly (FUSE exposes it at /storage/emulated/0).
+mkdir -p /mnt/dshboot 2>>$LOG || true
+mount -t vfat -o ro /dev/block/mmcblk0p1 /mnt/dshboot 2>>$LOG || true
+mkdir -p /data/media/0/Music 2>>$LOG || true
+if [ -f /mnt/dshboot/test.wav ]; then
+    cp /mnt/dshboot/test.wav /data/media/0/Music/test.wav 2>>$LOG && chmod 0666 /data/media/0/Music/test.wav 2>>$LOG
+    echo "skip-suw: copied test.wav to sdcard" >> $LOG
+fi
+umount /mnt/dshboot 2>>$LOG || true
+for p in org.lineageos.eleven com.android.music com.android.documentsui com.android.providers.downloads.ui; do pm grant $p android.permission.READ_EXTERNAL_STORAGE 2>>$LOG; done
 # sd116: record the gamepad input device ...
 cat /proc/bus/input/devices > /metadata/dsh/input-devices.txt 2>>$LOG
 echo "skip-suw: done" >> $LOG
