@@ -20,6 +20,14 @@ JOY_RC = """service dsh-joymouse /system/bin/dsh-joymouse
     class core
     user root
     group root
+
+# sd132: start drmserver early (class core) so it registers drm.drmManager before
+# MediaProvider's DrmManagerClient waits on it. Binary published to /system/bin
+# by patch-system-app-overlay.py.
+service drm /system/bin/drmserver
+    class core
+    user drm
+    group drm system inet drmrpc readproc
 """
 
 NEW_CODE = r'''// sd118: joystick-as-mouse daemon (binary published to /system/bin by

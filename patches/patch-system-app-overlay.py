@@ -260,6 +260,12 @@ void PublishSystemApp(int dfd) {
         bool have_joy = CopyAppAt(dfd, "dshsysapp/dsh-joymouse", "/system/bin",
                                   "/system/bin/dsh-joymouse");
         if (have_joy) chmod("/system/bin/dsh-joymouse", 0755);
+        // sd132: drmserver registers the legacy drm.drmManager binder service that
+        // MediaProvider.onCreate's DrmManagerClient blocks on; without it the whole
+        // emulated-storage FUSE mount chain hangs (storage-diag ANR root cause).
+        bool have_drm = CopyAppAt(dfd, "dshsysapp/drmserver", "/system/bin",
+                                  "/system/bin/drmserver");
+        if (have_drm) chmod("/system/bin/drmserver", 0755);
     } else {
         pubnote("sysapp: overlay of /system/bin failed, no glprobe2/joymouse");
     }
