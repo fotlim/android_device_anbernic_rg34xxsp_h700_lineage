@@ -32,11 +32,12 @@
 - **工作量**：大（多轮，可能涉及重编 Mesa / 内核）。
 
 
-### P0-2 模拟外置存储 /storage/emulated 挂不上（MediaProvider FUSE ANR）
+### P0-2 模拟外置存储 /storage/emulated 挂不上（MediaProvider FUSE ANR）—— ✅ 已修复（sd133）
 - **现象/证据**：`ExternalStorageServiceImpl → Timeout executing service → ANR (循环)`；`vold: Mounting emulated fuse volume` 后会话超时。物理卡/ext4 都正常。
-- **影响**：App 读写 sdcard、下载、截图、相册/音乐扫描全废。
-- **修复思路**：常见根因是 `/dev/fuse` 节点缺失或 MediaProvider 首启初始化过慢。① 开机 early `mknod /dev/fuse c 10 229; mount fusectl`；② 先重启一次观察首启后是否自动恢复；③ 必要时给 MediaProvider 首启更多时间/预建媒体库。
-- **工作量**：小-中（先试重启/补节点）。
+- **根因（sd132 由 `/data/anr` 线程栈定位）**：MediaProvider `onCreate → new ModernMediaScanner → new DrmManagerClient` 里 `DrmManagerClientImpl::getDrmManagerService()` 在 `ServiceManagerShim::getService` 上**死等 `drm.drmManager`**（该 binder 服务由 `drmserver` 注册，而本产品镜像**没编进 drmserver**）→ MediaProvider `onCreate` >20s → 服务 ANR 被杀 → FUSE 会话起不来 → `/storage/emulated` 一直 `UNMOUNTABLE`。
+- **修复**：编 `drmserver`，发布到 `/system/bin`，用独立 rc `/vendor/etc/init/90-dsh-drmserver.rc`（class core、user root）早启动 → 注册 `drm.drmManager`。
+- **验证（boot 06ceacbe）**：`live-services` 有 `drm.drmManager: [drm.IDrmManagerService]`；`StorageManagerService: Mounted volume emulated;0`；`state=MOUNTED`；无 ExternalStorage ANR；弹窗消失。
+- **状态**：✅ 稳定。
 
 ---
 
