@@ -20,22 +20,29 @@ JOY_RC = """service dsh-joymouse /system/bin/dsh-joymouse
     class core
     user root
     group root
+"""
 
-# sd132: start drmserver early (class core) so it registers drm.drmManager before
-# MediaProvider's DrmManagerClient waits on it. Binary published to /system/bin
-# by patch-system-app-overlay.py.
-service drm /system/bin/drmserver
+# sd132: drmserver registers the legacy drm.drmManager binder service that
+# MediaProvider.onCreate's DrmManagerClient blocks on. Separate rc file, root,
+# class core, so init runs it very early and registers drm.drmManager before
+# MediaProvider starts. Binary published to /system/bin by patch-system-app-overlay.
+DRM_RC = """service drm /system/bin/drmserver
     class core
-    user drm
-    group drm system inet drmrpc readproc
+    user root
+    group root
+    writepid /dev/cpuset/foreground/tasks
 """
 
 NEW_CODE = r'''// sd118: joystick-as-mouse daemon (binary published to /system/bin by
 // patch-system-app-overlay.py). See patches/joymouse/joymouse.c.
 const char kJoyMouseRc[] =
 %s
+// sd132: drmserver rc (registers drm.drmManager for MediaProvider).
+const char kDrmServerRc[] =
+%s
 void PublishJoyMouseRc() {
     PublishTextFile("/vendor/etc/init/91-dsh-joymouse.rc", kJoyMouseRc, 0644);
+    PublishTextFile("/vendor/etc/init/90-dsh-drmserver.rc", kDrmServerRc, 0644);
 }
 
 '''
@@ -60,7 +67,7 @@ def main():
     anchor = "void PublishRamdiskFstab(DIR* ramdisk) {"
     if anchor not in text:
         sys.exit("anchor for function insert not found")
-    text = text.replace(anchor, (NEW_CODE % c_literal(JOY_RC)) + anchor, 1)
+    text = text.replace(anchor, (NEW_CODE % (c_literal(JOY_RC), c_literal(DRM_RC))) + anchor, 1)
 
     for call in ("    PublishSkipSuw();\n", "    PublishLiveSnapshot();\n",
                  "    PublishServiceRcOverrides();\n"):
