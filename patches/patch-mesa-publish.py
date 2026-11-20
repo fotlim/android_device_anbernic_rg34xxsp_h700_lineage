@@ -135,6 +135,14 @@ void PublishMesa(int dfd) {
     // The gallium driver itself; found via LIBGL_DRIVERS_PATH below.
     CopyAppAt(dfd, "vendor-overlay/mesa_panfrost_dri.so", "/vendor/lib64/hw",
               "/vendor/lib64/hw/panfrost_dri.so");
+    // sd129: mesa 23.3.6's panfrost gallium driver (DT_NEEDED) also needs the NDK
+    // C++ shared runtime and a newer libdrm (it uses drmSyncobj*, absent in the
+    // stock 2.4.99). Ship both into /vendor/lib64/hw, which is in the vendor
+    // linker search path (same mechanism that finds libglapi.so).
+    CopyAppAt(dfd, "vendor-overlay/libc++_shared.so", "/vendor/lib64/hw",
+              "/vendor/lib64/hw/libc++_shared.so");
+    CopyAppAt(dfd, "vendor-overlay/libdrm.so", "/vendor/lib64/hw",
+              "/vendor/lib64/hw/libdrm.so");
     // sd102: the composer rebuilt with drmSetMaster(). Without it every
     // drmModeAtomicCommit returns -EACCES and the panel keeps the console.
     CopyAppAt(dfd, "vendor-overlay/lib64/hw/hwcomposer.drm_minigbm.so", "/vendor/lib64/hw",
