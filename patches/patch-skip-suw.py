@@ -115,15 +115,39 @@ dumpsys input > /metadata/dsh/dumpsys-input.txt 2>>$LOG
 # sd134: drop a test tune into sdcard and pre-grant storage perms, so storage/music
 # can be exercised without the (GPU-black) runtime-permission dialog. Write to the
 # lower /data/media directly (FUSE exposes it at /storage/emulated/0).
-mkdir -p /mnt/dshboot 2>>$LOG || true
-mount -t vfat -o ro /dev/block/mmcblk0p1 /mnt/dshboot 2>>$LOG || true
-mkdir -p /data/media/0/Music 2>>$LOG || true
-if [ -f /mnt/dshboot/test.wav ]; then
-    cp /mnt/dshboot/test.wav /data/media/0/Music/test.wav 2>>$LOG && chmod 0666 /data/media/0/Music/test.wav 2>>$LOG
+mkdir -p /mnt/dshboot /data/media/0/Music 2>>$LOG || true
+P1MNT=$(awk '$1=="/dev/block/mmcblk0p1"{print $2; exit}' /proc/mounts 2>/dev/null)
+US=0
+if [ -z "$P1MNT" ]; then
+    if mount -t vfat -o ro /dev/block/mmcblk0p1 /mnt/dshboot 2>>$LOG; then P1MNT=/mnt/dshboot; US=1; fi
+fi
+echo "skip-suw: p1-mountpoint=[$P1MNT]" >> $LOG
+if [ -n "$P1MNT" ] && [ -f "$P1MNT/test.wav" ]; then
+    cp "$P1MNT/test.wav" /data/media/0/Music/test.wav 2>>$LOG && chmod 0666 /data/media/0/Music/test.wav 2>>$LOG
     echo "skip-suw: copied test.wav to sdcard" >> $LOG
 fi
-umount /mnt/dshboot 2>>$LOG || true
+[ "$US" = "1" ] && umount /mnt/dshboot 2>>$LOG || true
+# sd136: MediaStore index the new file so Music/Eleven sees it; log what landed.
+echo "skip-suw: ls /data/media/0/Music:" >> $LOG; ls -l /data/media/0/Music >> $LOG 2>&1
+am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///storage/emulated/0/Music/test.wav >> $LOG 2>&1
+am broadcast -a android.intent.action.MEDIA_MOUNTED -d file:///storage/emulated/0 >> $LOG 2>&1
+content query --uri content://media/external/audio/media --projection _display_name >> $LOG 2>&1
 for p in org.lineageos.eleven com.android.music com.android.documentsui com.android.providers.downloads.ui; do pm grant $p android.permission.READ_EXTERNAL_STORAGE 2>>$LOG; done
+# sd136: try to bring up USB adb in gadget mode on the OTG port (debug channel).
+UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+echo "skip-suw: adb-try udc=[$UDC] gadget=[$(ls -d /config/usb_gadget/* 2>/dev/null | tr '\n' ' ')]" >> $LOG
+if [ -n "$UDC" ]; then
+    setprop sys.usb.controller "$UDC"
+    setprop sys.usb.configfs 1
+    setprop sys.usb.config adb
+    setprop persist.sys.usb.config adb
+    echo "skip-suw: adb props set controller=$UDC" >> $LOG
+    sleep 2
+    echo "skip-suw: usb props: $(getprop | grep -E 'sys.usb|persist.sys.usb' | tr '\n' ' ')" >> $LOG
+    echo "skip-suw: gadget funcs: $(ls -R /config/usb_gadget 2>/dev/null | tr '\n' ' ')" >> $LOG
+else
+    echo "skip-suw: no UDC (no gadget controller)" >> $LOG
+fi
 # sd116: record the gamepad input device ...
 cat /proc/bus/input/devices > /metadata/dsh/input-devices.txt 2>>$LOG
 echo "skip-suw: done" >> $LOG
