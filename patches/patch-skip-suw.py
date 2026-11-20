@@ -101,6 +101,17 @@ echo "skip-suw: screencap done rc=$?" >> $LOG
 # sd126: capture Android's view of the input devices (is the gamepad seen? what
 # sources/keys? is our uinput mouse present?) to diagnose the dead gamepad.
 dumpsys input > /metadata/dsh/dumpsys-input.txt 2>>$LOG
+# sd130: capture storage/FUSE failure evidence (MediaProvider ExternalStorageService ANR).
+{
+  echo "=== /dev/fuse ==="; ls -l /dev/fuse 2>&1
+  echo "=== /proc/filesystems (fuse) ==="; grep -i fuse /proc/filesystems 2>&1
+  echo "=== fuse/emulated/media mounts ==="; mount 2>&1 | grep -iE 'fuse|emulated|/data/media|/storage|pass_through'
+  echo "=== props ==="; for p in persist.sys.fuse ro.crypto.state ro.crypto.type ro.crypto.fuse_sdcard sys.isolated_storage_snapshot; do echo "$p=$(getprop $p)"; done
+  echo "=== dumpsys mount (volumes) ==="; dumpsys mount 2>&1 | head -120
+  echo "=== media provider ps ==="; ps -A 2>&1 | grep -iE 'media|fuse'
+  echo "=== /data/anr traces (media/fuse) ==="; ls -l /data/anr 2>&1
+  for f in /data/anr/anr_* /data/anr/traces.txt; do [ -f "$f" ] && { echo "--- $f"; grep -nE 'ExternalStorage|FuseDaemon|media.module|fuse|mount|WARNING|Reason' "$f" 2>&1 | head -30; }; done
+} > /metadata/dsh/storage-diag.txt 2>&1
 # sd116: record the gamepad input device ...
 cat /proc/bus/input/devices > /metadata/dsh/input-devices.txt 2>>$LOG
 echo "skip-suw: done" >> $LOG

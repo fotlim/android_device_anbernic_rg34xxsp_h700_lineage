@@ -333,7 +333,7 @@ static int harvest_metadata(void)
 				"dsh/public.libraries.txt", "dsh/probe.log",
 				"dsh/skip-suw.log", "dsh/input-devices.txt",
 				"dsh/screen.png", "dsh/joymouse.log",
-				"dsh/dumpsys-input.txt" };
+				"dsh/dumpsys-input.txt", "dsh/storage-diag.txt" };
 	char p[160], dst[160];
 	int i, j, copied = 0, mounted = 0;
 
